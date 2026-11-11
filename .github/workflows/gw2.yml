@@ -1,0 +1,390 @@
+# gw2 (jdrly/gw2-on-mac#40): my ntdll.so for Mach9 $MACH9_VERSION's engine, built on GitHub's runner
+# the way Mach9's CI built the engine's, and checked against the engine's file. Nothing here runs on
+# my Mac.
+#
+# build: one Wine tree configured as Mach9 configures its own (.github/gw2/ntdll.zsh), in the
+#   engine's paths, with Xcode $XCODE_VERSION, macOS $MACOSX_DEPLOYMENT_TARGET and llvm-mingw
+#   $LLVM_MINGW_VERSION. In it, one after the other:
+#   - $BASE_COMMIT, the commit the engine was built from, compared with the engine's ntdll.so by
+#     .github/gw2/ntdll-compare.py baseline: the same exports, imports, libraries and minos, and
+#     every function equal with the addresses masked
+#   - the same with one line of NtYieldExecution changed, which that compare has to fail and name
+#   - this commit, compared by ntdll-compare.py patched: every function of a source file the commit
+#     doesn't touch is the engine's, and the summary lists the changed ones
+#   Artifact ntdll-mach9-<commit>: ntdll.so, VERSION, COPYING.LIB, LICENSE, kept 7 days.
+# tests: tests/gw2/*.c built for Win64 x86_64 with llvm-mingw and run with tests/gw2/run.zsh under
+#   the engine from the release tarball, once with its own ntdll.so and once with mine.
+# lint: actionlint, and the Python script compiles.
+# publish: after the others are green, packs ntdll-mach9-<commit>.tar.xz and prints its sha256. For
+#   a push to gw2-on-mac it adds the archive to the pre-release mach9-builds, the one release this
+#   workflow makes, never marked latest, and keeps its 30 newest assets.
+name: GW2
+
+on:
+  pull_request:
+    branches: [gw2-on-mac]
+  push:
+    branches: [gw2-on-mac]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gw2-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # The PR's own commit, not GitHub's merge commit, so VERSION and the file's version string name it
+  COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+  # athei/wine's commit Mach9 0.3.1 was built from (wine-11.21-37-g53def89293), where gw2-on-mac starts
+  BASE_COMMIT: 53def89293adfe1a62c43ef46abe80a536e9ca49
+  # What Mach9's release run of v0.3.1 used (athei/mach9 run 42769825957): the macos-26 image with
+  # Xcode 26.6 (SDK 26.5), and its pins/redist.env and bin/lib/profile.sh
+  XCODE_VERSION: "26.6"
+  LLVM_MINGW_VERSION: "20261104"
+  LLVM_MINGW_SHA256: 66cbd5178c4a71b0d473e68ede172f8eb7d15d023e67f39201d0a69e21f6bf3c
+  MACH9_VERSION: v0.3.1
+  MACH9_SHA256: 90aff9a897ed0ff9aac44d0e06f0aecd3ee985afb38037f3f915451e51fa974e
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    name: Build ntdll.so
+    runs-on: macos-26
+    timeout-minutes: 60
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "26.4"
+      SRC: /Users/runner/work/mach9/mach9/src
+      BUILD: /Users/runner/work/mach9/mach9/build/wine
+      HOMEBREW_NO_AUTO_UPDATE: 1
+      HOMEBREW_NO_INSTALL_CLEANUP: 1
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.COMMIT }}
+          persist-credentials: false
+      # The source to build, with the whole history for git describe, without the file contents
+      # until a checkout needs them, as Mach9's CI checks it out
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.COMMIT }}
+          path: src
+          fetch-depth: 0
+          filter: blob:none
+          persist-credentials: false
+      - name: Select Xcode
+        run: |
+          app=/Applications/Xcode_$XCODE_VERSION.app
+          if [[ ! -d $app ]]; then
+            echo "::error::Xcode $XCODE_VERSION isn't on this runner's image ($ImageOS $ImageVersion), so the engine's ntdll.so can't be rebuilt. The image has: $(cd /Applications && echo Xcode_*.app)"
+            exit 1
+          fi
+          sudo xcode-select -s "$app"
+          {
+            echo "### Toolchain"
+            echo '```'
+            echo "image $ImageOS $ImageVersion"
+            xcodebuild -version | head -1
+            echo "macOS SDK $(xcrun -sdk macosx --show-sdk-version)"
+            clang --version | head -1
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Restore Mach9
+        id: mach9
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          key: mach9-tarball-${{ env.MACH9_VERSION }}
+          path: toolchains/mach9.tar.xz
+      - name: Download Mach9
+        if: steps.mach9.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p toolchains
+          curl -fsSL --retry 3 -o toolchains/mach9.tar.xz \
+            "https://github.com/athei/mach9/releases/download/$MACH9_VERSION/wine-$MACH9_VERSION-macos-arm64.tar.xz"
+      - name: Save Mach9
+        if: steps.mach9.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          key: mach9-tarball-${{ env.MACH9_VERSION }}
+          path: toolchains/mach9.tar.xz
+      - name: Unpack the engine's unix modules
+        run: |
+          echo "$MACH9_SHA256  toolchains/mach9.tar.xz" | shasum -a 256 -c
+          mkdir -p toolchains/engine
+          tar -xf toolchains/mach9.tar.xz -C toolchains/engine --strip-components 1 wine/lib/wine/aarch64-unix
+
+      - name: Restore llvm-mingw
+        id: mingw
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          key: llvm-mingw-${{ env.LLVM_MINGW_VERSION }}
+          path: toolchains/llvm-mingw
+      - name: Download llvm-mingw
+        if: steps.mingw.outputs.cache-hit != 'true'
+        run: |
+          f="llvm-mingw-$LLVM_MINGW_VERSION-ucrt-macos-universal.tar.xz"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/$f" "https://github.com/mstorsjo/llvm-mingw/releases/download/$LLVM_MINGW_VERSION/$f"
+          echo "$LLVM_MINGW_SHA256  $RUNNER_TEMP/$f" | shasum -a 256 -c
+          mkdir -p toolchains/llvm-mingw
+          tar -xf "$RUNNER_TEMP/$f" -C toolchains/llvm-mingw --strip-components 1
+      - name: Save llvm-mingw
+        if: steps.mingw.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          key: llvm-mingw-${{ env.LLVM_MINGW_VERSION }}
+          path: toolchains/llvm-mingw
+
+      # Mach9's pins/brew-formulae, as far as Wine's configure looks for them
+      - name: Install Homebrew's bison, freetype, gnutls and SDL
+        run: brew install bison freetype gnutls sdl2-compat pkgconf
+
+      - name: Configure
+        run: |
+          # appended, as Mach9 does: llvm-mingw's unprefixed clang mustn't replace Apple's
+          echo "$PWD/toolchains/llvm-mingw/bin" >>"$GITHUB_PATH"
+          export PATH="$PATH:$PWD/toolchains/llvm-mingw/bin"
+          mkdir -p "${SRC%/*}"
+          mv src "$SRC"
+          .github/gw2/ntdll.zsh prepare "$BASE_COMMIT"
+          .github/gw2/ntdll.zsh configure
+
+      - name: Build the engine's commit
+        id: base
+        run: |
+          .github/gw2/ntdll.zsh build
+          cp "$BUILD/dlls/ntdll/ntdll.so" "$RUNNER_TEMP/baseline-ntdll.so"
+      - name: Baseline compare
+        id: baseline
+        run: |
+          status=0
+          python3 -I .github/gw2/ntdll-compare.py baseline "$RUNNER_TEMP/baseline-ntdll.so" toolchains/engine/lib/wine/aarch64-unix \
+            >"$RUNNER_TEMP/baseline.md" || status=$?
+          tee -a "$GITHUB_STEP_SUMMARY" <"$RUNNER_TEMP/baseline.md"
+          exit "$status"
+      # what differs, for the first functions the compare names
+      - name: Disassemble what differs
+        if: failure() && steps.baseline.outcome == 'failure'
+        run: |
+          engine=toolchains/engine/lib/wine/aarch64-unix/ntdll.so
+          # shellcheck disable=SC2016 # the backticks are the report's
+          sed -n 's/^  - `[a-z0-9_]*\.c: \([^ `]*\)`$/\1/p' "$RUNNER_TEMP/baseline.md" | head -5 | while read -r f; do
+            echo "== $f (< the engine's, > mine)"
+            diff <(xcrun objdump -d --no-show-raw-insn --no-leading-addr --disassemble-symbols="_$f" "$engine" | tail -n +5) \
+              <(xcrun objdump -d --no-show-raw-insn --no-leading-addr --disassemble-symbols="_$f" "$RUNNER_TEMP/baseline-ntdll.so" | tail -n +5) || true
+          done
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: failure() && steps.baseline.outcome == 'failure'
+        with:
+          name: baseline-ntdll-${{ env.COMMIT }}
+          path: ${{ runner.temp }}/baseline-ntdll.so
+          retention-days: 7
+
+      # One line of NtYieldExecution changed: a second sched_yield call, which also moves every
+      # function the linker puts after it. The compare has to name NtYieldExecution, and nothing
+      # outside sync.c, where NtDelayExecution may have it inlined.
+      - name: The baseline compare fails on a broken build
+        if: ${{ !cancelled() && steps.base.outcome == 'success' }}
+        run: |
+          f=dlls/ntdll/unix/sync.c
+          sed -i '' '/^NTSTATUS WINAPI NtYieldExecution/,/^}/s/^    sched_yield();$/    sched_yield(); sched_yield();/' "$SRC/$f"
+          [[ $(git -C "$SRC" diff --numstat) == $'1\t1\t'"$f" ]]
+          .github/gw2/ntdll.zsh build
+          status=0
+          python3 -I .github/gw2/ntdll-compare.py baseline "$BUILD/dlls/ntdll/ntdll.so" toolchains/engine/lib/wine/aarch64-unix \
+            >"$RUNNER_TEMP/broken.md" || status=$?
+          git -C "$SRC" checkout -- "$f"
+          cat "$RUNNER_TEMP/broken.md"
+          # shellcheck disable=SC2016 # the backticks are the report's
+          [[ $status == 1 ]] && grep -qF '`sync.c: NtYieldExecution`' "$RUNNER_TEMP/broken.md" &&
+            ! grep '^  - `' "$RUNNER_TEMP/broken.md" | grep -v '^  - `sync\.c: '
+
+      - name: Build this commit
+        id: head
+        if: ${{ !cancelled() && steps.base.outcome == 'success' }}
+        run: |
+          .github/gw2/ntdll.zsh checkout "$COMMIT"
+          .github/gw2/ntdll.zsh build
+      - name: Compare
+        if: ${{ !cancelled() && steps.head.outcome == 'success' }}
+        run: |
+          touched=()
+          while IFS= read -r f; do touched+=("$f"); done < <(git -C "$SRC" diff --name-only "$BASE_COMMIT" "$COMMIT" -- dlls/ntdll)
+          status=0
+          python3 -I .github/gw2/ntdll-compare.py patched "$BUILD/dlls/ntdll/ntdll.so" toolchains/engine/lib/wine/aarch64-unix \
+            "${touched[@]}" >"$RUNNER_TEMP/compare.md" || status=$?
+          tee -a "$GITHUB_STEP_SUMMARY" <"$RUNNER_TEMP/compare.md"
+          exit "$status"
+
+      - name: Stage
+        run: |
+          mkdir dist
+          cp "$BUILD/dlls/ntdll/ntdll.so" "$SRC/COPYING.LIB" "$SRC/LICENSE" dist/
+          {
+            strings -a dist/ntdll.so | grep -oE 'wine-[0-9]+\.[0-9]+-[0-9]+-g[0-9a-f]+'
+            echo "commit: $COMMIT"
+            echo "base: $BASE_COMMIT ($(git -C "$SRC" describe "$BASE_COMMIT"))"
+            echo "engine: Mach9 $MACH9_VERSION (wine-$MACH9_VERSION-macos-arm64.tar.xz, sha256 $MACH9_SHA256)"
+            echo "toolchain: Xcode $(xcodebuild -version | sed -n 's/^Xcode //p') (macOS SDK $(xcrun -sdk macosx --show-sdk-version)), $(clang --version | head -1), llvm-mingw $LLVM_MINGW_VERSION, macOS $MACOSX_DEPLOYMENT_TARGET"
+            echo "ntdll.so: sha256 $(shasum -a 256 dist/ntdll.so | cut -d' ' -f1)"
+            echo
+            cat "$RUNNER_TEMP/baseline.md"
+            echo
+            cat "$RUNNER_TEMP/compare.md"
+          } >dist/VERSION
+          cat dist/VERSION
+          ls -l dist
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ntdll-mach9-${{ env.COMMIT }}
+          path: dist
+          retention-days: 7
+          if-no-files-found: error
+
+  tests:
+    name: Tests on the engine
+    needs: build
+    runs-on: macos-26
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.COMMIT }}
+          persist-credentials: false
+      - name: zsh syntax
+        run: for f in .github/gw2/*.zsh tests/gw2/*.zsh; do zsh -n "$f"; echo "ok $f"; done
+
+      - name: Restore Mach9
+        id: mach9
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          key: mach9-tarball-${{ env.MACH9_VERSION }}
+          path: toolchains/mach9.tar.xz
+      - name: Download Mach9
+        if: steps.mach9.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p toolchains
+          curl -fsSL --retry 3 -o toolchains/mach9.tar.xz \
+            "https://github.com/athei/mach9/releases/download/$MACH9_VERSION/wine-$MACH9_VERSION-macos-arm64.tar.xz"
+      - name: Restore llvm-mingw
+        id: mingw
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          key: llvm-mingw-${{ env.LLVM_MINGW_VERSION }}
+          path: toolchains/llvm-mingw
+      - name: Download llvm-mingw
+        if: steps.mingw.outputs.cache-hit != 'true'
+        run: |
+          f="llvm-mingw-$LLVM_MINGW_VERSION-ucrt-macos-universal.tar.xz"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/$f" "https://github.com/mstorsjo/llvm-mingw/releases/download/$LLVM_MINGW_VERSION/$f"
+          echo "$LLVM_MINGW_SHA256  $RUNNER_TEMP/$f" | shasum -a 256 -c
+          mkdir -p toolchains/llvm-mingw
+          tar -xf "$RUNNER_TEMP/$f" -C toolchains/llvm-mingw --strip-components 1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ntdll-mach9-${{ env.COMMIT }}
+          path: ${{ runner.temp }}/dist
+
+      # Two copies of the engine, the second with my ntdll.so; APFS clones, so the copy is free
+      - name: Unpack the engine
+        run: |
+          echo "$MACH9_SHA256  toolchains/mach9.tar.xz" | shasum -a 256 -c
+          mkdir "$RUNNER_TEMP/engine"
+          tar -xf toolchains/mach9.tar.xz -C "$RUNNER_TEMP/engine"
+          cp -Rc "$RUNNER_TEMP/engine" "$RUNNER_TEMP/mine"
+          install -m 755 "$RUNNER_TEMP/dist/ntdll.so" "$RUNNER_TEMP/mine/wine/lib/wine/aarch64-unix/ntdll.so"
+          xattr -drs com.apple.quarantine "$RUNNER_TEMP/engine" "$RUNNER_TEMP/mine"
+          shasum -a 256 "$RUNNER_TEMP"/{engine,mine}/wine/lib/wine/aarch64-unix/ntdll.so
+          "$RUNNER_TEMP/mine/wine/bin/wine" --version
+      - name: Build the test programs
+        run: |
+          mkdir "$RUNNER_TEMP/tests"
+          for c in tests/gw2/*.c; do
+            toolchains/llvm-mingw/bin/x86_64-w64-mingw32-clang -O2 -Wall -Werror -o "$RUNNER_TEMP/tests/$(basename "$c" .c).exe" "$c"
+          done
+          ls "$RUNNER_TEMP/tests"
+      - name: Run them with the engine's ntdll.so
+        run: tests/gw2/run.zsh "$RUNNER_TEMP/engine/wine" "$RUNNER_TEMP/prefix-engine" "$RUNNER_TEMP"/tests/*.exe
+      - name: Run them with mine
+        run: tests/gw2/run.zsh "$RUNNER_TEMP/mine/wine" "$RUNNER_TEMP/prefix-mine" "$RUNNER_TEMP"/tests/*.exe
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.COMMIT }}
+          persist-credentials: false
+      - name: actionlint
+        env:
+          ACTIONLINT_VERSION: 1.7.12
+          ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+        run: |
+          f="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/$f" "https://github.com/rhysd/actionlint/releases/download/v$ACTIONLINT_VERSION/$f"
+          echo "$ACTIONLINT_SHA256  $RUNNER_TEMP/$f" | sha256sum -c
+          tar -xzf "$RUNNER_TEMP/$f" -C "$RUNNER_TEMP" actionlint
+          "$RUNNER_TEMP/actionlint" -color .github/workflows/gw2.yml
+      - name: Python
+        run: python3 -I -m py_compile .github/gw2/ntdll-compare.py
+
+  publish:
+    name: Publish
+    needs: [build, tests, lint]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    # one upload at a time, so two pushes in a row don't race on the release
+    concurrency:
+      group: gw2-publish
+      cancel-in-progress: false
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RELEASE: mach9-builds
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ntdll-mach9-${{ env.COMMIT }}
+          path: dist
+      - name: Pack
+        run: |
+          name="ntdll-mach9-$COMMIT.tar.xz"
+          chmod 755 dist/ntdll.so
+          chmod 644 dist/VERSION dist/COPYING.LIB dist/LICENSE
+          tar --sort=name --owner=0 --group=0 --numeric-owner -C dist -cJf "$name" ntdll.so VERSION COPYING.LIB LICENSE
+          tar -tvJf "$name"
+          sha256sum "$name" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Upload to the pre-release ${{ env.RELEASE }}
+        if: github.event_name == 'push' && github.ref == 'refs/heads/gw2-on-mac'
+        run: |
+          name="ntdll-mach9-$COMMIT.tar.xz"
+          if ! gh release view "$RELEASE" >/dev/null 2>&1; then
+            gh release create "$RELEASE" --prerelease --latest=false --target "$COMMIT" --title "Mach9 builds of my ntdll.so" \
+              --notes "CI output for GW2 on Mac's arm64 line, not a release of Wine: my ntdll.so for Mach9 $MACH9_VERSION's engine, built and checked by .github/workflows/gw2.yml for each push to gw2-on-mac. One asset per commit, ntdll-mach9-<full sha>.tar.xz; the 30 newest stay."
+          fi
+          uploaded=0
+          if gh release view "$RELEASE" --json assets -q '.assets[].name' | grep -qxF "$name"; then
+            echo "$name is there already, and a published file is never replaced"
+          else
+            gh release upload "$RELEASE" "$name"
+            uploaded=1
+          fi
+          # the 30 newest assets stay
+          id=$(gh api "repos/$GH_REPO/releases/tags/$RELEASE" -q .id)
+          gh api --paginate "repos/$GH_REPO/releases/$id/assets?per_page=100" -q '.[] | [.created_at, .id, .name] | @tsv' |
+            grep -P '\tntdll-mach9-[0-9a-f]{40}\.tar\.xz$' | sort -r | tail -n +31 | while IFS=$'\t' read -r _ asset old; do
+              echo "deleting $old"
+              gh api -X DELETE "repos/$GH_REPO/releases/assets/$asset"
+            done
+          digest=$(gh api "repos/$GH_REPO/releases/tags/$RELEASE" -q ".assets[] | select(.name == \"$name\") | .digest")
+          echo "$RELEASE has $name, $digest" | tee -a "$GITHUB_STEP_SUMMARY"
+          [[ $digest == sha256:* ]]
+          (( !uploaded )) || [[ $digest == "sha256:$(sha256sum "$name" | cut -d' ' -f1)" ]]
+          latest=$(gh api "repos/$GH_REPO/releases/latest" -q .tag_name 2>/dev/null || true)
+          echo "releases/latest: ${latest:-none}"
+          [[ $latest != "$RELEASE" ]]
