@@ -28,7 +28,7 @@ prepare() {
   # of the release the source is based on from Wine's mirror the same way.
   version=$(sed -n 's/^Wine version //p' "$SRC/VERSION")
   git -C "$SRC" fetch --quiet --no-tags https://github.com/wine-mirror/wine \
-    "refs/tags/wine-$version:refs/tags/wine-$version"
+    "refs/tags/wine-${version}:refs/tags/wine-${version}"
   # The engine's string has 10 digits of the commit (wine-11.21-37-g53def89293). git picks the
   # length from the repository's object count, which isn't the same in my fork as in athei's.
   git -C "$SRC" config core.abbrev 10
