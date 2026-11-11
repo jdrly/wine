@@ -41,13 +41,15 @@ collect() {
   pids=() names=()
 }
 
-# mode <mode>: three runs of wakes.exe with counting and WINE_HEAT_WAKE=<mode>
+# mode <mode>: three runs of wakes.exe with counting and WINE_HEAT_WAKE=<mode>. The first keeps test
+# 13's minute of producing on one semaphore; the others give it 20 seconds.
 mode() {
   local m=$1 n
   for n in 1 2 3; do
     print -r -- "run $n"
     env WINE_HEAT_EXE=wakes.exe WINE_HEAT_COUNT=1 WINE_HEAT_WAKE=$m WINE_HEAT_LOG=$work/log-$m-$n \
-      GW2_TEST_SECONDS=300 "$run" "$mine" "$work/prefix-$m" "$exes/wakes.exe"
+      GW2_TEST_PRODUCER_SECONDS=$(( n == 1 ? 60 : 20 )) GW2_TEST_SECONDS=300 \
+      "$run" "$mine" "$work/prefix-$m" "$exes/wakes.exe"
   done
 }
 
@@ -56,7 +58,7 @@ quiet() {
   local name=$1 wine=$2 log=$3 left
   shift 3
   mkdir -p "$log"
-  env -u WINE_HEAT_COUNT -u WINE_HEAT_WAKE -u WINE_HEAT_EXE -u WINE_HEAT_LOG "$@" GW2_TEST_SECONDS=300 \
+  env -u WINE_HEAT_COUNT -u WINE_HEAT_WAKE -u WINE_HEAT_EXE -u WINE_HEAT_LOG "$@" GW2_TEST_PRODUCER_SECONDS=20 GW2_TEST_SECONDS=300 \
     "$run" "$wine" "$work/prefix-$name" "$exes"/*.exe
   left=("$log"/*(N) /tmp/heat-*.log(N))
   if (( ${#left} )); then
