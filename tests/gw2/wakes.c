@@ -149,12 +149,12 @@ static DWORD WINAPI slow_consumer( void *arg )
 static void test_producer(void)
 {
     LONG released = 0, full = 0;
-    DWORD t0, seconds = PRODUCER_SECONDS;
+    DWORD t0, n, seconds = PRODUCER_SECONDS;
     HANDLE consumer;
     char buf[16];
 
-    if (GetEnvironmentVariableA( "GW2_TEST_PRODUCER_SECONDS", buf, sizeof(buf) ) && atoi( buf ) > 0)
-        seconds = atoi( buf );
+    n = GetEnvironmentVariableA( "GW2_TEST_PRODUCER_SECONDS", buf, sizeof(buf) );
+    if (n && n < sizeof(buf) && atoi( buf ) > 0) seconds = atoi( buf );  /* n >= size: buf wasn't written */
 
     start( "13 producer" );
     fast_sem = private_semaphore( 1000 );
