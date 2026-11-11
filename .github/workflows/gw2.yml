@@ -10,8 +10,9 @@
 #     section, the load commands and the link edit data byte for byte
 #   - the same with one line of NtYieldExecution changed, which that compare has to fail and name
 #   - this commit, every object compiled again, compared by ntdll-compare.py patched: each object
-#     of a source file the commit doesn't touch is the base build's, by its compile command, code,
-#     data, relocations and symbols, and the summary lists the touched files' changed functions
+#     none of whose inputs (makedep's rule for it: its .c and every header it includes) the commit
+#     changes is the base build's, by its compile command, code, data, relocations and symbols, and
+#     the summary lists the other objects' changed functions and the changed inputs that touched them
 #   The per-function listing with masked addresses that follows a failed byte gate only names
 #   what differs; it is not the gate and never passes or fails a build.
 #   Artifact ntdll-mach9-<commit>: ntdll.so, VERSION, COPYING.LIB, LICENSE, kept 7 days.
@@ -173,6 +174,8 @@ jobs:
           # what the patched build's objects are compared with, with the times its link saw
           mkdir "$RUNNER_TEMP/base-objects"
           cp -p "$BUILD"/dlls/ntdll/unix/*.o "$RUNNER_TEMP/base-objects/"
+          # makedep's rules: each object's inputs, which decide whether a commit touched it
+          cp "$BUILD/Makefile" "$RUNNER_TEMP/base-Makefile"
           # config.h and the generated headers, which reach an object besides its source
           (cd "$BUILD" && find include -type f -print0 | sort -z | xargs -0 shasum -a 256) >"$RUNNER_TEMP/base-headers.txt"
       - name: Baseline compare
@@ -238,11 +241,12 @@ jobs:
         if: ${{ !cancelled() && steps.head.outcome == 'success' }}
         run: |
           touched=()
-          while IFS= read -r f; do touched+=("$f"); done < <(git -C "$SRC" diff --name-only "$BASE_COMMIT" "$COMMIT" -- dlls/ntdll)
+          while IFS= read -r f; do touched+=("$f"); done < <(git -C "$SRC" diff --name-only "$BASE_COMMIT" "$COMMIT")
           status=0
           python3 -I .github/gw2/ntdll-compare.py patched "$BUILD/dlls/ntdll/ntdll.so" toolchains/engine/lib/wine/aarch64-unix \
-            "$BUILD" "$RUNNER_TEMP/baseline-ntdll.so" "$RUNNER_TEMP/base-objects" \
-            "$RUNNER_TEMP/base-build.log" "$RUNNER_TEMP/head-build.log" "$(cat "$RUNNER_TEMP/checkout-time")" \
+            "$SRC" "$BUILD" "$RUNNER_TEMP/baseline-ntdll.so" "$RUNNER_TEMP/base-objects" \
+            "$RUNNER_TEMP/base-build.log" "$RUNNER_TEMP/head-build.log" "$RUNNER_TEMP/base-Makefile" "$BUILD/Makefile" \
+            "$(cat "$RUNNER_TEMP/checkout-time")" \
             "${touched[@]}" >"$RUNNER_TEMP/compare.md" || status=$?
           tee -a "$GITHUB_STEP_SUMMARY" <"$RUNNER_TEMP/compare.md"
           exit "$status"
