@@ -374,10 +374,9 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: write
-    # one upload at a time, so two pushes in a row don't race on the release
-    concurrency:
-      group: gw2-publish
-      cancel-in-progress: false
+    # Two pushes never upload at once: the workflow's concurrency group runs one push to gw2-on-mac
+    # at a time and never cancels it. A group of this job's own would let a pull request's pending
+    # job cancel a push's, as it did to run 43116636183's upload.
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
