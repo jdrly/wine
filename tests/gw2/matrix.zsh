@@ -45,7 +45,7 @@ collect() {
 mode() {
   local m=$1 n
   for n in 1 2 3; do
-    print "-- run $n"
+    print -r -- "run $n"
     env WINE_HEAT_EXE=wakes.exe WINE_HEAT_COUNT=1 WINE_HEAT_WAKE=$m WINE_HEAT_LOG=$work/log-$m-$n \
       GW2_TEST_SECONDS=300 "$run" "$mine" "$work/prefix-$m" "$exes/wakes.exe"
   done
