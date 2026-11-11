@@ -1,31 +1,32 @@
 #!/usr/bin/env python3
-# gw2 (jdrly/gw2-on-mac#40): compare my ntdll.so with the one in Mach9's engine. It reads both
-# files and runs nothing.
+# gw2 (jdrly/gw2-on-mac#40): compare my ntdll.so with the one in Mach9's engine. It reads files
+# and runs nothing.
 #
 #   ntdll-compare.py baseline <mine> <engine-unix-dir>
-#   ntdll-compare.py patched <mine> <engine-unix-dir> [<touched source>...]
+#   ntdll-compare.py patched <mine> <engine-unix-dir> <base ntdll.so> <base objects> <objects>
+#                            <base make log> <make log> <checkout time> [<touched source>...]
+#   ntdll-compare.py selftest <engine-unix-dir>
 #
 # <engine-unix-dir> is the engine's lib/wine/aarch64-unix. Prints a Markdown report and exits 1
-# when a check fails.
+# when a check fails. Both modes check the linked file's install name, rpaths, libraries, minos,
+# pipe2, the seven names compatdb.so looks up and every symbol the engine's win32u.so, winemac.so
+# and winemetal.so import from ntdll.so.
 #
-# baseline: my build of the engine's commit. Its exports, imports, libraries, install name,
-#   rpaths and minos equal the engine's, and every function's code is the engine's with the
-#   addresses masked. The report also says whether __TEXT,__text is the engine's byte for byte.
-# patched: my build of a later commit. Its exports are a superset of the engine's and hold the
-#   seven names compatdb.so looks up and every symbol the engine's win32u.so, winemac.so and
-#   winemetal.so import from ntdll.so; its libraries, install name, rpaths and minos are the
-#   engine's; nothing imports pipe2. Every function of an object whose source file isn't in
-#   <touched source> (paths as git prints them) is the engine's, and the report lists the changed,
-#   new and removed functions of the touched ones.
-#
-# A function is a name in the debug map (the N_FUN stabs the linker writes from the objects'
-# DWARF), keyed by its object file, since two files may each have a static function of one name.
-# Its size is the stab's too. Masking: an instruction that encodes an address outside its own
-# function (B, BL, ADR, ADRP and the ADD or load or store that completes an ADRP, LDR literal) is
-# compared by what it points to: a stub or GOT slot by the imported name, a C string by its text,
-# another symbol by name and offset, anything else by its section. Branches inside the function
-# stay as they are, since they don't move when the function does.
+# baseline: my build of the engine's commit. Its exports and imports are the engine's, and every
+#   section of every loaded segment, every load command and the link edit data are the engine's
+#   byte for byte (byte_gate: what it leaves out, and why, is in its report line). Where they
+#   aren't, the functions are compared with the addresses masked, only to list what differs.
+# patched: my build of a later commit, made in the same tree after the baseline with every object
+#   compiled again. Its exports are a superset of the engine's. Its objects are compared with the
+#   base build's (compare_objects): first that both sets are what their files linked (the link
+#   line in the make log, the debug map's paths and times) and that this build compiled each after
+#   the checkout; then every object of a source file git doesn't list as touched is the base's,
+#   compile command, code, data, relocations and symbols, debug sections aside; the functions of
+#   the touched ones are listed as changed, new or gone, through their bytes and relocations.
+#   With the baseline that makes the chain: the engine's file = my base build, byte for byte, and
+#   my base build's objects = this build's, except the touched files'.
 import bisect
+import contextlib
 import functools
 import hashlib
 import os
@@ -69,21 +70,25 @@ class MachO:
         if magic != 0xfeedfacf or cputype != 0x0100000c:
             raise SystemExit(f"{path}: not an arm64 Mach-O file")
         self.filetype = filetype
-        self.sections, self.dylibs, self.rpaths = [], [], []
+        self.sections, self.segments, self.commands, self.dylibs, self.rpaths = [], [], [], [], []
         self.install_name = self.minos = self.sdk = None
         symtab = dysymtab = None
         off = 32
         for _ in range(ncmds):
             cmd, size = struct.unpack_from("<II", d, off)
+            self.commands.append((cmd, off, size))
             if cmd == LC_SEGMENT_64:
-                nsects = struct.unpack_from("<I", d, off + 64)[0]
+                segname = d[off + 8:off + 24].rstrip(b"\0").decode()
+                vmaddr, vmsize, fileoff, filesize, maxprot, initprot, nsects = struct.unpack_from("<QQQQiiI", d, off + 24)
+                self.segments.append(dict(name=segname, vmaddr=vmaddr, vmsize=vmsize, fileoff=fileoff,
+                                          filesize=filesize, maxprot=maxprot, initprot=initprot))
                 for i in range(nsects):
                     s = off + 72 + i * 80
                     sect, seg = (d[s:s + 16].rstrip(b"\0").decode(), d[s + 16:s + 32].rstrip(b"\0").decode())
-                    addr, sz, foff = struct.unpack_from("<QQI", d, s + 32)
-                    flags, r1, r2 = struct.unpack_from("<III", d, s + 64)
-                    self.sections.append(dict(name=f"{seg},{sect}", addr=addr, size=sz, offset=foff,
-                                              type=flags & 0xff, reserved1=r1, reserved2=r2))
+                    addr, sz, foff, align, reloff, nreloc, flags, r1, r2 = struct.unpack_from("<QQIIIIIII", d, s + 32)
+                    self.sections.append(dict(name=f"{seg},{sect}", addr=addr, size=sz, offset=foff, align=align,
+                                              reloff=reloff, nreloc=nreloc, flags=flags, type=flags & 0xff,
+                                              reserved1=r1, reserved2=r2))
             elif cmd in DYLIB_CMDS or cmd == LC_ID_DYLIB:
                 name = cstr(d, off + struct.unpack_from("<I", d, off + 8)[0])
                 if cmd == LC_ID_DYLIB:
@@ -103,6 +108,7 @@ class MachO:
         if not symtab:
             raise SystemExit(f"{path}: no symbol table")
 
+        self.dysymtab = dysymtab
         symoff, nsyms, stroff, _ = symtab
         self.syms = []
         for i in range(nsyms):
@@ -518,6 +524,226 @@ def masked(m, resolve, addr, size):
     return out
 
 
+S_ZEROFILL_TYPES = (0x1, 0xc, 0x12)  # S_ZEROFILL, S_GB_ZEROFILL, S_THREAD_LOCAL_ZEROFILL
+LC_UUID, LC_CODE_SIGNATURE = 0x1b, 0x1d
+LINKEDIT_BLOBS = {0x80000034: "chained fixups", 0x80000033: "exports trie", 0x26: "function starts",
+                  0x29: "data in code"}
+
+
+def debug_map_free(m):
+    """the symbol table without what only says where and when it was built: an N_SO entry's
+    directory (Mach9's ccache made the engine's relative, build/wine/../../src) and an N_OSO
+    entry's object modification time. Everything else stays, the debug map's order included."""
+    out = []
+    for n, t, sect, desc, value in m.syms:
+        if t == N_SO and n.endswith("/"):
+            n = "<source directory>"
+        if t == N_OSO:
+            value = 0
+        out.append((n, t, sect, desc, value))
+    return out
+
+
+def command_bytes(m, cmd, off, size):
+    """a load command's bytes, with the fields that follow the string table's length or hash the
+    whole file zeroed"""
+    raw = bytearray(m.data[off:off + size])
+    if cmd in (LC_UUID, LC_CODE_SIGNATURE):
+        raw[8:] = bytes(len(raw) - 8)  # a hash of the whole file, and the signature's place
+    elif cmd == LC_SYMTAB:
+        raw[20:24] = bytes(4)  # strsize
+    elif cmd == LC_SEGMENT_64 and raw[8:24].rstrip(b"\0") == b"__LINKEDIT":
+        raw[32:40] = bytes(8)  # vmsize
+        raw[48:56] = bytes(8)  # filesize
+    return bytes(raw)
+
+
+def linkedit_blob(m, cmd):
+    """the data a link edit command (dataoff, datasize) points to"""
+    for c, o, _ in m.commands:
+        if c == cmd:
+            dataoff, size = struct.unpack_from("<II", m.data, o + 8)
+            return m.data[dataoff:dataoff + size]
+    return None
+
+
+def byte_gate(mine, theirs, r):
+    """the linked file against the engine's, section by section and through the link edit data;
+    the names of what differs"""
+    differ = []
+    if [s["name"] for s in mine.segments] != [s["name"] for s in theirs.segments]:
+        differ.append("the segments")
+    for sm, st in zip(mine.segments, theirs.segments):
+        if sm["name"] != "__LINKEDIT" and sm != st:
+            differ.append(f"segment {sm['name']}'s layout")
+    if [s["name"] for s in mine.sections] != [s["name"] for s in theirs.sections]:
+        differ.append("the sections")
+    zerofill = []
+    for sm, st in zip(mine.sections, theirs.sections):
+        layout = lambda s: (s["name"], s["addr"], s["size"], s["align"], s["flags"], s["reserved1"], s["reserved2"])
+        if layout(sm) != layout(st):
+            differ.append(f"{sm['name']}'s place or size")
+        elif sm["type"] in S_ZEROFILL_TYPES:
+            zerofill.append(sm["name"])
+        elif mine.bytes_of(sm["addr"], sm["size"]) != theirs.bytes_of(st["addr"], st["size"]):
+            differ.append(sm["name"])
+    cm = [(c, command_bytes(mine, c, o, n)) for c, o, n in mine.commands]
+    ct = [(c, command_bytes(theirs, c, o, n)) for c, o, n in theirs.commands]
+    if cm != ct:
+        differ.append("the load commands")
+    for cmd, what in LINKEDIT_BLOBS.items():
+        if linkedit_blob(mine, cmd) != linkedit_blob(theirs, cmd):
+            differ.append(f"the {what}")
+    if mine.indirect != theirs.indirect or mine.dysymtab != theirs.dysymtab:
+        differ.append("the indirect symbol table")
+    if debug_map_free(mine) != debug_map_free(theirs):
+        differ.append("the symbol table")
+    r.check(not differ,
+            f"every section of every loaded segment, the load commands and the link edit data are "
+            f"the engine's byte for byte. Zero-filled, so compared by place and size: {', '.join(zerofill)}. "
+            f"Left out: LC_UUID and the code signature (hashes of the whole file), the string table's "
+            f"length and __LINKEDIT's size, the symbol table's N_SO source directories and N_OSO times",
+            f"not byte for byte the engine's: {', '.join(differ)}")
+    return not differ
+
+
+# objects: the patched build against my build of the engine's commit, per object file
+
+def relocations(m, sec):
+    """a section's relocations as (offset, type, pc-relative, length, target): the target by symbol
+    name, or by section name for one within the file, or the addend of an ARM64_RELOC_ADDEND"""
+    out = []
+    for k in range(sec["nreloc"]):
+        address, info = struct.unpack_from("<iI", m.data, sec["reloff"] + 8 * k)
+        num, pcrel, length, ext, rtype = info & 0xffffff, info >> 24 & 1, info >> 25 & 3, info >> 27 & 1, info >> 28
+        if rtype == 10:
+            target = f"addend {sext(num, 24)}"
+        elif ext:
+            target = m.syms[num][0]
+        else:
+            target = m.sections[num - 1]["name"] if 0 < num <= len(m.sections) else f"section {num}"
+        out.append((address, rtype, pcrel, length, target))
+    return out
+
+
+def canonical(m):
+    """what of an object file reaches the linked file: every section outside __DWARF, with its
+    bytes and relocations, and the symbols that aren't debug entries"""
+    sections = []
+    for sec in m.sections:
+        if sec["name"].startswith("__DWARF,"):
+            continue
+        data = None if sec["type"] in S_ZEROFILL_TYPES else bytes(m.data[sec["offset"]:sec["offset"] + sec["size"]])
+        sections.append((sec["name"], sec["size"], sec["align"], sec["flags"], data, tuple(relocations(m, sec))))
+    names = [sec["name"] for sec in m.sections]
+    symbols = sorted((n, t, names[sect - 1] if sect else "", desc, value)
+                     for n, t, sect, desc, value in m.syms if not t & N_STAB)
+    return sections, symbols
+
+
+def object_functions(m):
+    """name -> (bytes, relocations relative to it) for each function of an object's __text"""
+    text = m.section("__TEXT,__text")
+    if not text:
+        return {}
+    index = m.sections.index(text) + 1
+    starts = sorted({(v, n) for n, t, sect, _, v in m.syms
+                     if not t & N_STAB and t & N_TYPE == N_SECT and sect == index and not n.startswith(("ltmp", "l_", "L"))})
+    relocs = relocations(m, text)
+    out = {}
+    for k, (start, name) in enumerate(starts):
+        end = starts[k + 1][0] if k + 1 < len(starts) else text["size"]
+        out[name] = (bytes(m.data[text["offset"] + start:text["offset"] + end]),
+                     tuple((a - start,) + rest for a, *rest in relocs if start <= a < end))
+    return out
+
+
+def build_commands(log):
+    """from a make log: object -> its compile command, and the objects of ntdll.so's link"""
+    lines, cur = [], ""
+    for line in open(log, errors="replace"):
+        line = line.rstrip("\n")
+        if line.endswith("\\"):
+            cur += line[:-1] + " "
+            continue
+        lines.append(cur + line)
+        cur = ""
+    compiles, link = {}, None
+    for line in lines:
+        words = line.split()
+        if "-c" in words and "-o" in words:
+            target = words[words.index("-o") + 1]
+            if target.startswith("dlls/ntdll/unix/") and target.endswith(".o"):
+                compiles[os.path.basename(target)] = line.strip()
+        elif "-o" in words and words[words.index("-o") + 1] == "dlls/ntdll/ntdll.so":
+            link = sorted(os.path.basename(w) for w in words if w.endswith(".o"))
+    return compiles, link
+
+
+def linked_objects(m):
+    """the debug map's objects: basename -> modification time"""
+    return {os.path.basename(n): value for n, t, _, _, value in m.syms if t == N_OSO}
+
+
+def compare_objects(r, base_file, base_dir, head_file, head_dir, base_log, head_log, since, touched):
+    """the patched build's objects against my base build's: proof that both sets are what their
+    files linked, then every untouched object equal through its relocations, and the functions of
+    the touched ones listed"""
+    base_objs = {f: os.path.join(base_dir, f) for f in os.listdir(base_dir) if f.endswith(".o")}
+    head_objs = {f: os.path.join(head_dir, f) for f in os.listdir(head_dir) if f.endswith(".o")}
+    base_cc, base_link = build_commands(base_log)
+    head_cc, head_link = build_commands(head_log)
+    for label, objs, file, link, cc in (("my base build", base_objs, base_file, base_link, base_cc),
+                                       ("this build", head_objs, head_file, head_link, head_cc)):
+        linked = linked_objects(MachO(file))
+        stale = [f for f, p in objs.items() if int(os.stat(p).st_mtime) != linked.get(f)]
+        r.check(link is not None and set(link) == set(objs) == set(linked) and not stale,
+                f"{label}: the {len(objs)} objects compared are the ones its link line names and its debug "
+                f"map lists, with the times the link saw",
+                f"{label}: the objects compared ({len(objs)}), the link line's ({len(link or [])}) and the "
+                f"debug map's ({len(linked)}) aren't the same files{'; changed since the link: ' + listing(stale) if stale else ''}")
+        missing = [f for f in objs if f not in cc]
+        r.check(not missing, f"{label}: the make log has the compile command of every object",
+                f"{label}: no compile command in the make log for {listing(missing)}")
+    old = [f for f, p in head_objs.items() if os.stat(p).st_mtime < since]
+    r.check(not old, "this build compiled every object after the checkout",
+            f"objects older than the checkout, so not rebuilt: {listing(old)}")
+
+    touched_objs = {os.path.splitext(os.path.basename(p))[0] + ".o" for p in touched
+                    if p.startswith("dlls/ntdll/unix/") and p.endswith(".c")}
+    touched_objs.add("version.o")  # git describe's text, generated for each commit
+    bad, changed, new, removed = [], [], [], []
+    for f in sorted(set(base_objs) | set(head_objs)):
+        if f not in head_objs:
+            (removed if f in touched_objs else bad).append(f"{f} (gone)")
+            continue
+        if f not in base_objs:
+            (new if f in touched_objs else bad).append(f"{f} (new)")
+            continue
+        if f not in touched_objs:
+            if base_cc.get(f) != head_cc.get(f):
+                bad.append(f"{f}: compiled with another command")
+            elif canonical(MachO(base_objs[f])) != canonical(MachO(head_objs[f])):
+                bad.append(f"{f}: code, data, relocations or symbols")
+            continue
+        fb, fh = object_functions(MachO(base_objs[f])), object_functions(MachO(head_objs[f]))
+        label = f[:-2] + ".c"
+        for name in sorted(set(fb) | set(fh)):
+            short = f"{label}: {name[1:] if name.startswith('_') else name}"
+            if name not in fb:
+                new.append(short + " (new)")
+            elif name not in fh:
+                removed.append(short + " (gone)")
+            elif fb[name] != fh[name]:
+                changed.append(short)
+    r.check(not bad, "every object of an untouched source file is my base build's: its compile command, "
+                     "and its code, data, relocations and symbols",
+            f"{len(bad)} objects of untouched source files differ from my base build's:")
+    for b in bad:
+        print(f"  - `{b}`")
+    return changed, new, removed
+
+
 class Report:
     def __init__(self):
         self.failed = 0
@@ -628,91 +854,80 @@ def fixtures():
     return failed
 
 
+def fake_object(code, relocs, data, dwarf=b"", syms=(("_f", 0x0f, 1, 0, 0),)):
+    """a minimal object file for canonical(): __text with relocations, __data, and __debug_info"""
+    m = MachO.__new__(MachO)
+    reloff = len(code) + len(data) + len(dwarf)
+    m.data = code + data + dwarf + b"".join(struct.pack("<iI", a, info) for a, info in relocs)
+    m.sections = [dict(name="__TEXT,__text", offset=0, size=len(code), align=2, flags=0x80000400, type=0,
+                       reloff=reloff, nreloc=len(relocs), reserved1=0, reserved2=0),
+                  dict(name="__DATA,__data", offset=len(code), size=len(data), align=3, flags=0, type=0,
+                       reloff=0, nreloc=0, reserved1=0, reserved2=0),
+                  dict(name="__DWARF,__debug_info", offset=len(code) + len(data), size=len(dwarf), align=0,
+                       flags=0x02000000, type=0, reloff=0, nreloc=0, reserved1=0, reserved2=0)]
+    m.syms = list(syms) + [("_a", 0x01, 0, 0, 0), ("_b", 0x01, 0, 0, 0)]
+    return m
+
+
 def selftest(engine_dir):
-    """Change one address-bearing instruction at a time in the engine's file, in memory, and
-    require that the function's masked code changes: every ADRP's page, the offset of every ADD,
-    load or store that completes one, every branch out of its function, every ADR and literal
-    load, and every ADRP and ADD pair that points into __TEXT,__const pointed at the pieces next
-    to its own and at others that start with the same bytes. Then the hand-made fixtures."""
-    m = MachO(os.path.join(engine_dir, "ntdll.so"))
-    m.data = bytearray(m.data)
-    resolve, text, const = m.resolver(), m.section("__TEXT,__text"), m.section("__TEXT,__const")
-    bounds = m.const_bounds[:-1]
-    by_prefix = {}
-    for b in bounds:
-        by_prefix.setdefault(bytes(m.bytes_of(b, min(16, m.const_end(b) - b))), []).append(b)
-    tried, missed = {}, []
+    """The gates against changes they must see, and the masking fixtures."""
+    failed = []
 
-    def mutate(key, addr, size, want, changes, kind, where):
-        for o, new in changes:
-            struct.pack_into("<I", m.data, o, new)
-        if masked(m, resolve, addr, size) == want:
-            missed.append(f"{key[0]}.c: {key[1]} +{where:#x} ({kind})")
-        tried[kind] = tried.get(kind, 0) + 1
+    # the byte gate: one byte of initialised data, then only the debug map's directories and times
+    theirs = MachO(os.path.join(engine_dir, "ntdll.so"))
+    mine = MachO(os.path.join(engine_dir, "ntdll.so"))
+    sec = mine.section("__DATA_CONST,__const")
+    data = bytearray(mine.data)
+    data[sec["offset"] + 8] ^= 1
+    mine.data = bytes(data)
+    quiet = Report()
+    with open(os.devnull, "w") as null, contextlib.redirect_stdout(null):
+        if byte_gate(mine, theirs, quiet):
+            failed.append("byte gate: a byte of __DATA_CONST,__const")
+        mine.data = theirs.data
+        mine.syms = [(("/elsewhere/" if t == N_SO and n.endswith("/") else n), t, sect, desc,
+                      value + 1 if t == N_OSO else value) for n, t, sect, desc, value in theirs.syms]
+        if not byte_gate(mine, theirs, quiet):
+            failed.append("byte gate: the debug map's source directories and object times only")
+        mine.syms = [(n + "x" if t == N_OSO else n, t, sect, desc, value) for n, t, sect, desc, value in theirs.syms]
+        if byte_gate(mine, theirs, quiet):
+            failed.append("byte gate: an object's path in the debug map")
 
-    for key, (addr, size) in sorted(m.functions().items(), key=lambda kv: kv[1]):
-        want = masked(m, resolve, addr, size)
-        base = text["offset"] + addr - text["addr"]
-        for i in range(0, size - size % 4, 4):
-            o = base + i
-            w = struct.unpack_from("<I", m.data, o)[0]
-            if w & 0x9f000000 == 0x90000000:
-                kind, new = "adrp", w ^ (1 << 29)  # the page moves by one
-            elif w & 0x9f000000 == 0x10000000:
-                kind, new = "adr", w ^ (1 << 29)
-            elif w & 0x7c000000 == 0x14000000:
-                t = addr + i + sext(w & 0x3ffffff, 26) * 4
-                if addr <= t < addr + size:
-                    continue
-                kind, new = "bl" if w & 0x80000000 else "b", w ^ 1
-            elif w & 0x3b000000 == 0x18000000:
-                kind, new = "literal", w ^ (1 << 5)
-            elif isinstance(want[i // 4], tuple) and want[i // 4][0] != "adrp":  # completes an ADRP
-                kind, new = "imm12", w ^ (1 << 10)
-            else:
-                continue
-            mutate(key, addr, size, want, [(o, new)], kind, i)
-            struct.pack_into("<I", m.data, o, w)
+    # the object compare: a relocation's target, an addend, a byte of data; not a debug section
+    code = struct.pack("<2I", 0x90000008, 0x91000108)  # adrp x8, _a@PAGE; add x8, x8, _a@PAGEOFF
+    page, off = 3 << 28 | 1 << 27 | 2 << 25 | 1 << 24, 4 << 28 | 1 << 27 | 2 << 25  # ARM64_RELOC_PAGE21, PAGEOFF12
+    base = canonical(fake_object(code, [(0, page | 1), (4, off | 1)], b"\x01\x02"))  # symbol 1 is _a
+    for what, obj in (("a relocation's target", fake_object(code, [(0, page | 2), (4, off | 2)], b"\x01\x02")),
+                      ("an addend", fake_object(code, [(0, 10 << 28 | 8), (0, page | 1), (4, off | 1)], b"\x01\x02")),
+                      ("a byte of data", fake_object(code, [(0, page | 1), (4, off | 1)], b"\x01\x03"))):
+        if canonical(obj) == base:
+            failed.append(f"object compare: {what}")
+    if canonical(fake_object(code, [(0, page | 1), (4, off | 1)], b"\x01\x02", b"\x07")) != base:
+        failed.append("object compare: the debug information only")
 
-            # an ADRP and the ADD after it, into __TEXT,__const: another piece of it instead
-            nxt = struct.unpack_from("<I", m.data, o + 4)[0] if i + 4 < size else 0
-            if kind != "adrp" or nxt & 0xffc00000 != 0x91000000 or (nxt >> 5) & 31 != w & 31:
-                continue
-            pc = addr + i
-            t = (pc & ~0xfff) + (sext(((w >> 5) & 0x7ffff) << 2 | (w >> 29) & 3, 21) << 12) + ((nxt >> 10) & 0xfff)
-            if not const or not const["addr"] <= t < const["addr"] + const["size"]:
-                continue
-            j = bisect.bisect_left(bounds, t)
-            others = {bounds[k] for k in (j - 1, j + 1) if 0 <= k < len(bounds)}
-            others |= set(by_prefix.get(bytes(m.bytes_of(t, min(16, m.const_end(t) - t))), [])[:4])
-            for alt in sorted(others - {t}):
-                if resolve(alt) == resolve(t) and resolve(t).startswith("const:"):
-                    continue  # the same bytes, as long: no change the code could see
-                pages = ((alt & ~0xfff) - (pc & ~0xfff)) >> 12
-                new_adrp = (w & 0x9f00001f) | (pages & 3) << 29 | (pages >> 2 & 0x7ffff) << 5
-                new_add = (nxt & ~(0xfff << 10)) | (alt & 0xfff) << 10
-                mutate(key, addr, size, want, [(o, new_adrp), (o + 4, new_add)], "const", i)
-                struct.pack_into("<I", m.data, o, w)
-                struct.pack_into("<I", m.data, o + 4, nxt)
-    print("selftest: changed " + ", ".join(f"{n} {k}" for k, n in sorted(tried.items())) + " one at a time")
-    for item in missed:
-        print(f"- **FAIL**: hidden by the masking: {item}")
-    failed = fixtures()
+    for item in fixtures():
+        failed.append(f"masking fixture: {item}")
     for item in failed:
-        print(f"- **FAIL**: hidden by the masking: fixture: {item}")
-    print(f"selftest: {len(missed) + len(failed)} changes hidden" if missed or failed else
-          "selftest: every change showed, and every fixture")
-    return 1 if missed or failed else 0
+        print(f"- **FAIL**: {item}")
+    print(f"selftest: {len(failed)} failed" if failed else
+          "selftest: the byte gate and the object compare see every change they must, and the masking fixtures hold")
+    return 1 if failed else 0
 
 
 def main():
-    if len(sys.argv) == 3 and sys.argv[1] == "selftest":
-        return selftest(sys.argv[2])
-    if len(sys.argv) < 4 or sys.argv[1] not in ("baseline", "patched"):
-        print(__doc__ or "usage: ntdll-compare.py baseline|patched <mine> <engine-unix-dir> [<touched source>...]",
-              file=sys.stderr)
+    args = sys.argv[1:]
+    if len(args) == 2 and args[0] == "selftest":
+        return selftest(args[1])
+    if not ((len(args) == 3 and args[0] == "baseline") or (len(args) >= 9 and args[0] == "patched")):
+        print("usage: ntdll-compare.py baseline <mine> <engine-unix-dir>\n"
+              "       ntdll-compare.py patched <mine> <engine-unix-dir> <base ntdll.so> <base objects> "
+              "<objects> <base make log> <make log> <checkout time> [<touched source>...]\n"
+              "       ntdll-compare.py selftest <engine-unix-dir>", file=sys.stderr)
         return 2
-    mode, mine_path, engine_dir, touched = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4:]
+    mode, mine_path, engine_dir = args[:3]
+    if mode == "patched":
+        base_file, base_objs, head_objs, base_log, head_log, since = args[3:9]
+        since, touched = float(since), args[9:]
     mine, theirs = MachO(mine_path), MachO(os.path.join(engine_dir, "ntdll.so"))
     r = Report()
 
@@ -756,43 +971,12 @@ def main():
         text = f"imports differ (mine / the engine's): {listing(diff)}"
         r.fail(text) if mode == "baseline" else r.ok(text)
 
-    text_mine, text_theirs = mine.section("__TEXT,__text"), theirs.section("__TEXT,__text")
-    same_bytes = (text_mine["addr"] == text_theirs["addr"]
-                  and mine.bytes_of(text_mine["addr"], text_mine["size"])
-                  == theirs.bytes_of(text_theirs["addr"], text_theirs["size"]))
-    print(f"- __TEXT,__text: mine {text_mine['size']:#x} bytes at {text_mine['addr']:#x}, the engine's "
-          f"{text_theirs['size']:#x} at {text_theirs['addr']:#x}: "
-          + ("**byte for byte the engine's**" if same_bytes else "not byte for byte the engine's"))
-
-    fm, ft = mine.functions(), theirs.functions()
-    if not fm or not ft:
-        r.fail(f"no debug map to read functions from (mine: {len(fm)}, the engine's: {len(ft)})")
-        return 1
-    rm, rt = mine.resolver(), theirs.resolver()
-    touched_objs = {os.path.splitext(os.path.basename(p))[0] for p in touched
-                    if p.startswith("dlls/ntdll/unix/") and p.endswith(".c")}
-    changed, new, removed, bad, equal = [], [], [], [], 0
-    for key in sorted(set(fm) | set(ft), key=lambda k: (k[0] or "", k[1])):
-        obj, name = key
-        label = f"{obj}.c: {name[1:] if name.startswith('_') else name}"
-        if key not in ft:
-            (new if obj in touched_objs else bad).append(label + " (new)")
-        elif key not in fm:
-            (removed if obj in touched_objs else bad).append(label + " (gone)")
-        elif masked(mine, rm, *fm[key]) != masked(theirs, rt, *ft[key]):
-            (changed if obj in touched_objs else bad).append(label)
-        else:
-            equal += 1
-    print(f"- functions: mine {len(fm)}, the engine's {len(ft)}, {equal} equal with addresses masked")
     if mode == "baseline":
-        r.check(not bad and not changed and not new and not removed,
-                "0 functions differ from the engine's", f"{len(bad)} functions differ from the engine's:")
+        if not byte_gate(mine, theirs, r):
+            diagnose(mine, theirs)
     else:
-        r.check(not bad, "every function of an untouched source file is the engine's",
-                f"{len(bad)} functions of untouched source files differ from the engine's:")
-    for b in bad:
-        print(f"  - `{b}`")
-    if mode == "patched":
+        changed, new, removed = compare_objects(r, base_file, base_objs, mine_path, head_objs, base_log,
+                                                head_log, since, touched)
         print(f"\n#### Changed by this branch ({', '.join(sorted(touched)) or 'no source file of ntdll.so'})\n")
         for title, items in (("changed", changed), ("new", new), ("removed", removed)):
             print(f"- {title}: {len(items)}")
@@ -801,6 +985,25 @@ def main():
 
     print("\n" + ("all checks passed" if not r.failed else f"{r.failed} checks failed"))
     return 1 if r.failed else 0
+
+
+def diagnose(mine, theirs):
+    """where the baseline isn't the engine's: each function compared with the addresses masked,
+    to name what differs. Only a listing: the byte gate has already failed."""
+    tm, tt = mine.section("__TEXT,__text"), theirs.section("__TEXT,__text")
+    if tm["addr"] == tt["addr"] and mine.bytes_of(tm["addr"], tm["size"]) == theirs.bytes_of(tt["addr"], tt["size"]):
+        print("- __TEXT,__text is the engine's byte for byte")
+        return
+    fm, ft = mine.functions(), theirs.functions()
+    rm, rt = mine.resolver(), theirs.resolver()
+    differ = [f"{obj}.c: {name[1:] if name.startswith('_') else name}"
+              + ("" if (obj, name) in fm and (obj, name) in ft else " (only in one)")
+              for obj, name in sorted(set(fm) | set(ft), key=lambda k: (k[0] or "", k[1]))
+              if (obj, name) not in fm or (obj, name) not in ft
+              or masked(mine, rm, *fm[(obj, name)]) != masked(theirs, rt, *ft[(obj, name)])]
+    print(f"- __TEXT,__text differs. With the addresses masked, {len(differ)} of {len(ft)} functions differ:")
+    for d in differ:
+        print(f"  - `{d}`")
 
 
 if __name__ == "__main__":

@@ -126,7 +126,7 @@ jobs:
           mkdir -p toolchains/engine
           tar -xf toolchains/mach9.tar.xz -C toolchains/engine --strip-components 1 wine/lib/wine/aarch64-unix
       # every address-bearing instruction of the engine's file changed in turn has to show
-      - name: The compare's masking hides no change
+      - name: The compare's self-test
         run: python3 -I .github/gw2/ntdll-compare.py selftest toolchains/engine/lib/wine/aarch64-unix
 
       - name: Restore llvm-mingw
@@ -164,8 +164,13 @@ jobs:
       - name: Build the engine's commit
         id: base
         run: |
-          .github/gw2/ntdll.zsh build
-          cp "$BUILD/dlls/ntdll/ntdll.so" "$RUNNER_TEMP/baseline-ntdll.so"
+          .github/gw2/ntdll.zsh build | tee "$RUNNER_TEMP/base-build.log"
+          cp -p "$BUILD/dlls/ntdll/ntdll.so" "$RUNNER_TEMP/baseline-ntdll.so"
+          # what the patched build's objects are compared with, with the times its link saw
+          mkdir "$RUNNER_TEMP/base-objects"
+          cp -p "$BUILD"/dlls/ntdll/unix/*.o "$RUNNER_TEMP/base-objects/"
+          # config.h and the generated headers, which reach an object besides its source
+          (cd "$BUILD" && find include -type f -print0 | sort -z | xargs -0 shasum -a 256) >"$RUNNER_TEMP/base-headers.txt"
       - name: Baseline compare
         id: baseline
         run: |
@@ -193,8 +198,8 @@ jobs:
           retention-days: 7
 
       # One line of NtYieldExecution changed: a second sched_yield call, which also moves every
-      # function the linker puts after it. The compare has to name NtYieldExecution, and nothing
-      # outside sync.c, where NtDelayExecution may have it inlined.
+      # function the linker puts after it. The byte gate has to fail, and its listing has to name
+      # NtYieldExecution and nothing outside sync.c, where NtDelayExecution may have it inlined.
       - name: The baseline compare fails on a broken build
         if: ${{ !cancelled() && steps.base.outcome == 'success' }}
         run: |
@@ -217,7 +222,13 @@ jobs:
         if: ${{ !cancelled() && steps.base.outcome == 'success' }}
         run: |
           .github/gw2/ntdll.zsh checkout "$COMMIT"
-          .github/gw2/ntdll.zsh build
+          # every object compiled again, so none compared is one the base build left behind
+          date +%s >"$RUNNER_TEMP/checkout-time"
+          rm -f "$BUILD"/dlls/ntdll/unix/*.o
+          .github/gw2/ntdll.zsh build | tee "$RUNNER_TEMP/head-build.log"
+          (cd "$BUILD" && find include -type f -print0 | sort -z | xargs -0 shasum -a 256) >"$RUNNER_TEMP/head-headers.txt"
+          diff "$RUNNER_TEMP/base-headers.txt" "$RUNNER_TEMP/head-headers.txt" ||
+            { echo "::error::config.h or a generated header isn't the base build's"; exit 1; }
       - name: Compare
         id: compare
         if: ${{ !cancelled() && steps.head.outcome == 'success' }}
@@ -226,6 +237,8 @@ jobs:
           while IFS= read -r f; do touched+=("$f"); done < <(git -C "$SRC" diff --name-only "$BASE_COMMIT" "$COMMIT" -- dlls/ntdll)
           status=0
           python3 -I .github/gw2/ntdll-compare.py patched "$BUILD/dlls/ntdll/ntdll.so" toolchains/engine/lib/wine/aarch64-unix \
+            "$RUNNER_TEMP/baseline-ntdll.so" "$RUNNER_TEMP/base-objects" "$BUILD/dlls/ntdll/unix" \
+            "$RUNNER_TEMP/base-build.log" "$RUNNER_TEMP/head-build.log" "$(cat "$RUNNER_TEMP/checkout-time")" \
             "${touched[@]}" >"$RUNNER_TEMP/compare.md" || status=$?
           tee -a "$GITHUB_STEP_SUMMARY" <"$RUNNER_TEMP/compare.md"
           exit "$status"
