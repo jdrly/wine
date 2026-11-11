@@ -186,6 +186,12 @@ class MachO:
                         chars = struct.unpack_from("<Q", self.data, s["offset"] + entry - s["addr"] + 16)[0]
                         return f"cfstr:{name(chars & ((1 << 36) - 1))}+{addr - entry}"
                     i = bisect.bisect_right(addrs, addr) - 1
+                    if s["name"] == "__TEXT,__const" and (i < 0 or addrs[i] != addr):
+                        # no symbol starts here: a jump table or other constant the linker
+                        # dropped the label of. The symbol before it may be another file's,
+                        # whose data can change size, so it stands for its first 32 bytes.
+                        # A jump table's entries are relative to its own function.
+                        return f"const:{self.data[o:o + min(32, s['addr'] + s['size'] - addr)].hex()}"
                     if i >= 0 and addrs[i] >= s["addr"]:
                         return f"{defined[i][1]}+{addr - addrs[i]}"
                     # nothing to name it by: the offset in its section, which moves when that

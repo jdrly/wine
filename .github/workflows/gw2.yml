@@ -218,6 +218,7 @@ jobs:
           .github/gw2/ntdll.zsh checkout "$COMMIT"
           .github/gw2/ntdll.zsh build
       - name: Compare
+        id: compare
         if: ${{ !cancelled() && steps.head.outcome == 'success' }}
         run: |
           touched=()
@@ -227,6 +228,12 @@ jobs:
             "${touched[@]}" >"$RUNNER_TEMP/compare.md" || status=$?
           tee -a "$GITHUB_STEP_SUMMARY" <"$RUNNER_TEMP/compare.md"
           exit "$status"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: failure() && steps.compare.outcome == 'failure'
+        with:
+          name: compared-ntdll-${{ env.COMMIT }}
+          path: ${{ env.BUILD }}/dlls/ntdll/ntdll.so
+          retention-days: 7
 
       - name: Stage
         run: |
