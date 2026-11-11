@@ -15,8 +15,9 @@
 #   The per-function listing with masked addresses that follows a failed byte gate only names
 #   what differs; it is not the gate and never passes or fails a build.
 #   Artifact ntdll-mach9-<commit>: ntdll.so, VERSION, COPYING.LIB, LICENSE, kept 7 days.
-# tests: tests/gw2/*.c built for Win64 x86_64 with llvm-mingw and run with tests/gw2/run.zsh under
-#   the engine from the release tarball, once with its own ntdll.so and once with mine.
+# tests: tests/gw2/*.c built for Win64 x86_64 with llvm-mingw and run by tests/gw2/matrix.zsh under
+#   the engine from the release tarball: with its own ntdll.so, and with mine in each
+#   WINE_HEAT_WAKE mode, with no WINE_HEAT_* variable and with them set for another program.
 # lint: actionlint, and the Python script compiles.
 # publish: after the others are green, packs ntdll-mach9-<commit>.tar.xz and prints its sha256. For
 #   a push to gw2-on-mac it adds the archive to the pre-release mach9-builds, the one release this
@@ -339,10 +340,8 @@ jobs:
             toolchains/llvm-mingw/bin/x86_64-w64-mingw32-clang -O2 -Wall -Werror -o "$RUNNER_TEMP/tests/$(basename "$c" .c).exe" "$c"
           done
           ls "$RUNNER_TEMP/tests"
-      - name: Run them with the engine's ntdll.so
-        run: tests/gw2/run.zsh "$RUNNER_TEMP/engine/wine" "$RUNNER_TEMP/prefix-engine" "$RUNNER_TEMP"/tests/*.exe
-      - name: Run them with mine
-        run: tests/gw2/run.zsh "$RUNNER_TEMP/mine/wine" "$RUNNER_TEMP/prefix-mine" "$RUNNER_TEMP"/tests/*.exe
+      - name: Run them
+        run: tests/gw2/matrix.zsh "$RUNNER_TEMP/engine/wine" "$RUNNER_TEMP/mine/wine" "$RUNNER_TEMP/tests" "$RUNNER_TEMP/matrix"
 
   lint:
     name: Lint

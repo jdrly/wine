@@ -71,6 +71,7 @@
 #include "wine/server.h"
 #include "wine/debug.h"
 #include "unix_private.h"
+#include "heat.h"
 #include "msync.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(sync);
@@ -1114,6 +1115,7 @@ NTSTATUS WINAPI NtCreateSemaphore( HANDLE *handle, ACCESS_MASK access, const OBJ
     }
     SERVER_END_REQ;
 
+    if (!ret) heat_semaphore_created( *handle, attr );
     free( objattr );
     return ret;
 }
@@ -1198,8 +1200,15 @@ NTSTATUS WINAPI NtReleaseSemaphore( HANDLE handle, LONG count, ULONG *previous )
     if (count <= 0)
         return STATUS_INVALID_PARAMETER;
 
-    if ((ret = inproc_release_semaphore( handle, count, previous )) != STATUS_NOT_IMPLEMENTED)
-        return ret;
+    /* for WINE_HEAT_WAKE=skip, which asks whether the handle is private */
+    if (heat_mode & HEAT_WAKE_SKIP)
+    {
+        heat_releasing = handle;
+        ret = inproc_release_semaphore( handle, count, previous );
+        heat_releasing = 0;
+    }
+    else ret = inproc_release_semaphore( handle, count, previous );
+    if (ret != STATUS_NOT_IMPLEMENTED) return ret;
 
     SERVER_START_REQ( release_semaphore )
     {
@@ -1243,6 +1252,7 @@ NTSTATUS WINAPI NtCreateEvent( HANDLE *handle, ACCESS_MASK access, const OBJECT_
     }
     SERVER_END_REQ;
 
+    if (!ret) heat_event_created( *handle );
     free( objattr );
     return ret;
 }
@@ -2531,7 +2541,13 @@ NTSTATUS WINAPI NtYieldExecution(void)
 
     ret = getrusage( RUSAGE_THREAD, &u1 );
 #endif
-    sched_yield();
+    if (heat_mode & HEAT_COUNT)
+    {
+        unsigned long long start = heat_now();
+        sched_yield();
+        heat_yield_done( start );
+    }
+    else sched_yield();
 #ifdef RUSAGE_THREAD
     if (!ret) ret = getrusage( RUSAGE_THREAD, &u2 );
     if (!ret && u1.ru_nvcsw == u2.ru_nvcsw && u1.ru_nivcsw == u2.ru_nivcsw) return STATUS_NO_YIELD_PERFORMED;
@@ -2600,6 +2616,7 @@ NTSTATUS WINAPI NtDelayExecution( BOOLEAN alertable, const LARGE_INTEGER *timeou
  */
 NTSTATUS WINAPI NtQueryPerformanceCounter( LARGE_INTEGER *counter, LARGE_INTEGER *frequency )
 {
+    heat_count( HC_QPC );
     counter->QuadPart = monotonic_counter();
     if (frequency) frequency->QuadPart = TICKSPERSEC;
     return STATUS_SUCCESS;
@@ -3796,10 +3813,14 @@ NTSTATUS WINAPI NtWaitForAlertByThreadId( const void *address, const LARGE_INTEG
 
                 timespec.tv_sec = timeleft / (ULONGLONG)TICKSPERSEC;
                 timespec.tv_nsec = (timeleft % TICKSPERSEC) * 100;
+                heat_count( HC_LOCK_SLEEP );
                 ret = futex_wait( futex, 0, &timespec );
             }
             else
+            {
+                heat_count( HC_LOCK_SLEEP );
                 ret = futex_wait( futex, 0, NULL );
+            }
 
             if (ret == -1 && errno == ETIMEDOUT) return STATUS_TIMEOUT;
         }

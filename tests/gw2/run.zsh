@@ -6,7 +6,7 @@
 #   run.zsh <wine> <prefix> <exe>...
 #
 # <wine> is an unpacked engine (the release tarball's wine/). Each program has to print
-# "gw2 test <name>: passed" and exit 0 within the time limit. Afterwards the prefix's wineserver
+# "gw2 test <name>: passed" and exit 0 within the time limit, $GW2_TEST_SECONDS (default 120). Afterwards the prefix's wineserver
 # is stopped, and no process this script started may be left. Wine rewrites a process's
 # arguments, so the processes are found by a variable in their environment, which every child
 # and the wineserver inherit. Prints one line per program and the log
@@ -49,7 +49,7 @@ print "ok    the prefix boot"
 
 for exe in "$@"; do
   name=${exe:t:r} log=$prefix/${exe:t:r}.log rc=0
-  run_limited 120 "$log" "$wine/bin/wine" "${exe:A}" || rc=$?
+  run_limited ${GW2_TEST_SECONDS:-120} "$log" "$wine/bin/wine" "${exe:A}" || rc=$?
   # grep without -q, which would end the pipe early and fail it under pipe_fail
   if (( rc == 0 )) && tr -d '\r' <"$log" | grep -xF "gw2 test $name: passed" >/dev/null; then
     print "ok    $name"
