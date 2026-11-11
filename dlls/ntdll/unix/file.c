@@ -124,6 +124,7 @@
 #include "wine/list.h"
 #include "wine/debug.h"
 #include "unix_private.h"
+#include "heat.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(file);
 WINE_DECLARE_DEBUG_CHANNEL(winediag);
@@ -7650,6 +7651,7 @@ NTSTATUS WINAPI NtSetInformationObject( HANDLE handle, OBJECT_INFORMATION_CLASS 
 
         if (len < sizeof(*p)) return STATUS_INVALID_BUFFER_SIZE;
 
+        heat_handle_shared( handle );  /* it may become inheritable */
         SERVER_START_REQ( set_handle_info )
         {
             req->handle = wine_server_obj_handle( handle );

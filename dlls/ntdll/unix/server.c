@@ -78,6 +78,7 @@
 #include "wine/server.h"
 #include "wine/debug.h"
 #include "unix_private.h"
+#include "heat.h"
 #include "ddk/wdm.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(server);
@@ -286,10 +287,13 @@ unsigned int server_call_unlocked( void *req_ptr )
 {
     struct thread_data *data = get_thread_data();
     struct __server_request_info * const req = req_ptr;
+    unsigned long long start = heat_start();
     unsigned int ret;
 
     if ((ret = send_request( data->request_fd, req ))) return ret;
-    return wait_reply( data->reply_fd, req );
+    ret = wait_reply( data->reply_fd, req );
+    if (start) heat_time( HC_SERVER, HT_SERVER, start );
+    return ret;
 }
 
 
@@ -1852,6 +1856,10 @@ NTSTATUS WINAPI NtDuplicateObject( HANDLE source_process, HANDLE source, HANDLE 
 
     if (dest) *dest = 0;
 
+    /* whatever the source process is: losing the mark only costs the skip */
+    if ((options & DUPLICATE_CLOSE_SOURCE) && source_process == NtCurrentProcess()) heat_handle_closed( source );
+    else heat_handle_shared( source );
+
     if ((options & DUPLICATE_CLOSE_SOURCE) && source_process != NtCurrentProcess())
     {
         union apc_call call;
@@ -1948,6 +1956,8 @@ NTSTATUS WINAPI NtClose( HANDLE handle )
 
     if (HandleToLong( handle ) >= ~5 && HandleToLong( handle ) <= ~0)
         return STATUS_SUCCESS;
+
+    heat_handle_closed( handle );
 
     /* hold fd_cache_mutex to prevent the fd from being added again between the
      * call to remove_fd_from_cache and close_handle */

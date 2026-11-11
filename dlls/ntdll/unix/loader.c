@@ -86,6 +86,7 @@
 #include "winioctl.h"
 #include "winternl.h"
 #include "unix_private.h"
+#include "heat.h"
 #include "msync.h"
 #include "wine/list.h"
 #include "wine/debug.h"
@@ -2086,6 +2087,8 @@ static void start_main_thread(void)
     load_wow64_ntdll( main_image_info.Machine );
     load_apiset_dll();
     load_compatdb();
+    /* after compatdb.so, which may have set WINE_HEAT_* for this process */
+    heat_init();
     /* compatdb.so may have forced large address awareness after
      * virtual_alloc_first_teb made the first decision. */
     virtual_recheck_large_address_space();
