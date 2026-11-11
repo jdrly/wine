@@ -32,6 +32,7 @@ enum heat_counter
     HC_WOKEN,        /* single waits woken */
     HC_SPURIOUS,     /* ... that found nothing to take and slept again */
     HC_EVENT_CREATE, /* NtCreateEvent */
+    HC_EVENT_CLOSE,  /* NtClose of a handle NtCreateEvent made */
     HC_CLOSE,        /* NtClose, of any object */
     HC_SERVER,       /* server calls, with HT_SERVER */
     HC_LOCK_SLEEP,   /* sleeps in NtWaitForAlertByThreadId: contended locks, WaitOnAddress */
@@ -53,11 +54,11 @@ extern void heat_add( enum heat_counter c );
 extern unsigned long long heat_now(void);
 extern void heat_time( enum heat_counter c, enum heat_timer t, unsigned long long start );
 extern void heat_yield_done( unsigned long long start );
-extern void heat_private_semaphore( HANDLE handle );
-extern void heat_forget_handle( HANDLE handle );
+extern void heat_mark( HANDLE handle, unsigned char flag );
+extern void heat_unmark( HANDLE handle, unsigned char flags );
 extern void heat_sleep_on( unsigned int obj );
 extern void heat_woke_on( unsigned int obj );
-extern BOOL heat_skip_wake_slow( unsigned int obj );
+extern BOOL heat_skip_wake_slow( unsigned int obj, const unsigned short *refcount );
 extern __thread HANDLE heat_releasing;
 
 static inline void heat_count( enum heat_counter c )
@@ -78,19 +79,35 @@ static inline void heat_semaphore_created( HANDLE handle, const OBJECT_ATTRIBUTE
     if (attr && (attr->RootDirectory || (attr->ObjectName && attr->ObjectName->Length) ||
                  (attr->Attributes & OBJ_INHERIT)))
         return;
-    heat_private_semaphore( handle );
+    heat_mark( handle, 1 /* HEAT_H_PRIVATE */ );
 }
 
-/* closed, duplicated or given new handle flags: no longer private */
+static inline void heat_event_created( HANDLE handle )
+{
+    if (!(heat_mode & HEAT_COUNT)) return;
+    heat_add( HC_EVENT_CREATE );
+    heat_mark( handle, 2 /* HEAT_H_EVENT */ );
+}
+
+/* duplicated or given new handle flags: a semaphore is no longer private */
 static inline void heat_handle_shared( HANDLE handle )
 {
-    if (heat_mode & HEAT_WAKE_SKIP) heat_forget_handle( handle );
+    if (heat_mode & HEAT_WAKE_SKIP) heat_unmark( handle, 1 );
 }
 
-/* signal_all, after the count changed: TRUE when the release may make no wake call */
-static inline BOOL heat_skip_wake( unsigned int obj )
+/* before the server closes it, and can give its value to a new object */
+static inline void heat_handle_closed( HANDLE handle )
 {
-    return (heat_mode & HEAT_WAKE_SKIP) && heat_releasing && heat_skip_wake_slow( obj );
+    if (!heat_mode) return;
+    heat_count( HC_CLOSE );
+    heat_unmark( handle, 1 | 2 );
+}
+
+/* signal_all, after the count changed: TRUE when the release may make no wake call. <refcount>
+ * is the semaphore's reference count in msync's shared memory. */
+static inline BOOL heat_skip_wake( unsigned int obj, const unsigned short *refcount )
+{
+    return (heat_mode & HEAT_WAKE_SKIP) && heat_releasing && heat_skip_wake_slow( obj, refcount );
 }
 
 #endif /* __NTDLL_UNIX_HEAT_H */

@@ -1186,7 +1186,7 @@ NTSTATUS WINAPI NtCreateEvent( HANDLE *handle, ACCESS_MASK access, const OBJECT_
     }
     SERVER_END_REQ;
 
-    heat_count( HC_EVENT_CREATE );
+    if (!ret) heat_event_created( *handle );
     free( objattr );
     return ret;
 }

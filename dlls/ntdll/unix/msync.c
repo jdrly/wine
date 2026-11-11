@@ -819,7 +819,7 @@ static inline BOOL signal_all( void *shm, unsigned int shm_idx, ULONG release )
     struct event *event_obj = (struct event *)shm;
     int ret;
 
-    if (release && heat_skip_wake( shm_idx ))
+    if (release && heat_skip_wake( shm_idx, &((struct semaphore *)shm)->refcount ))
         ret = -ENOENT;
     else if (release && (heat_mode & HEAT_WAKE_ONE))
     {

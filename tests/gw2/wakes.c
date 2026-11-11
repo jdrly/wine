@@ -3,12 +3,18 @@
  * every mode of WINE_HEAT_WAKE (off, one, skip, one,skip), and under the engine's own ntdll.so.
  *
  *   13  20,000 single jobs to 7 workers that sleep between them, all taken. A producer that
- *       outpaces its consumer for a minute, every release taken, no stall.
+ *       outpaces its consumer for a minute (the semaphore reaches its maximum), every release
+ *       taken, no stall.
  *   14  A waiter on a duplicated handle and a release through it. A named semaphore opened
  *       twice. A semaphore duplicated into a child process, released by the parent after
- *       300 ms: the child wakes (with a real handle to this process and with the pseudo-handle).
+ *       300 ms: the child wakes (with a real handle to this process and with the pseudo-handle,
+ *       and duplicated by the child itself out of this process).
  *   15  A wait-all on a semaphore and an event against a single waiter on the same semaphore,
  *       200 rounds. 20,000 releases to waiters with 1 ms timeouts, each taken once.
+ *
+ * Where a case needs a waiter asleep when the release comes, the waiter says it is about to wait,
+ * the release comes well after that, and the waiter's own clock shows it spent that time in the
+ * wait. A case retries when it didn't, and fails when it never did.
  *   16  A release with no waiter, a million times, on a thread of its own. With
  *       WINE_HEAT_COUNT=1 in this process, that thread's counters must say: with skip,
  *       wake_skipped equals the releases and wake_none is 0; without, every release made a wake
@@ -126,54 +132,100 @@ static void test_jobs(void)
 static HANDLE fast_sem;
 static volatile LONG fast_taken, fast_done;
 
+/* a millisecond's pause every 100 jobs keeps it behind the producer */
 static DWORD WINAPI slow_consumer( void *arg )
 {
+    LONG n;
     for (;;)
     {
         if (WaitForSingleObject( fast_sem, 5000 ) != WAIT_OBJECT_0) return 1;
         if (fast_done) return 0;
-        InterlockedIncrement( &fast_taken );
+        n = InterlockedIncrement( &fast_taken );
+        if (!(n % 100)) Sleep( 1 );
     }
 }
 
 static void test_producer(void)
 {
-    LONG released = 0;
+    LONG released = 0, full = 0;
     DWORD t0;
     HANDLE consumer;
 
     start( "13 producer" );
-    fast_sem = private_semaphore( 10000 );
+    fast_sem = private_semaphore( 1000 );
     consumer = thread( slow_consumer, NULL );
     for (t0 = GetTickCount(); GetTickCount() - t0 < PRODUCER_SECONDS * 1000;)
     {
         if (ReleaseSemaphore( fast_sem, 1, NULL )) released++;
-        else if (GetLastError() == ERROR_TOO_MANY_POSTS) SwitchToThread();
+        else if (GetLastError() == ERROR_TOO_MANY_POSTS)
+        {
+            full++;  /* 1,000 jobs waiting: the producer is ahead */
+            SwitchToThread();
+        }
         else FAIL( "ReleaseSemaphore: error %lu", GetLastError() );
+        if (WaitForSingleObject( consumer, 0 ) == WAIT_OBJECT_0) FAIL( "the consumer stopped after %ld", fast_taken );
     }
+    if (!full) FAIL( "the producer never got ahead of the consumer" );
     await( &fast_taken, released, 10000 );
     fast_done = 1;
     release( fast_sem, 1 );
     join( consumer, 10000 );
     if (fast_taken != released) FAIL( "%ld taken of %ld released", fast_taken, released );
-    printf( "gw2 test wakes: %ld releases in %d s\n", released, PRODUCER_SECONDS );
+    printf( "gw2 test wakes: %ld releases in %d s, the semaphore full %ld times\n", released, PRODUCER_SECONDS, full );
     CloseHandle( fast_sem );
 }
 
 /* 14: duplicated and named semaphores */
 
-static DWORD WINAPI wait_one( void *sem )
+#define ASLEEP 2  /* a waiter's exit code: it took the count, but too soon to have slept */
+
+struct waiter
 {
-    return WaitForSingleObject( sem, 5000 ) != WAIT_OBJECT_0;
+    HANDLE sem;
+    HANDLE ready;    /* set right before the wait */
+    DWORD  min_ms;   /* the wait has to take this long to count as asleep */
+};
+
+static DWORD WINAPI wait_one( void *arg )
+{
+    struct waiter *w = arg;
+    DWORD t0;
+
+    SetEvent( w->ready );
+    t0 = GetTickCount();
+    if (WaitForSingleObject( w->sem, 5000 ) != WAIT_OBJECT_0) return 1;
+    return GetTickCount() - t0 < w->min_ms ? ASLEEP : 0;
 }
 
-/* a thread waits on <wait>, and after it has gone to sleep the release goes through <signal> */
+static HANDLE ready_event(void)
+{
+    HANDLE h = CreateEventW( NULL, FALSE, FALSE, NULL );
+    if (!h) FAIL( "CreateEvent: error %lu", GetLastError() );
+    return h;
+}
+
+/* a thread waits on <wait>, and once it has gone to sleep the release goes through <signal> */
 static void wake_through( HANDLE wait, HANDLE signal )
 {
-    HANDLE waiter = thread( wait_one, wait );
-    Sleep( 50 );
-    release( signal, 1 );
-    join( waiter, 10000 );
+    struct waiter w = { wait, ready_event(), 25 };
+    HANDLE waiter;
+    DWORD code;
+    int tries;
+
+    for (tries = 0; tries < 3; tries++)
+    {
+        waiter = thread( wait_one, &w );
+        if (WaitForSingleObject( w.ready, 5000 ) != WAIT_OBJECT_0) FAIL( "the waiter didn't start" );
+        Sleep( 50 );
+        release( signal, 1 );
+        if (WaitForSingleObject( waiter, 10000 ) != WAIT_OBJECT_0) FAIL( "the waiter didn't wake" );
+        GetExitCodeThread( waiter, &code );
+        CloseHandle( waiter );
+        if (!code) break;
+        if (code != ASLEEP) FAIL( "the waiter's wait failed" );
+    }
+    if (tries == 3) FAIL( "the waiter never was asleep when the release came" );
+    CloseHandle( w.ready );
 }
 
 static void test_duplicates(void)
@@ -201,94 +253,155 @@ static void test_duplicates(void)
     CloseHandle( named );
 }
 
-/* 14: into a child process. The child reads the handle's value from its stdin. */
+/* 14: into a child process. The child reads from its stdin how it gets the semaphore, sets the
+ * parent's ready event right before it waits, and exits with 0 when it woke after sleeping. */
+
+enum dup_how { DUP_PSEUDO, DUP_REAL, DUP_BY_CHILD };
+
+struct child_msg
+{
+    DWORD  how;
+    DWORD  parent;  /* the parent's process id */
+    HANDLE sem;     /* in the child, or with DUP_BY_CHILD in the parent */
+};
+
+static HANDLE ready_name( DWORD parent, BOOL create )
+{
+    WCHAR name[64];
+    swprintf( name, ARRAYSIZE(name), L"gw2-wakes-ready-%lu", parent );
+    return create ? CreateEventW( NULL, FALSE, FALSE, name ) : OpenEventW( EVENT_MODIFY_STATE, FALSE, name );
+}
 
 static int child(void)
 {
-    HANDLE sem;
-    DWORD got, ret;
+    struct child_msg msg;
+    HANDLE parent, ready;
+    DWORD got, t0;
 
-    if (!ReadFile( GetStdHandle( STD_INPUT_HANDLE ), &sem, sizeof(sem), &got, NULL ) || got != sizeof(sem))
-        return 2;
-    ret = WaitForSingleObject( sem, 1500 );
-    return ret != WAIT_OBJECT_0;
+    if (!ReadFile( GetStdHandle( STD_INPUT_HANDLE ), &msg, sizeof(msg), &got, NULL ) || got != sizeof(msg))
+        return 3;
+    if (msg.how == DUP_BY_CHILD &&
+        (!(parent = OpenProcess( PROCESS_DUP_HANDLE, FALSE, msg.parent )) ||
+         !DuplicateHandle( parent, msg.sem, GetCurrentProcess(), &msg.sem, 0, FALSE, DUPLICATE_SAME_ACCESS )))
+        return 3;
+    if (!(ready = ready_name( msg.parent, FALSE ))) return 3;
+    SetEvent( ready );
+    t0 = GetTickCount();
+    if (WaitForSingleObject( msg.sem, 1500 ) != WAIT_OBJECT_0) return 1;
+    return GetTickCount() - t0 < 100 ? ASLEEP : 0;
 }
 
-static void test_child( BOOL real )
+static const char * const dup_names[] =
+{
+    "14 duplicated into a child, pseudo-handle",
+    "14 duplicated into a child, real handle",
+    "14 duplicated by the child out of this process",
+};
+
+static void test_child( enum dup_how how )
 {
     STARTUPINFOW si = { sizeof(si) };
     PROCESS_INFORMATION pi;
     SECURITY_ATTRIBUTES sa = { sizeof(sa), NULL, TRUE };
     WCHAR cmd[MAX_PATH + 16];
-    HANDLE sem, in_read, in_write, self, target;
-    DWORD written, code, t0;
+    struct child_msg msg = { how, GetCurrentProcessId() };
+    HANDLE sem, in_read, in_write, self = GetCurrentProcess(), ready;
+    DWORD written, code = 0, t0;
+    int tries;
 
-    start( real ? "14 duplicated into a child, real handle" : "14 duplicated into a child, pseudo-handle" );
+    start( dup_names[how] );
     sem = private_semaphore( 10 );
-    if (!CreatePipe( &in_read, &in_write, &sa, 0 )) FAIL( "CreatePipe: error %lu", GetLastError() );
-    SetHandleInformation( in_write, HANDLE_FLAG_INHERIT, 0 );
-    si.dwFlags = STARTF_USESTDHANDLES;
-    si.hStdInput = in_read;
-    si.hStdOutput = GetStdHandle( STD_OUTPUT_HANDLE );
-    si.hStdError = GetStdHandle( STD_ERROR_HANDLE );
+    if (!(ready = ready_name( msg.parent, TRUE ))) FAIL( "CreateEvent: error %lu", GetLastError() );
+    if (how == DUP_REAL && !(self = OpenProcess( PROCESS_DUP_HANDLE, FALSE, GetCurrentProcessId() )))
+        FAIL( "OpenProcess: error %lu", GetLastError() );
     cmd[0] = '"';
     GetModuleFileNameW( NULL, cmd + 1, MAX_PATH );
     wcscat( cmd, L"\" child" );
-    if (!CreateProcessW( NULL, cmd, NULL, NULL, TRUE, 0, NULL, NULL, &si, &pi ))
-        FAIL( "CreateProcess: error %lu", GetLastError() );
-    CloseHandle( in_read );
 
-    self = real ? OpenProcess( PROCESS_DUP_HANDLE, FALSE, GetCurrentProcessId() ) : GetCurrentProcess();
-    if (!self) FAIL( "OpenProcess: error %lu", GetLastError() );
-    if (!DuplicateHandle( self, sem, pi.hProcess, &target, 0, FALSE, DUPLICATE_SAME_ACCESS ))
-        FAIL( "DuplicateHandle: error %lu", GetLastError() );
-    if (!WriteFile( in_write, &target, sizeof(target), &written, NULL )) FAIL( "WriteFile: error %lu", GetLastError() );
+    for (tries = 0; tries < 3; tries++)
+    {
+        if (!CreatePipe( &in_read, &in_write, &sa, 0 )) FAIL( "CreatePipe: error %lu", GetLastError() );
+        SetHandleInformation( in_write, HANDLE_FLAG_INHERIT, 0 );
+        si.dwFlags = STARTF_USESTDHANDLES;
+        si.hStdInput = in_read;
+        si.hStdOutput = GetStdHandle( STD_OUTPUT_HANDLE );
+        si.hStdError = GetStdHandle( STD_ERROR_HANDLE );
+        if (!CreateProcessW( NULL, cmd, NULL, NULL, TRUE, 0, NULL, NULL, &si, &pi ))
+            FAIL( "CreateProcess: error %lu", GetLastError() );
+        CloseHandle( in_read );
 
-    Sleep( 300 );
-    t0 = GetTickCount();
-    release( sem, 1 );
-    if (WaitForSingleObject( pi.hProcess, 5000 ) != WAIT_OBJECT_0) FAIL( "the child didn't end" );
-    if (!GetExitCodeProcess( pi.hProcess, &code ) || code)
-        FAIL( "the child ended with %lu, %lu ms after the release", code, GetTickCount() - t0 );
-    if (real) CloseHandle( self );
-    CloseHandle( in_write );
-    CloseHandle( pi.hThread );
-    CloseHandle( pi.hProcess );
+        msg.sem = sem;
+        if (how != DUP_BY_CHILD &&
+            !DuplicateHandle( self, sem, pi.hProcess, &msg.sem, 0, FALSE, DUPLICATE_SAME_ACCESS ))
+            FAIL( "DuplicateHandle: error %lu", GetLastError() );
+        if (!WriteFile( in_write, &msg, sizeof(msg), &written, NULL )) FAIL( "WriteFile: error %lu", GetLastError() );
+        if (WaitForSingleObject( ready, 10000 ) != WAIT_OBJECT_0) FAIL( "the child didn't get to its wait" );
+
+        Sleep( 300 );
+        t0 = GetTickCount();
+        release( sem, 1 );
+        if (WaitForSingleObject( pi.hProcess, 5000 ) != WAIT_OBJECT_0) FAIL( "the child didn't end" );
+        GetExitCodeProcess( pi.hProcess, &code );
+        CloseHandle( in_write );
+        CloseHandle( pi.hThread );
+        CloseHandle( pi.hProcess );
+        if (!code) break;
+        if (code != ASLEEP) FAIL( "the child ended with %lu, %lu ms after the release", code, GetTickCount() - t0 );
+    }
+    if (tries == 3) FAIL( "the child never was asleep when the release came" );
+    if (how == DUP_REAL) CloseHandle( self );
+    CloseHandle( ready );
     CloseHandle( sem );
 }
 
 /* 15: a wait-all waiter and a single waiter on one semaphore */
 
-static HANDLE mix_sem, mix_event;
+static HANDLE mix_sem, mix_event, all_ready;
 
 static DWORD WINAPI wait_all( void *arg )
 {
     HANDLE objs[2] = { mix_sem, mix_event };
+    SetEvent( all_ready );
     return WaitForMultipleObjects( 2, objs, TRUE, 5000 ) != WAIT_OBJECT_0;
 }
 
 static void test_wait_all(void)
 {
+    struct waiter w;
     HANDLE all, single;
-    int i;
+    DWORD code;
+    int i, asleep = 0;
 
     start( "15 wait-all against a single waiter" );
     mix_sem = private_semaphore( 10 );
     if (!(mix_event = CreateEventW( NULL, FALSE, FALSE, NULL ))) FAIL( "CreateEvent: error %lu", GetLastError() );
+    all_ready = ready_event();
+    w.sem = mix_sem;
+    w.ready = ready_event();
+    w.min_ms = 10;
     for (i = 0; i < ROUNDS; i++)
     {
         all = thread( wait_all, NULL );
-        single = thread( wait_one, mix_sem );
-        Sleep( 2 );  /* both asleep */
+        single = thread( wait_one, &w );
+        if (WaitForSingleObject( all_ready, 5000 ) || WaitForSingleObject( w.ready, 5000 )) FAIL( "round %d: a waiter didn't start", i );
+        Sleep( 20 );  /* both asleep */
         /* the single waiter needs this count; the wait-all waiter can't take it without the event */
         release( mix_sem, 1 );
         if (WaitForSingleObject( single, 3000 ) != WAIT_OBJECT_0) FAIL( "round %d: the single waiter missed the release", i );
-        join( single, 0 );
+        GetExitCodeThread( single, &code );
+        CloseHandle( single );
+        if (code == ASLEEP) code = 0;
+        else asleep++;
+        if (code) FAIL( "round %d: the single waiter's wait failed", i );
         SetEvent( mix_event );
         release( mix_sem, 1 );
         join( all, 5000 );
     }
+    if (asleep < ROUNDS / 2) FAIL( "the single waiter was asleep at the release in only %d of %d rounds", asleep, ROUNDS );
     if (WaitForSingleObject( mix_sem, 0 ) != WAIT_TIMEOUT) FAIL( "a count was left" );
+    printf( "gw2 test wakes: the single waiter was asleep in %d of %d rounds\n", asleep, ROUNDS );
+    CloseHandle( w.ready );
+    CloseHandle( all_ready );
     CloseHandle( mix_event );
     CloseHandle( mix_sem );
 }
@@ -421,8 +534,9 @@ int main( int argc, char **argv )
     test_jobs();
     test_producer();
     test_duplicates();
-    test_child( TRUE );
-    test_child( FALSE );
+    test_child( DUP_PSEUDO );
+    test_child( DUP_REAL );
+    test_child( DUP_BY_CHILD );
     test_wait_all();
     test_short_timeouts();
     test_no_waiter();

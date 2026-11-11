@@ -1956,9 +1956,7 @@ NTSTATUS WINAPI NtClose( HANDLE handle )
     if (HandleToLong( handle ) >= ~5 && HandleToLong( handle ) <= ~0)
         return STATUS_SUCCESS;
 
-    heat_count( HC_CLOSE );
-    /* before the server can give the handle's value to a new object */
-    heat_handle_shared( handle );
+    heat_handle_closed( handle );
 
     /* hold fd_cache_mutex to prevent the fd from being added again between the
      * call to remove_fd_from_cache and close_handle */
