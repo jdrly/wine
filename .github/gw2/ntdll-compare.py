@@ -3,8 +3,9 @@
 # and runs nothing.
 #
 #   ntdll-compare.py baseline <mine> <engine-unix-dir>
-#   ntdll-compare.py patched <mine> <engine-unix-dir> <build dir> <base ntdll.so> <base objects>
-#                            <base make log> <make log> <checkout time> [<touched source>...]
+#   ntdll-compare.py patched <mine> <engine-unix-dir> <source dir> <build dir> <base ntdll.so>
+#                            <base objects> <base make log> <make log> <base Makefile> <Makefile>
+#                            <checkout time> [<changed file>...]
 #   ntdll-compare.py selftest <engine-unix-dir>
 #
 # <engine-unix-dir> is the engine's lib/wine/aarch64-unix. Prints a Markdown report and exits 1
@@ -21,11 +22,15 @@
 #   compiled again. Its exports are a superset of the engine's. Its objects are compared with the
 #   base build's (compare_objects): first that both sets are what their files linked (the link
 #   line in the make log, the debug map's paths and times) and that this build compiled each after
-#   the checkout; then every object of a source file git doesn't list as touched is the base's,
-#   compile command, code, data, relocations and symbols, debug sections aside; the functions of
-#   the touched ones are listed as changed, new or gone, through their bytes and relocations.
+#   the checkout; then every object none of whose inputs is among the files git lists as changed
+#   (its inputs are what makedep's rule for it names in either build's Makefile: its .c and every
+#   header it includes) is the base's, compile command, code, data, relocations and symbols, debug
+#   sections aside; the other objects' functions are listed as changed, new or gone, through their
+#   bytes and relocations, with the changed inputs that touched each object. A header every file
+#   includes touches every object: all of them are listed, none is hidden. Naming why each listed
+#   function changed stays the pull request's job.
 #   With the baseline that makes the chain: the engine's file = my base build, byte for byte, and
-#   my base build's objects = this build's, except the touched files'.
+#   my base build's objects = this build's, except the touched ones.
 import bisect
 import contextlib
 import functools
@@ -756,11 +761,13 @@ def adds_nothing(m):
             and not any(sec["size"] for sec in m.sections if not sec["name"].startswith("__DWARF,")))
 
 
-def compare_objects(r, build_dir, base_file, base_dir, head_file, base_log, head_log, since, touched):
+def compare_objects(r, src_dir, build_dir, base_file, base_dir, head_file, base_log, head_log, base_makefile,
+                    head_makefile, since, touched):
     """the patched build's objects against my base build's: proof that both sets are what their
-    files linked, then every untouched object equal through its relocations, and the functions of
-    the touched ones listed. The base build's objects are copies in <base_dir> of the ones it
-    linked from <build_dir>/dlls/ntdll/unix; this build's are there still."""
+    files linked, then every object none of whose inputs changed equal through its relocations, and
+    the functions of the touched ones listed. The base build's objects are copies in <base_dir> of
+    the ones it linked from <build_dir>/dlls/ntdll/unix; this build's are there still. An object's
+    inputs are what makedep's rule for it names, in either build's Makefile."""
     unix = os.path.join(build_dir, "dlls/ntdll/unix")
     base_objs = {f: os.path.join(base_dir, f) for f in os.listdir(base_dir) if f.endswith(".o")}
     head_objs = {f: os.path.join(unix, f) for f in os.listdir(unix) if f.endswith(".o")}
@@ -785,33 +792,78 @@ def compare_objects(r, build_dir, base_file, base_dir, head_file, base_log, head
     r.check(not old, "this build compiled every object after the checkout",
             f"objects older than the checkout, so not rebuilt: {listing(old)}")
 
-    touched_objs = {os.path.splitext(os.path.basename(p))[0] + ".o" for p in touched
-                    if p.startswith("dlls/ntdll/unix/") and p.endswith(".c")}
-    touched_objs.add("version.o")  # git describe's text, generated for each commit
-    bad, changed, new, removed = [], [], [], []
-    for f in sorted(set(base_objs) | set(head_objs)):
-        if f not in head_objs:
-            (removed if f in touched_objs else bad).append(f"{f} (gone)")
-            continue
-        if f not in base_objs:
-            (new if f in touched_objs else bad).append(f"{f} (new)")
-            continue
-        if f not in touched_objs:
-            if base_cc.get(f) != head_cc.get(f):
-                bad.append(f"{f}: compiled with another command")
-            elif canonical(MachO(base_objs[f])) != canonical(MachO(head_objs[f])):
-                bad.append(f"{f}: code, data, relocations or symbols")
-            continue
-        c, n, g = function_changes(MachO(base_objs[f]), MachO(head_objs[f]), f[:-2] + ".c")
-        changed += c
-        new += n
-        removed += g
-    r.check(not bad, "every object of an untouched source file is my base build's: its compile command, "
-                     "and its code, data, relocations and symbols",
-            f"{len(bad)} objects of untouched source files differ from my base build's:")
+    inputs = makefile_inputs(base_makefile, src_dir)
+    for obj, deps in makefile_inputs(head_makefile, src_dir).items():
+        inputs.setdefault(obj, set()).update(deps)
+    bad, changed, new, removed, through = sort_objects(base_objs, head_objs, inputs, set(touched), base_cc, head_cc)
+    r.check(not bad, "every object none of whose inputs this commit changes is my base build's: its compile "
+                     "command, and its code, data, relocations and symbols",
+            f"{len(bad)} objects none of whose inputs this commit changes differ from my base build's, "
+            f"or have an input the compare can't see:")
     for b in bad:
         print(f"  - `{b}`")
-    return changed, new, removed
+    return changed, new, removed, through
+
+
+GENERATED_INPUTS_HELD = ("build:include/",)  # the workflow holds config.h and the generated headers equal
+
+
+def makefile_inputs(makefile, src_dir):
+    """object basename -> its inputs, from the rules makedep wrote into the generated Makefile
+    (dlls/ntdll/unix/<file>.o: <every file it includes>): a file of the source tree as git names
+    it, anything else as "build:<path in the build tree>" """
+    text = open(makefile, errors="replace").read().replace("\\\n", " ")
+    src = os.path.normpath(src_dir) + "/"
+    out = {}
+    for line in text.splitlines():
+        if ":" not in line or "=" in line.split(":", 1)[0]:
+            continue
+        targets, deps = line.split(":", 1)
+        objs = [t for t in targets.split() if t.startswith("dlls/ntdll/unix/") and t.endswith(".o")]
+        for t in objs:
+            for d in deps.split():
+                d = os.path.normpath(d)
+                out.setdefault(os.path.basename(t), set()).add(d[len(src):] if d.startswith(src) else f"build:{d}")
+    return out
+
+
+def sort_objects(base_objs, head_objs, inputs, touched, base_cc, head_cc, load=MachO):
+    """each object, by its inputs: one none of whose inputs is in <touched> (paths as git prints
+    them) must be the base build's, compile command and canonical() alike; one with a changed input
+    is compared function by function. An input outside the source tree that the workflow doesn't
+    hold equal makes an object fail, since git can't say whether it changed. Returns the failures,
+    the changed, new and gone functions, and object -> the changed inputs that touched it."""
+    bad, changed, new, removed, through = [], [], [], [], {}
+    for f in sorted(set(base_objs) | set(head_objs)):
+        deps = inputs.get(f)
+        if not deps:
+            bad.append(f"{f}: no rule in the Makefile names its inputs")
+            continue
+        unseen = sorted(d for d in deps if d.startswith("build:") and not d.startswith(GENERATED_INPUTS_HELD)
+                        and d != "build:dlls/ntdll/unix/version.c")
+        if unseen:
+            bad.append(f"{f}: inputs the compare doesn't hold equal: {', '.join(d[6:] for d in unseen)}")
+            continue
+        via = sorted(d for d in deps if d in touched)
+        if f == "version.o":
+            via = ["git describe's text, made for each commit"]
+        if via:
+            through[f] = via
+        if f not in head_objs:
+            (removed if via else bad).append(f"{f} (gone)")
+        elif f not in base_objs:
+            (new if via else bad).append(f"{f} (new)")
+        elif not via:
+            if base_cc.get(f) != head_cc.get(f):
+                bad.append(f"{f}: compiled with another command")
+            elif canonical(load(base_objs[f])) != canonical(load(head_objs[f])):
+                bad.append(f"{f}: code, data, relocations or symbols")
+        else:
+            c, n, g = function_changes(load(base_objs[f]), load(head_objs[f]), f[:-2] + ".c")
+            changed += c
+            new += n
+            removed += g
+    return bad, changed, new, removed, through
 
 
 class Report:
@@ -1023,6 +1075,32 @@ def selftest(engine_dir):
     if got != ([], [], []):
         failed.append(f"touched object: __text at another address with the same functions, not {got}")
 
+    # an object's inputs, from makedep's rules: a header change that alters an object whose .c
+    # didn't change makes it a touched one (listed, passes); a difference with no changed input
+    # fails; so does an input outside the source tree the workflow doesn't hold equal
+    with tempfile.TemporaryDirectory() as tmp:
+        makefile = os.path.join(tmp, "Makefile")
+        with open(makefile, "w") as f:
+            f.write("VAR = a:b\n"
+                    "dlls/ntdll/unix/serial.o: /src/dlls/ntdll/unix/serial.c include/config.h \\\n"
+                    "  /src/dlls/ntdll/unix/unix_private.h\n"
+                    "dlls/ntdll/unix/tape.o: /src/dlls/ntdll/unix/tape.c dlls/ntdll/unix/made.h\n")
+        inputs = makefile_inputs(makefile, "/src")
+    if inputs != {"serial.o": {"dlls/ntdll/unix/serial.c", "build:include/config.h", "dlls/ntdll/unix/unix_private.h"},
+                  "tape.o": {"dlls/ntdll/unix/tape.c", "build:dlls/ntdll/unix/made.h"}}:
+        failed.append(f"Makefile inputs: read {inputs}")
+    objects = {"base": fake_object(code, [], b"\x01"), "head": fake_object(code, [], b"\x02")}
+    sort = lambda changed_files: sort_objects({"serial.o": "base"}, {"serial.o": "head"}, inputs, changed_files,
+                                              {"serial.o": "cc"}, {"serial.o": "cc"}, load=objects.get)
+    bad, _, _, _, through = sort({"dlls/ntdll/unix/unix_private.h"})
+    if bad or through != {"serial.o": ["dlls/ntdll/unix/unix_private.h"]}:
+        failed.append(f"objects: a changed header makes its includer a touched one, not {bad} {through}")
+    if not sort(set())[0]:
+        failed.append("objects: one that differs with no changed input passed")
+    if not sort_objects({"tape.o": "base"}, {"tape.o": "base"}, inputs, set(), {"tape.o": "cc"},
+                        {"tape.o": "cc"}, load=objects.get)[0]:
+        failed.append("objects: an input outside the source tree that isn't held equal passed")
+
     # the link proof: an object of the same name from another directory, and one linked twice
     with tempfile.TemporaryDirectory() as tmp:
         obj = os.path.join(tmp, "loader.o")
@@ -1055,16 +1133,17 @@ def main():
     args = sys.argv[1:]
     if len(args) == 2 and args[0] == "selftest":
         return selftest(args[1])
-    if not ((len(args) == 3 and args[0] == "baseline") or (len(args) >= 9 and args[0] == "patched")):
+    if not ((len(args) == 3 and args[0] == "baseline") or (len(args) >= 12 and args[0] == "patched")):
         print("usage: ntdll-compare.py baseline <mine> <engine-unix-dir>\n"
-              "       ntdll-compare.py patched <mine> <engine-unix-dir> <build dir> <base ntdll.so> "
-              "<base objects> <base make log> <make log> <checkout time> [<touched source>...]\n"
+              "       ntdll-compare.py patched <mine> <engine-unix-dir> <source dir> <build dir> <base ntdll.so> "
+              "<base objects> <base make log> <make log> <base Makefile> <Makefile> <checkout time> "
+              "[<changed file>...]\n"
               "       ntdll-compare.py selftest <engine-unix-dir>", file=sys.stderr)
         return 2
     mode, mine_path, engine_dir = args[:3]
     if mode == "patched":
-        build_dir, base_file, base_objs, base_log, head_log, since = args[3:9]
-        since, touched = float(since), args[9:]
+        src_dir, build_dir, base_file, base_objs, base_log, head_log, base_mk, head_mk, since = args[3:12]
+        since, touched = float(since), args[12:]
     mine, theirs = MachO(mine_path), MachO(os.path.join(engine_dir, "ntdll.so"))
     r = Report()
 
@@ -1112,9 +1191,13 @@ def main():
         if not byte_gate(mine, theirs, r):
             diagnose(mine, theirs)
     else:
-        changed, new, removed = compare_objects(r, build_dir, base_file, base_objs, mine_path, base_log,
-                                                head_log, since, touched)
-        print(f"\n#### Changed by this branch ({', '.join(sorted(touched)) or 'no source file of ntdll.so'})\n")
+        changed, new, removed, through = compare_objects(r, src_dir, build_dir, base_file, base_objs, mine_path,
+                                                         base_log, head_log, base_mk, head_mk, since, touched)
+        print("\n#### Changed by this branch\n")
+        print("Objects compared function by function, and the changed inputs that made them so:\n")
+        for f, via in sorted(through.items()):
+            print(f"- `{f}`: through {', '.join(f'`{v}`' for v in via)}")
+        print()
         for title, items in (("changed", changed), ("new", new), ("removed", removed)):
             print(f"- {title}: {len(items)}")
             for item in items:
