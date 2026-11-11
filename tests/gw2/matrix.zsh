@@ -6,6 +6,8 @@
 #
 # 1. wakes.exe under mine, as WINE_HEAT_EXE with WINE_HEAT_COUNT=1, in each mode (off, one, skip,
 #    one,skip), three runs each. The modes run side by side, each in a prefix of its own.
+# 1b. evpool.exe under mine, as WINE_HEAT_EXE with WINE_HEAT_COUNT=1, with WINE_HEAT_EVPOOL off, 1
+#    and 1,mask, three runs each, side by side (jdrly/gw2-on-mac#42).
 # 2. Every program once more, side by side: under the engine's ntdll.so; under mine with no
 #    WINE_HEAT_* variable; under mine with the variables set but WINE_HEAT_EXE naming another
 #    program. Neither of the last two may write a counters file. The engine skips the programs in
@@ -67,7 +69,7 @@ quiet() {
   shift 3
   [[ $wine == "$engine" ]] && programs=(${programs:#*/(${(~j:|:)engine_bugs}).exe})
   mkdir -p "$log"
-  env -u WINE_HEAT_COUNT -u WINE_HEAT_WAKE -u WINE_HEAT_EXE -u WINE_HEAT_LOG "$@" GW2_TEST_PRODUCER_SECONDS=20 GW2_TEST_SECONDS=300 \
+  env -u WINE_HEAT_COUNT -u WINE_HEAT_WAKE -u WINE_HEAT_EVPOOL -u WINE_HEAT_EXE -u WINE_HEAT_LOG "$@" GW2_TEST_PRODUCER_SECONDS=20 GW2_TEST_SECONDS=300 \
     "$run" "$wine" "$work/prefix-$name" $programs
   left=("$log"/*(N) /tmp/heat-*.log(N))
   if (( ${#left} )); then
@@ -83,10 +85,26 @@ for m in off one skip one,skip; do
 done
 collect
 
+# evpool <mode>: three runs of evpool.exe with counting and WINE_HEAT_EVPOOL=<mode>
+evpool() {
+  local m=$1 n
+  for n in 1 2 3; do
+    print -r -- "run $n"
+    env WINE_HEAT_EXE=evpool.exe WINE_HEAT_COUNT=1 WINE_HEAT_EVPOOL=$m WINE_HEAT_LOG=$work/log-evpool-$m-$n \
+      GW2_TEST_SECONDS=300 "$run" "$mine" "$work/prefix-evpool-$m" "$exes/evpool.exe"
+  done
+}
+
+for m in off 1 1,mask; do
+  mkdir -p "$work"/log-evpool-$m-{1,2,3}
+  side "evpool=$m" evpool $m
+done
+collect
+
 side engine quiet engine "$engine" "$work/log-engine" WINE_HEAT_LOG=$work/log-engine
 side unset quiet unset "$mine" "$work/log-unset"
 side other quiet other "$mine" "$work/log-other" WINE_HEAT_EXE=other.exe WINE_HEAT_COUNT=1 \
-  WINE_HEAT_WAKE=one,skip WINE_HEAT_LOG=$work/log-other
+  WINE_HEAT_WAKE=one,skip WINE_HEAT_EVPOOL=1 WINE_HEAT_LOG=$work/log-other
 collect
 
 # 3. jdrly/gw2-on-mac#44

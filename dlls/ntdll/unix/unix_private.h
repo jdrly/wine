@@ -510,10 +510,13 @@ static inline void mutex_unlock( pthread_mutex_t *mutex )
     if (!process_exiting) pthread_mutex_unlock( mutex );
 }
 
+#include "heat.h"
+
 static inline struct async_data server_async( HANDLE handle, struct async_fileio *user, HANDLE event,
                                               PIO_APC_ROUTINE apc, void *apc_context, client_ptr_t iosb )
 {
     struct async_data async;
+    heat_evpool_forget( event );  /* the server sets it when the I/O completes */
     async.handle      = wine_server_obj_handle( handle );
     async.user        = wine_server_client_ptr( user );
     async.iosb        = iosb;

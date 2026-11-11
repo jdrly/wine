@@ -1859,6 +1859,7 @@ NTSTATUS WINAPI NtDuplicateObject( HANDLE source_process, HANDLE source, HANDLE 
     /* whatever the source process is: losing the mark only costs the skip */
     if ((options & DUPLICATE_CLOSE_SOURCE) && source_process == NtCurrentProcess()) heat_handle_closed( source );
     else heat_handle_shared( source );
+    if ((ret = heat_evpool_dup( source_process, source )) != STATUS_PENDING) return ret;
 
     if ((options & DUPLICATE_CLOSE_SOURCE) && source_process != NtCurrentProcess())
     {
@@ -1958,6 +1959,7 @@ NTSTATUS WINAPI NtClose( HANDLE handle )
         return STATUS_SUCCESS;
 
     heat_handle_closed( handle );
+    if ((ret = heat_evpool_close( handle )) != STATUS_PENDING) return ret;
 
     /* hold fd_cache_mutex to prevent the fd from being added again between the
      * call to remove_fd_from_cache and close_handle */

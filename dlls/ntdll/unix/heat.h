@@ -26,6 +26,10 @@
 /* jdrly/gw2-on-mac#44 */
 #define HEAT_MSYNC_UNREG 0x10  /* WINE_HEAT_MSYNC_UNREG=1 */
 
+/* jdrly/gw2-on-mac#42 */
+#define HEAT_EVPOOL      0x20  /* WINE_HEAT_EVPOOL=1 */
+#define HEAT_EVPOOL_MASK 0x40  /* WINE_HEAT_EVPOOL=1,mask */
+
 enum heat_counter
 {
     HC_RELEASE,      /* semaphore releases */
@@ -44,6 +48,13 @@ enum heat_counter
     HC_YIELD_5US, HC_YIELD_20US, HC_YIELD_100US, HC_YIELD_1MS, HC_YIELD_LONG,
     /* jdrly/gw2-on-mac#44 */
     HC_UNREG,        /* multiple-object waits that unregistered after finding an object signaled */
+    /* WINE_HEAT_EVPOOL */
+    HC_EVPOOL_HIT,          /* NtCreateEvent served by the pool */
+    HC_EVPOOL_PUT,          /* NtClose that parked the handle */
+    HC_EVPOOL_EVICTED,      /* parked handles closed for real because the pool was full */
+    HC_EVPOOL_FORGOTTEN,    /* handles that stopped being eligible: duplicated, handed to the server... */
+    HC_EVPOOL_BUSY,         /* parked handles a thread still used when their turn came: closed for real */
+    HC_EVPOOL_DOUBLE_CLOSE, /* a close or a duplicate of a parked handle: STATUS_INVALID_HANDLE */
     HC_NB
 };
 
@@ -113,6 +124,55 @@ static inline void heat_handle_closed( HANDLE handle )
 static inline BOOL heat_skip_wake( unsigned int obj, const unsigned short *refcount )
 {
     return (heat_mode & HEAT_WAKE_SKIP) && heat_releasing && heat_skip_wake_slow( obj, refcount );
+}
+
+/***********************************************************************
+ *  the event pool (WINE_HEAT_EVPOOL), heat.c has the rules
+ */
+extern BOOL heat_evpool_get_slow( HANDLE *handle, ACCESS_MASK access, const OBJECT_ATTRIBUTES *attr,
+                                  EVENT_TYPE type, BOOLEAN state );
+extern void heat_evpool_created_slow( HANDLE handle, ACCESS_MASK access, const OBJECT_ATTRIBUTES *attr,
+                                      EVENT_TYPE type );
+extern NTSTATUS heat_evpool_close_slow( HANDLE handle );
+extern NTSTATUS heat_evpool_take_slow( HANDLE handle );
+extern void heat_evpool_forget_slow( HANDLE handle );
+extern BOOL heat_inproc_sync_idle( HANDLE handle );  /* sync.c */
+
+/* NtCreateEvent, before the server: TRUE when a parked handle of that kind now is *handle */
+static inline BOOL heat_evpool_get( HANDLE *handle, ACCESS_MASK access, const OBJECT_ATTRIBUTES *attr,
+                                    EVENT_TYPE type, BOOLEAN state )
+{
+    return (heat_mode & HEAT_EVPOOL) && heat_evpool_get_slow( handle, access, attr, type, state );
+}
+
+/* NtCreateEvent, after the server made the event */
+static inline void heat_evpool_created( HANDLE handle, ACCESS_MASK access, const OBJECT_ATTRIBUTES *attr,
+                                        EVENT_TYPE type )
+{
+    if (heat_mode & HEAT_EVPOOL) heat_evpool_created_slow( handle, access, attr, type );
+}
+
+/* NtClose: STATUS_PENDING to close it for real, otherwise what NtClose returns */
+static inline NTSTATUS heat_evpool_close( HANDLE handle )
+{
+    return (heat_mode & HEAT_EVPOOL) ? heat_evpool_close_slow( handle ) : STATUS_PENDING;
+}
+
+/* NtDuplicateObject: STATUS_PENDING to go on, STATUS_INVALID_HANDLE for a parked handle of this
+ * process */
+static inline NTSTATUS heat_evpool_dup( HANDLE process, HANDLE source )
+{
+    if (!(heat_mode & HEAT_EVPOOL)) return STATUS_PENDING;
+    if (process == NtCurrentProcess()) return heat_evpool_take_slow( source );
+    /* a real handle, maybe to this process: forgetting another process's value costs nothing */
+    heat_evpool_forget_slow( source );
+    return STATUS_PENDING;
+}
+
+/* the handle was given new flags, pulsed, or handed to the server, which may signal it later */
+static inline void heat_evpool_forget( HANDLE handle )
+{
+    if ((heat_mode & HEAT_EVPOOL) && handle) heat_evpool_forget_slow( handle );
 }
 
 #endif /* __NTDLL_UNIX_HEAT_H */
