@@ -178,17 +178,37 @@ class MachO:
         return sorted(bounds)
 
     def const_end(self, addr):
-        """where the piece of __TEXT,__const that starts at addr ends"""
+        """where the piece of __TEXT,__const that starts at addr ends, by what the code computes"""
         bounds = self.const_bounds
         return bounds[bisect.bisect_right(bounds, addr)]
 
-    def jump_table(self, table, width, signed, base, lo, hi):
-        """the targets in [lo, hi) of a jump table at <table>: entries of <width> bytes, each a
-        count of instructions after <base>. Its end is where the next piece of the section starts."""
+    @functools.cached_property
+    def const_symbols(self):
+        s = self.section("__TEXT,__const")
+        if not s:
+            return []
+        lo, hi = s["addr"], s["addr"] + s["size"]
+        return sorted({hi} | {v for n, t, _, _, v in self.syms
+                              if not t & N_STAB and t & N_TYPE == N_SECT and lo <= v < hi})
+
+    def const_extent_end(self, addr):
+        """the farthest the constant at addr can reach: the next symbol, or the section's end. An
+        address the code computes may be inside an array, so it doesn't end one."""
+        bounds = self.const_symbols
+        return bounds[bisect.bisect_right(bounds, addr)]
+
+    def jump_table(self, table, width, signed, base, lo, hi, count=None):
+        """the targets in [lo, hi) of a jump table at <table>: <count> entries of <width> bytes,
+        each a count of instructions after <base>. Without a count, as far as the table can reach:
+        entries past its real end only add cases that aren't, so more ways in, never fewer."""
         s = self.section("__TEXT,__const")
         if not s or not s["addr"] <= table < s["addr"] + s["size"]:
             return None
-        n = min((self.const_end(table) - table) // width, 4096)
+        n = min((self.const_extent_end(table) - table) // width, 4096)
+        if count is not None:
+            if count > n:
+                return None
+            n = count
         fmt = {1: "b", 2: "h", 4: "i"}[width]
         fmt = fmt if signed else fmt.upper()
         raw = self.bytes_of(table, n * width)
@@ -247,10 +267,10 @@ class MachO:
                     if s["name"] == "__TEXT,__const" and (i < 0 or addrs[i] != addr):
                         # no symbol starts here: a jump table or another constant the linker
                         # dropped the label of. The symbol before it may be another file's,
-                        # whose data can change size, so it stands for its bytes, up to where
-                        # the next symbol or the next address the code computes starts. A jump
-                        # table's entries are relative to its own function.
-                        end = self.const_end(addr)
+                        # whose data can change size, so it stands for its bytes, up to the next
+                        # symbol: all the constant can reach, and perhaps more. A jump table's
+                        # entries are relative to its own function.
+                        end = self.const_extent_end(addr)
                         return f"const:{end - addr}:{hashlib.sha256(self.data[o:o + end - addr]).hexdigest()[:24]}"
                     if i >= 0 and addrs[i] >= s["addr"]:
                         return f"{defined[i][1]}+{addr - addrs[i]}"
@@ -357,25 +377,47 @@ def masked(m, resolve, addr, size):
             if addr <= t < end and t != here and not (optimistic and unreached):
                 (ahead if t > here else behind).setdefault((t - addr) // 4, []).append(dict(page))
 
+        def last_write(reg, before, stop):
+            """the index of the last instruction in [stop, before) that writes reg, or None"""
+            for j in range(before - 1, stop - 1, -1):
+                if reg in written(words[j]):
+                    return j
+            return None
+
         def jump_table(i):
-            """the jump table a BR at words[i] dispatches through, or None: adrp+add of the table,
-            adr of the base, ldrb/ldrh/ldr(sw) of the entry, add base, entry, lsl #2, br"""
-            target_reg, base, table, load = words[i] & 0x3e0, None, None, None
-            for j in range(i - 1, max(i - 9, -1), -1):
-                w = words[j]
-                if w & 0x9f000000 == 0x10000000 and base is None:  # ADR
-                    base = addr + j * 4 + sext(((w >> 5) & 0x7ffff) << 2 | (w >> 29) & 3, 21)
-                elif w & 0x3f200c00 == 0x38200800 and load is None:  # load, register offset
-                    load = w
-            if base is None or load is None:
+            """the cases of a BR at words[i], or None. Traced back from the BR's own register,
+            with nothing else writing the registers in between: add xD, xB, xE, lsl #2 of an adr
+            xB and an entry loaded by ldrb/ldrh/ldr(sw) xE, [xT, xI] from the table in xT, whose
+            length the cmp xI, #n and b.hi or b.hs before it bound."""
+            stop = max(i - 12, 0)
+            d = (words[i] >> 5) & 31
+            j = last_write(d, i, stop)
+            w = words[j] if j is not None else 0
+            if w & 0xffe0fc00 != 0x8b000800:  # ADD Xd, Xn, Xm, LSL #2
                 return None
-            size_bits, opc = load >> 30, (load >> 22) & 3
-            if opc == 0 or (size_bits == 3) or (size_bits == 2 and opc == 3):
+            b, e = (w >> 5) & 31, (w >> 16) & 31
+            ja, jl = last_write(b, j, stop), last_write(e, j, stop)
+            if ja is None or jl is None or words[ja] & 0x9f000000 != 0x10000000 or words[jl] & 0x3f200c00 != 0x38200800:
                 return None
-            table = exact.get((load >> 5) & 31)
+            adr, load = words[ja], words[jl]
+            base = addr + ja * 4 + sext(((adr >> 5) & 0x7ffff) << 2 | (adr >> 29) & 3, 21)
+            size_bits, opc, t, x = load >> 30, (load >> 22) & 3, (load >> 5) & 31, (load >> 16) & 31
+            if opc == 0 or size_bits == 3 or (size_bits == 2 and opc == 3) or last_write(t, i, jl + 1) is not None:
+                return None
+            table = exact.get(t)
             if table is None:
                 return None
-            return m.jump_table(table, 1 << size_bits, opc >= 2, base, addr, end)
+            count = None
+            for k in range(jl - 1, stop - 1, -1):  # the bound: cmp xI, #n, then b.hi or b.hs
+                c = words[k]
+                if c & 0x7fc0001f == 0x7100001f and (c >> 5) & 31 == x:
+                    cond = next((words[n] & 0xf for n in range(k + 1, jl) if words[n] & 0xff000010 == 0x54000000), None)
+                    if cond in (8, 2):
+                        count = ((c >> 10) & 0xfff) + (cond == 8)
+                    break
+                if x in written(c):
+                    break
+            return m.jump_table(table, 1 << size_bits, opc >= 2, base, addr, end, count)
 
         for i, w in enumerate(words):
             pc = addr + i * 4
@@ -511,7 +553,7 @@ class Fixture:
     def bytes_of(self, addr, size):
         return self.code[addr:addr + size]
 
-    def jump_table(self, table, width, signed, base, lo, hi):
+    def jump_table(self, table, width, signed, base, lo, hi, count=None):
         return self.tables.get(table)
 
 
@@ -562,6 +604,27 @@ def fixtures():
     tables = {0x2000: [7 * 4, 15 * 4], 0x4000: [14 * 4]}
     check("an outer case after an inner jump table", nested(0x20), nested(0x40),
           {0x1020: "Y", 0x3020: "Z"}, {0x1040: "W", 0x3040: "Z"}, tables)
+
+    # a BR on a register that no table's chain fills: an ADR and an indexed load nearby don't
+    # make it a jump table, and the case at 10, also reached at 8, keeps its offset
+    def stray(imm):
+        return [adrp(24, 1), adrp(9, 2), add(9, 9, 0), adr(10, 16), ldrb_reg(11, 9, 8),
+                0xf9400014, br(20),                            # 5-6: ldr x20, [x0]; br x20
+                adrp(24, 3), 0x14000002, ret,                  # 7-9: x24 = page 0x3000; b 10
+                add(0, 24, imm), ret]                          # 10-11
+    check("a BR that isn't a jump table's", stray(0x10), stray(0x20),
+          {0x3010: "Q"}, {0x3020: "Q"}, {0x2000: [7 * 4]})
+
+    # two arrays without symbols that start alike, each also used at +4: a use of either stands
+    # for all of it, not for the 4 bytes before the other use
+    const = MachO.__new__(MachO)
+    const.data = bytes([1, 2, 3, 4] + [0x11] * 28 + [1, 2, 3, 4] + [0x22] * 28)
+    const.sections = [dict(name="__TEXT,__const", addr=0x4000, size=64, offset=0, type=0, reserved1=0, reserved2=0)]
+    const.syms, const.indirect = [], []
+    const.__dict__["const_bounds"] = [0x4000, 0x4004, 0x4020, 0x4024, 0x4040]
+    name = const.resolver()
+    if name(0x4000) == name(0x4020):
+        failed.append("arrays that start alike, cut by uses inside them")
     return failed
 
 
