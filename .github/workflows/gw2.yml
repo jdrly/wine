@@ -38,8 +38,11 @@ env:
   COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
   # athei/wine's commit Mach9 0.3.1 was built from (wine-11.21-37-g53def89293), where gw2-on-mac starts
   BASE_COMMIT: 53def89293adfe1a62c43ef46abe80a536e9ca49
-  # What Mach9's release run of v0.3.1 used (athei/mach9 run 42769825957): the macos-26 image with
-  # Xcode 26.6 (SDK 26.5), and its pins/redist.env and bin/lib/profile.sh
+  # What Mach9's release run of v0.3.1 used (athei/mach9 run 42769825957): Xcode 26.6 (SDK 26.5,
+  # clang-2100.1.1.101) on the macos-26 image (macos-26-arm64 20261102.0473.1), and its
+  # pins/redist.env and bin/lib/profile.sh. Mine runs on the xcode-27 image, which GitHub gives
+  # runners to when it has none for macos-26, with the same Xcode selected by name: the baseline
+  # compare shows whether the image's macOS version reaches the file.
   XCODE_VERSION: "26.6"
   LLVM_MINGW_VERSION: "20261104"
   LLVM_MINGW_SHA256: 66cbd5178c4a71b0d473e68ede172f8eb7d15d023e67f39201d0a69e21f6bf3c
@@ -53,7 +56,7 @@ defaults:
 jobs:
   build:
     name: Build ntdll.so
-    runs-on: macos-26
+    runs-on: xcode-27
     timeout-minutes: 60
     env:
       MACOSX_DEPLOYMENT_TARGET: "26.4"
@@ -63,6 +66,30 @@ jobs:
       HOMEBREW_NO_AUTO_UPDATE: 1
       HOMEBREW_NO_INSTALL_CLEANUP: 1
     steps:
+      # first, so a missing Xcode stops the job within a minute
+      - name: Select Xcode
+        run: |
+          {
+            echo "### Runner"
+            echo '```'
+            echo "image $ImageOS $ImageVersion, macOS $(sw_vers -productVersion) ($(sw_vers -buildVersion))"
+            ls -d /Applications/Xcode_*.app
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          app=/Applications/Xcode_$XCODE_VERSION.app
+          if [[ ! -d $app ]]; then
+            echo "::error::Xcode $XCODE_VERSION isn't on this runner's image ($ImageOS $ImageVersion), so the engine's ntdll.so can't be rebuilt."
+            exit 1
+          fi
+          sudo xcode-select -s "$app"
+          {
+            echo "### Toolchain"
+            echo '```'
+            xcodebuild -version | head -1
+            echo "macOS SDK $(xcrun -sdk macosx --show-sdk-version)"
+            clang --version | head -1
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ env.COMMIT }}
@@ -76,24 +103,6 @@ jobs:
           fetch-depth: 0
           filter: blob:none
           persist-credentials: false
-      - name: Select Xcode
-        run: |
-          app=/Applications/Xcode_$XCODE_VERSION.app
-          if [[ ! -d $app ]]; then
-            echo "::error::Xcode $XCODE_VERSION isn't on this runner's image ($ImageOS $ImageVersion), so the engine's ntdll.so can't be rebuilt. The image has: $(cd /Applications && echo Xcode_*.app)"
-            exit 1
-          fi
-          sudo xcode-select -s "$app"
-          {
-            echo "### Toolchain"
-            echo '```'
-            echo "image $ImageOS $ImageVersion"
-            xcodebuild -version | head -1
-            echo "macOS SDK $(xcrun -sdk macosx --show-sdk-version)"
-            clang --version | head -1
-            echo '```'
-          } | tee -a "$GITHUB_STEP_SUMMARY"
-
       - name: Restore Mach9
         id: mach9
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -248,7 +257,7 @@ jobs:
   tests:
     name: Tests on the engine
     needs: build
-    runs-on: macos-26
+    runs-on: xcode-27
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

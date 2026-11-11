@@ -1,0 +1,5 @@
+# gw2 (jdrly/gw2-on-mac#40): xcode-27 is GitHub's Xcode 27 image (GitHub-hosted, not a
+# self-hosted runner), which actionlint doesn't know yet
+self-hosted-runner:
+  labels:
+    - xcode-27
