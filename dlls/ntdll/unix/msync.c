@@ -62,6 +62,7 @@
 #include "wine/server.h"
 
 #include "unix_private.h"
+#include "heat.h"
 #include "msync.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(sync);
@@ -423,6 +424,13 @@ static inline NTSTATUS msync_wait_single( int obj, void *obj_shm, const unsigned
         }
         if (is_event( obj_shm ))
             ret = ulock_wait( UL_COMPARE_AND_WAIT64_SHARED | ULF_NO_ERRNO, obj_shm, word, ns_timeleft );
+        else if ((heat_mode & HEAT_WAKE_SKIP) && ((struct semaphore *)obj_shm)->msync_type == MSYNC_SEMAPHORE)
+        {
+            /* WINE_HEAT_WAKE=skip: heat.c has why the count and its barrier make no wake lost */
+            heat_sleep_on( obj );
+            ret = ulock_wait( UL_COMPARE_AND_WAIT_SHARED | ULF_NO_ERRNO, obj_shm, val, ns_timeleft );
+            heat_woke_on( obj );
+        }
         else
             ret = ulock_wait( UL_COMPARE_AND_WAIT_SHARED | ULF_NO_ERRNO, obj_shm, val, ns_timeleft );
     } while (ret == -EINTR || ret == -EFAULT);
@@ -803,15 +811,31 @@ void msync_init(void)
     }
 }
 
-/* returns FALSE if nothing waited on the object */
-static inline BOOL signal_all( void *shm, unsigned int shm_idx )
+/* returns FALSE if nothing waited on the object. <release> is a semaphore release's count, which
+ * WINE_HEAT_WAKE may spend on fewer wake calls; 0 for anything else, which wakes every waiter. */
+static inline BOOL signal_all( void *shm, unsigned int shm_idx, ULONG release )
 {
     __thread static mach_msg_header_t send_header;
     struct event *event_obj = (struct event *)shm;
     int ret;
 
-    ret = __ulock_wake( (is_event( shm ) ? UL_COMPARE_AND_WAIT64_SHARED : UL_COMPARE_AND_WAIT_SHARED) |
-                        ULF_WAKE_ALL | ULF_NO_ERRNO, shm, 0 );
+    if (release && heat_skip_wake( shm_idx ))
+        ret = -ENOENT;
+    else if (release && (heat_mode & HEAT_WAKE_ONE))
+    {
+        /* at most one thread for each count released, until a call finds no waiter */
+        do
+        {
+            ret = __ulock_wake( UL_COMPARE_AND_WAIT_SHARED | ULF_NO_ERRNO, shm, 0 );
+            heat_count( ret == -ENOENT ? HC_WAKE_NONE : HC_WAKE_ONE );
+        } while (--release && ret != -ENOENT);
+    }
+    else
+    {
+        ret = __ulock_wake( (is_event( shm ) ? UL_COMPARE_AND_WAIT64_SHARED : UL_COMPARE_AND_WAIT_SHARED) |
+                            ULF_WAKE_ALL | ULF_NO_ERRNO, shm, 0 );
+        if (ret == -ENOENT) heat_count( HC_WAKE_NONE );
+    }
 
     if (!__atomic_load_n( &event_obj->multiple_waiters, __ATOMIC_SEQ_CST ))
         return ret != -ENOENT;
@@ -841,7 +865,8 @@ NTSTATUS msync_release_semaphore_obj( int obj, ULONG count, ULONG *prev_count )
 
     if (prev_count) *prev_count = current;
 
-    signal_all( (void *)semaphore, obj );
+    heat_count( HC_RELEASE );
+    signal_all( (void *)semaphore, obj, count );
     return STATUS_SUCCESS;
 }
 
@@ -861,7 +886,7 @@ NTSTATUS msync_set_event_obj( int obj, LONG *prev_state )
     LONG current;
 
     if (!(current = __atomic_exchange_n( &event->signaled, 1, __ATOMIC_SEQ_CST )))
-        signal_all( (void *)event, obj );
+        signal_all( (void *)event, obj, 0 );
 
     if (prev_state) *prev_state = current;
 
@@ -915,7 +940,7 @@ NTSTATUS msync_pulse_event_obj( int obj, LONG *prev_state )
             if (untaken) new++;
         } while (!__atomic_compare_exchange_n( &event->pulse, &pulse, new, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST ));
 
-        if (!signal_all( (void *)event, obj ) && untaken)
+        if (!signal_all( (void *)event, obj, 0 ) && untaken)
         {
             pulse = __atomic_load_n( &event->pulse, __ATOMIC_SEQ_CST );
             while ((pulse & PULSE_UNTAKEN) &&
@@ -952,7 +977,7 @@ NTSTATUS msync_release_mutex_obj( int obj, LONG *prev_count )
     if (!--mutex->count)
     {
         __atomic_store_n( &mutex->tid, 0, __ATOMIC_SEQ_CST );
-        signal_all( (void *)mutex, obj );
+        signal_all( (void *)mutex, obj, 0 );
     }
 
     return STATUS_SUCCESS;
@@ -1042,6 +1067,8 @@ NTSTATUS msync_wait_objs( const DWORD count, const int *objs, BOOLEAN wait_any,
 
     if (wait_any || count <= 1)
     {
+        BOOL woken = FALSE;
+
         while (1)
         {
             /* Try to grab anything. */
@@ -1129,6 +1156,7 @@ NTSTATUS msync_wait_objs( const DWORD count, const int *objs, BOOLEAN wait_any,
 
             /* Looks like everything is contended, so wait. */
 
+            if (woken) heat_count( HC_SPURIOUS );
             if (timeout && !timeout->QuadPart)
             {
                 /* Unlike esync, we already know that we've timed out, so we
@@ -1145,6 +1173,7 @@ NTSTATUS msync_wait_objs( const DWORD count, const int *objs, BOOLEAN wait_any,
                                            timeout ? &end : NULL, current_tid );
 
             if (ret == STATUS_TIMEOUT) return STATUS_TIMEOUT;
+            if ((woken = (ret == STATUS_SUCCESS))) heat_count( HC_WOKEN );
         } /* while (1) */
     }
     else
@@ -1208,6 +1237,11 @@ tryagain:
                         if (status != STATUS_PENDING)
                             break;
                     }
+                    /* WINE_HEAT_WAKE=one: a release wakes only as many threads as its count, and
+                     * this one was woken without taking the count: pass the wake on, so a single
+                     * waiter on the same semaphore doesn't miss it. */
+                    if (status == STATUS_SUCCESS && (heat_mode & HEAT_WAKE_ONE) && event->msync_type == MSYNC_SEMAPHORE)
+                        __ulock_wake( UL_COMPARE_AND_WAIT_SHARED | ULF_NO_ERRNO, objs_shm[i], 0 );
                 }
 
                 if (status == STATUS_TIMEOUT) return STATUS_TIMEOUT;
