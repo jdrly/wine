@@ -17,7 +17,7 @@
 #define SECONDS 20
 
 static HANDLE mutex, event;
-static volatile LONG stop, ready, taken_by_c, lost_by_a;
+static volatile LONG stop, ready, taken_by_c, lost_by_a, c_done;
 static volatile DWORD lost_error;
 static volatile LONG64 wait_alls, got_all, steals, polls;
 
@@ -44,6 +44,8 @@ static DWORD WINAPI owner( void *arg )
         }
         else if (r != WAIT_TIMEOUT) return 2;
     }
+    /* C may be about to poll: once it has stopped, M is free to go */
+    while (!c_done) SwitchToThread();
     if (!ReleaseMutex( mutex ) && !lost_by_a)
     {
         lost_error = GetLastError();
@@ -76,6 +78,7 @@ static DWORD WINAPI poller( void *arg )
         }
         InterlockedIncrement64( &polls );
     }
+    c_done = 1;
     return 0;
 }
 
