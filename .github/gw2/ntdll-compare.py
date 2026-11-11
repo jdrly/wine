@@ -670,15 +670,31 @@ def object_functions(m):
     if not text:
         return {}
     index = m.sections.index(text) + 1
-    starts = sorted({(v, n) for n, t, sect, _, v in m.syms
+    # a symbol's value is an address; a relocation's is an offset in its section
+    starts = sorted({(v - text["addr"], n) for n, t, sect, _, v in m.syms
                      if not t & N_STAB and t & N_TYPE == N_SECT and sect == index and not n.startswith(("ltmp", "l_", "L"))})
     relocs = relocations(m, text)
     out = {}
     for k, (start, name) in enumerate(starts):
         end = starts[k + 1][0] if k + 1 < len(starts) else text["size"]
         out[name] = (bytes(m.data[text["offset"] + start:text["offset"] + end]),
-                     tuple((a - start,) + rest for a, *rest in relocs if start <= a < end))
+                     tuple((a - start, *rest) for a, *rest in relocs if start <= a < end))
     return out
+
+
+def function_changes(base, head, label):
+    """the functions of a touched object, by bytes and relocations: changed, new and gone"""
+    fb, fh = object_functions(base), object_functions(head)
+    changed, new, removed = [], [], []
+    for name in sorted(set(fb) | set(fh)):
+        short = f"{label}: {name[1:] if name.startswith('_') else name}"
+        if name not in fb:
+            new.append(short + " (new)")
+        elif name not in fh:
+            removed.append(short + " (gone)")
+        elif fb[name] != fh[name]:
+            changed.append(short)
+    return changed, new, removed
 
 
 def build_commands(log):
@@ -785,16 +801,10 @@ def compare_objects(r, build_dir, base_file, base_dir, head_file, base_log, head
             elif canonical(MachO(base_objs[f])) != canonical(MachO(head_objs[f])):
                 bad.append(f"{f}: code, data, relocations or symbols")
             continue
-        fb, fh = object_functions(MachO(base_objs[f])), object_functions(MachO(head_objs[f]))
-        label = f[:-2] + ".c"
-        for name in sorted(set(fb) | set(fh)):
-            short = f"{label}: {name[1:] if name.startswith('_') else name}"
-            if name not in fb:
-                new.append(short + " (new)")
-            elif name not in fh:
-                removed.append(short + " (gone)")
-            elif fb[name] != fh[name]:
-                changed.append(short)
+        c, n, g = function_changes(MachO(base_objs[f]), MachO(head_objs[f]), f[:-2] + ".c")
+        changed += c
+        new += n
+        removed += g
     r.check(not bad, "every object of an untouched source file is my base build's: its compile command, "
                      "and its code, data, relocations and symbols",
             f"{len(bad)} objects of untouched source files differ from my base build's:")
@@ -913,7 +923,8 @@ def fixtures():
     return failed
 
 
-def fake_object(code, relocs, data, dwarf=b"", flags=0x2000, indirect=(), pointer_r1=0, data_addr=0x1000):
+def fake_object(code, relocs, data, dwarf=b"", flags=0x2000, indirect=(), pointer_r1=0, data_addr=0x1000,
+                functions=(("_f", 0),)):
     """a minimal object file for canonical(): a header, __text with relocations, __data, a
     __nl_symbol_ptr section on the indirect symbol table, and __debug_info"""
     m = MachO.__new__(MachO)
@@ -931,7 +942,7 @@ def fake_object(code, relocs, data, dwarf=b"", flags=0x2000, indirect=(), pointe
                   section("__DATA,__data", o_data, len(data), 0, addr=data_addr),
                   section("__DATA,__nl_symbol_ptr", o_ptr, 8 * len(indirect), 0x6, r1=pointer_r1),
                   section("__DWARF,__debug_info", o_dwarf, len(dwarf), 0x02000000)]
-    m.syms = [("_f", 0x0f, 1, 0, 0), ("_a", 0x01, 0, 0, 0), ("_b", 0x01, 0, 0, 0)]
+    m.syms = [("_a", 0x01, 0, 0, 0), ("_b", 0x01, 0, 0, 0)] + [(n, 0x0f, 1, 0, v) for n, v in functions]
     m.commands, m.indirect, m.dysymtab = [], list(indirect), None
     return m
 
@@ -969,22 +980,44 @@ def selftest(engine_dir):
     # the object compare: a relocation's target, an addend, a byte of data; not a debug section
     code = struct.pack("<2I", 0x90000008, 0x91000108)  # adrp x8, _a@PAGE; add x8, x8, _a@PAGEOFF
     page, off = 3 << 28 | 1 << 27 | 2 << 25 | 1 << 24, 4 << 28 | 1 << 27 | 2 << 25  # ARM64_RELOC_PAGE21, PAGEOFF12
-    base = canonical(fake_object(code, [(0, page | 1), (4, off | 1)], b"\x01\x02"))  # symbol 1 is _a
-    for what, obj in (("a relocation's target", fake_object(code, [(0, page | 2), (4, off | 2)], b"\x01\x02")),
-                      ("an addend", fake_object(code, [(0, 10 << 28 | 8), (0, page | 1), (4, off | 1)], b"\x01\x02")),
-                      ("a byte of data", fake_object(code, [(0, page | 1), (4, off | 1)], b"\x01\x03"))):
+    base = canonical(fake_object(code, [(0, page | 0), (4, off | 0)], b"\x01\x02"))  # symbol 0 is _a, 1 is _b
+    for what, obj in (("a relocation's target", fake_object(code, [(0, page | 1), (4, off | 1)], b"\x01\x02")),
+                      ("an addend", fake_object(code, [(0, 10 << 28 | 8), (0, page | 0), (4, off | 0)], b"\x01\x02")),
+                      ("a byte of data", fake_object(code, [(0, page | 0), (4, off | 0)], b"\x01\x03"))):
         if canonical(obj) == base:
             failed.append(f"object compare: {what}")
-    if canonical(fake_object(code, [(0, page | 1), (4, off | 1)], b"\x01\x02", b"\x07")) != base:
+    if canonical(fake_object(code, [(0, page | 0), (4, off | 0)], b"\x01\x02", b"\x07")) != base:
         failed.append("object compare: the debug information only")
     # the review of the object compare: header flags, an indirect slot, a section's reserved1
-    ptrs = canonical(fake_object(code, [], b"", indirect=(1,)))
-    for what, obj in (("the header's flags", fake_object(code, [], b"", flags=0, indirect=(1,))),
-                      ("an indirect symbol slot", fake_object(code, [], b"", indirect=(2,))),
-                      ("a section's reserved1", fake_object(code, [], b"", indirect=(1,), pointer_r1=1)),
-                      ("a section's address", fake_object(code, [], b"", indirect=(1,), data_addr=0x1008))):
+    ptrs = canonical(fake_object(code, [], b"", indirect=(0,)))
+    for what, obj in (("the header's flags", fake_object(code, [], b"", flags=0, indirect=(0,))),
+                      ("an indirect symbol slot", fake_object(code, [], b"", indirect=(1,))),
+                      ("a section's reserved1", fake_object(code, [], b"", indirect=(0,), pointer_r1=1)),
+                      ("a section's address", fake_object(code, [], b"", indirect=(0,), data_addr=0x1008))):
         if canonical(obj) == ptrs:
             failed.append(f"object compare: {what}")
+
+    # a touched object: its functions through object_functions(), each with relocations. _f1 and
+    # _f2 refer to _a; the head points _f1's at _b, keeps _f2, drops _f3 and adds _f4
+    four = struct.pack("<4I", 0x90000008, 0x91000108, 0x90000009, 0xd65f03c0)
+    rel = lambda f1: [(0, page | f1), (4, off | f1), (8, page | 0)]
+    before = fake_object(four, rel(0), b"", functions=(("_f1", 0), ("_f2", 8), ("_f3", 12)))
+    after = fake_object(four, rel(1), b"", functions=(("_f1", 0), ("_f2", 8), ("_f4", 12)))
+    try:
+        got = function_changes(before, after, "x.c")
+    except Exception as e:  # what the merged code raised on the runner
+        got = repr(e)
+    if got != (["x.c: f1"], ["x.c: f4 (new)"], ["x.c: f3 (gone)"]):
+        failed.append(f"touched object: f1 changed, f2 equal, f3 gone and f4 new, not {got}")
+    moved = fake_object(four, rel(0), b"", functions=(("_f1", 0), ("_f2", 8), ("_f3", 12)))
+    moved.sections[0]["addr"] = 0x100  # the same functions, with __text at another address
+    moved.syms = [(n, t, sect, desc, v + 0x100 if t == 0x0f else v) for n, t, sect, desc, v in moved.syms]
+    try:
+        got = function_changes(before, moved, "x.c")
+    except Exception as e:
+        got = repr(e)
+    if got != ([], [], []):
+        failed.append(f"touched object: __text at another address with the same functions, not {got}")
 
     # the link proof: an object of the same name from another directory, and one linked twice
     with tempfile.TemporaryDirectory() as tmp:
