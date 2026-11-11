@@ -637,7 +637,7 @@ def canonical(m):
     """what of an object file can reach the linked file: the header's CPU, type and flags; every
     load command but the segment and symbol table ones, with the data a link edit command points
     to (data in code, optimization hints...) in place of its offset; every section outside __DWARF
-    with its bytes, relocations and reserved fields; the symbols that aren't debug entries; the
+    with its address (a symbol's value is one), bytes, relocations and reserved fields; the symbols that aren't debug entries; the
     indirect symbol table by name; the dynamic symbol table's counts, and any relocations it has"""
     _, cputype, subtype, filetype, _, _, flags, _ = struct.unpack_from("<IiiIIIII", m.data, 0)
     commands = []
@@ -650,8 +650,8 @@ def canonical(m):
         if sec["name"].startswith("__DWARF,"):
             continue
         data = None if sec["type"] in S_ZEROFILL_TYPES else bytes(m.data[sec["offset"]:sec["offset"] + sec["size"]])
-        sections.append((sec["name"], sec["size"], sec["align"], sec["flags"], sec["reserved1"], sec["reserved2"],
-                         data, tuple(relocations(m, sec))))
+        sections.append((sec["name"], sec["addr"], sec["size"], sec["align"], sec["flags"], sec["reserved1"],
+                         sec["reserved2"], data, tuple(relocations(m, sec))))
     names = [sec["name"] for sec in m.sections]
     symbols = sorted((n, t, names[sect - 1] if sect else "", desc, value)
                      for n, t, sect, desc, value in m.syms if not t & N_STAB)
@@ -709,25 +709,34 @@ def linked_objects(m):
     return [(os.path.normpath(n), value) for n, t, _, _, value in m.syms if t == N_OSO]
 
 
-def link_proof(link_objects, debug_map, compared, build_dir):
+def link_proof(link_objects, debug_map, compared, build_dir, empty=()):
     """what is wrong with the claim that <compared> ({path the link used: file compared}) are the
-    objects a file was linked from: the link line's objects (relative to <build_dir>) and the debug
-    map's [(path, time)] must name the same paths in the same order, each once, and each compared
-    file must have the time the link saw"""
+    objects a file was linked from. The link line's objects (relative to <build_dir>) are the
+    compared ones, each once. The debug map's [(path, time)] names them in the same order, leaving
+    out only those in <empty>, which add nothing (the linker writes no entry for an object without
+    code or symbols, such as signal_x86_64.o on arm64). Each object in it has the time the link saw."""
     problems = []
     used = [os.path.normpath(o if os.path.isabs(o) else os.path.join(build_dir, o)) for o in link_objects]
     mapped = [p for p, _ in debug_map]
-    if used != mapped:
-        problems.append("the link line and the debug map name different objects or another order")
-    if len(set(mapped)) != len(mapped):
+    if len(set(used)) != len(used) or len(set(mapped)) != len(mapped):
         problems.append("an object is linked twice")
-    if set(compared) != set(mapped):
-        problems.append("the objects compared aren't the ones linked")
+    if set(compared) != set(used):
+        problems.append("the objects compared aren't the ones on the link line")
+    if [p for p in used if p not in empty] != mapped:
+        problems.append("the debug map doesn't list the link line's objects, empty ones aside, in its order")
     times = dict(debug_map)
-    stale = [os.path.basename(p) for p, f in compared.items() if int(os.stat(f).st_mtime) != times.get(p)]
+    stale = [os.path.basename(p) for p, f in compared.items()
+             if p not in empty and int(os.stat(f).st_mtime) != times.get(p)]
     if stale:
         problems.append(f"changed since the link: {listing(stale)}")
     return problems
+
+
+def adds_nothing(m):
+    """an object without a symbol and with every section outside __DWARF empty. The assembler's
+    section-start labels (ltmp0...) don't count: they name a place, not anything in it."""
+    return (not any(not t & N_STAB and not n.startswith("ltmp") for n, t, _, _, _ in m.syms)
+            and not any(sec["size"] for sec in m.sections if not sec["name"].startswith("__DWARF,")))
 
 
 def compare_objects(r, build_dir, base_file, base_dir, head_file, base_log, head_log, since, touched):
@@ -743,8 +752,9 @@ def compare_objects(r, build_dir, base_file, base_dir, head_file, base_log, head
     for label, objs, file, link, cc in (("my base build", base_objs, base_file, base_link, base_cc),
                                        ("this build", head_objs, head_file, head_link, head_cc)):
         compared = {os.path.normpath(os.path.join(unix, f)): p for f, p in objs.items()}
+        empty = {path for path, p in compared.items() if adds_nothing(MachO(p))}
         problems = (["no link of ntdll.so in its make log"] if link is None else
-                    link_proof(link[0], linked_objects(MachO(file)), compared, build_dir))
+                    link_proof(link[0], linked_objects(MachO(file)), compared, build_dir, empty))
         r.check(not problems, f"{label}: the {len(objs)} objects compared are the ones its link line names and its "
                               f"debug map lists, by path and in order, with the times the link saw",
                 f"{label}: {'; '.join(problems)}")
@@ -903,7 +913,7 @@ def fixtures():
     return failed
 
 
-def fake_object(code, relocs, data, dwarf=b"", flags=0x2000, indirect=(), pointer_r1=0):
+def fake_object(code, relocs, data, dwarf=b"", flags=0x2000, indirect=(), pointer_r1=0, data_addr=0x1000):
     """a minimal object file for canonical(): a header, __text with relocations, __data, a
     __nl_symbol_ptr section on the indirect symbol table, and __debug_info"""
     m = MachO.__new__(MachO)
@@ -914,11 +924,11 @@ def fake_object(code, relocs, data, dwarf=b"", flags=0x2000, indirect=(), pointe
     reloff = o_dwarf + len(dwarf)
     m.data = (header + code + data + bytes(8 * len(indirect)) + dwarf
               + b"".join(struct.pack("<iI", a, info) for a, info in relocs))
-    section = lambda name, off, size, flags, r1=0, reloff=0, nreloc=0: dict(
-        name=name, offset=off, size=size, align=3, flags=flags, type=flags & 0xff, reloff=reloff, nreloc=nreloc,
-        reserved1=r1, reserved2=0)
+    section = lambda name, off, size, flags, r1=0, reloff=0, nreloc=0, addr=0: dict(
+        name=name, addr=addr, offset=off, size=size, align=3, flags=flags, type=flags & 0xff, reloff=reloff,
+        nreloc=nreloc, reserved1=r1, reserved2=0)
     m.sections = [section("__TEXT,__text", o_code, len(code), 0x80000400, reloff=reloff, nreloc=len(relocs)),
-                  section("__DATA,__data", o_data, len(data), 0),
+                  section("__DATA,__data", o_data, len(data), 0, addr=data_addr),
                   section("__DATA,__nl_symbol_ptr", o_ptr, 8 * len(indirect), 0x6, r1=pointer_r1),
                   section("__DWARF,__debug_info", o_dwarf, len(dwarf), 0x02000000)]
     m.syms = [("_f", 0x0f, 1, 0, 0), ("_a", 0x01, 0, 0, 0), ("_b", 0x01, 0, 0, 0)]
@@ -971,7 +981,8 @@ def selftest(engine_dir):
     ptrs = canonical(fake_object(code, [], b"", indirect=(1,)))
     for what, obj in (("the header's flags", fake_object(code, [], b"", flags=0, indirect=(1,))),
                       ("an indirect symbol slot", fake_object(code, [], b"", indirect=(2,))),
-                      ("a section's reserved1", fake_object(code, [], b"", indirect=(1,), pointer_r1=1))):
+                      ("a section's reserved1", fake_object(code, [], b"", indirect=(1,), pointer_r1=1)),
+                      ("a section's address", fake_object(code, [], b"", indirect=(1,), data_addr=0x1008))):
         if canonical(obj) == ptrs:
             failed.append(f"object compare: {what}")
 
@@ -987,6 +998,12 @@ def selftest(engine_dir):
             failed.append("link proof: an object linked twice")
         if link_proof(["dlls/ntdll/unix/loader.o"], [(real, when)], {real: obj}, "/build"):
             failed.append("link proof: the right object")
+        other = "/build/dlls/ntdll/unix/signal_x86_64.o"
+        both = ["dlls/ntdll/unix/loader.o", "dlls/ntdll/unix/signal_x86_64.o"]
+        if link_proof(both, [(real, when)], {real: obj, other: obj}, "/build", {other}):
+            failed.append("link proof: an empty object the debug map leaves out")
+        if not link_proof(both, [(real, when)], {real: obj, other: obj}, "/build"):
+            failed.append("link proof: an object with code the debug map leaves out")
 
     for item in fixtures():
         failed.append(f"masking fixture: {item}")
