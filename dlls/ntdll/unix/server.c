@@ -1857,7 +1857,8 @@ NTSTATUS WINAPI NtDuplicateObject( HANDLE source_process, HANDLE source, HANDLE 
     if (dest) *dest = 0;
 
     /* whatever the source process is: losing the mark only costs the skip */
-    heat_handle_shared( source );
+    if ((options & DUPLICATE_CLOSE_SOURCE) && source_process == NtCurrentProcess()) heat_handle_closed( source );
+    else heat_handle_shared( source );
 
     if ((options & DUPLICATE_CLOSE_SOURCE) && source_process != NtCurrentProcess())
     {
