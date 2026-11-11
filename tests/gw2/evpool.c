@@ -1,7 +1,7 @@
 /* gw2 (jdrly/gw2-on-mac#42): the event pool's tests. They pass with WINE_HEAT_EVPOOL off, 1 and
  * 1,mask, and under the engine's own ntdll.so.
  *
- *   storm       20,000 create, check, set, wait, close rounds on each of 4 threads, auto-reset
+ *   storm       20,000 create, check, set, wait, close rounds on 4 threads (5,000 each), auto-reset
  *               and manual-reset, while another thread suspends and resumes those threads
  *               without pause (each suspend is a signal on that thread). No handle is handed to
  *               two threads at once, every new event has the state it was created with, a set is
@@ -22,7 +22,8 @@
  *               kind are each set: the wait still times out.
  *   counters    With WINE_HEAT_COUNT=1 and WINE_HEAT_EXE naming this program: the log's mode
  *               names the pool exactly when WINE_HEAT_EVPOOL is on. With the pool on, a thread
- *               that makes 1,000 create, set, wait, close rounds on parked events has 1,000
+ *               that made 1,000 create, set, wait, close rounds on parked events (run before
+ *               "eligible", whose probe leaves a forgotten event in the pool) has 1,000
  *               evpool_hit and 1,000 evpool_put, and its few server calls are its own start
  *               and end (at most 50), not three for each round; the process counted the double
  *               closes and the waiter's busy event.
@@ -99,7 +100,7 @@ static DWORD WINAPI rounds( void *arg )
     HANDLE h;
     int i;
 
-    for (i = 0; i < ROUNDS; i++)
+    for (i = 0; i < ROUNDS / WORKERS; i++)
     {
         manual = i & 1;
         state = (i >> 1) & 1;
@@ -441,6 +442,8 @@ static long long counter( const char *line, const char *name )
     return (p = strstr( line, key )) ? _atoi64( p + strlen( key ) ) : -1;
 }
 
+static DWORD hits_tid;
+
 static DWORD WINAPI hits( void *arg )
 {
     HANDLE h;
@@ -455,33 +458,38 @@ static DWORD WINAPI hits( void *arg )
     return 0;
 }
 
-static void test_counters(void)
+/* before anything parks an event it then forgets, which the pool closes for real on its turn */
+static void test_hits(void)
 {
     static HANDLE parked[HITS];
-    char dir[MAX_PATH], path[MAX_PATH * 2], want[32], line[4096], head[512] = "", *mode, *end;
-    long long hit = -1, put = -1, server = -1, twice = -1, busy = -1;
-    BOOL pool, found = FALSE, mine;
-    WIN32_FIND_DATAA fd;
-    HANDLE t, find;
-    DWORD tid;
-    FILE *f;
+    HANDLE t;
     int i;
 
-    start( "counters" );
-    pool = pool_on();
+    start( "1,000 rounds on parked events" );
     /* HITS events parked, each looked up once, so their next set needs no request */
     for (i = 0; i < HITS; i++) SetEvent( parked[i] = event( FALSE, FALSE ) );
     for (i = 0; i < HITS; i++) CloseHandle( parked[i] );
     Sleep( 10 );
     t = thread( hits, NULL );
-    tid = GetThreadId( t );
+    hits_tid = GetThreadId( t );
     join( t, 60000 );
+}
 
+static void test_counters(void)
+{
+    char dir[MAX_PATH], path[MAX_PATH * 2], want[32], line[4096], head[512] = "", *mode, *end;
+    long long hit = -1, put = -1, server = -1, twice = -1, busy = -1;
+    BOOL pool = pool_on(), found = FALSE, mine;
+    WIN32_FIND_DATAA fd;
+    HANDLE find;
+    FILE *f;
+
+    start( "counters" );
     if (!env_is( "WINE_HEAT_COUNT", "1" ) || !env_is( "WINE_HEAT_EXE", "evpool.exe" )) return;
     if (!GetEnvironmentVariableA( "WINE_HEAT_LOG", dir, sizeof(dir) )) FAIL( "WINE_HEAT_LOG isn't set" );
     Sleep( 6000 );  /* the counters are written every 5 s */
 
-    snprintf( want, sizeof(want), "thread %04lx ", tid );
+    snprintf( want, sizeof(want), "thread %04lx ", hits_tid );
     snprintf( path, sizeof(path), "Z:%s/heat-*.log", dir );
     if ((find = FindFirstFileA( path, &fd )) == INVALID_HANDLE_VALUE) FAIL( "no heat-*.log in %s", dir );
     do
@@ -535,6 +543,7 @@ int main( int argc, char **argv )
     test_read();
     test_select();
     test_twice();
+    test_hits();
     test_eligible();
     test_waiter();
     test_counters();
