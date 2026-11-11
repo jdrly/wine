@@ -200,7 +200,8 @@ jobs:
         run: |
           f=dlls/ntdll/unix/sync.c
           sed -i '' '/^NTSTATUS WINAPI NtYieldExecution/,/^}/s/^    sched_yield();$/    sched_yield(); sched_yield();/' "$SRC/$f"
-          [[ $(git -C "$SRC" diff --numstat) == $'1\t1\t'"$f" ]]
+          # with "|| exit": macOS's bash 3.2 doesn't stop at a failed [[ ]] under -e
+          [[ $(git -C "$SRC" diff --numstat) == $'1\t1\t'"$f" ]] || { echo "::error::the line to change isn't in $f"; exit 1; }
           .github/gw2/ntdll.zsh build
           status=0
           python3 -I .github/gw2/ntdll-compare.py baseline "$BUILD/dlls/ntdll/ntdll.so" toolchains/engine/lib/wine/aarch64-unix \

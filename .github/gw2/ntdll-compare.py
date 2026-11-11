@@ -223,6 +223,7 @@ def masked(m, resolve, addr, size):
     def scan(back):
         out, uses, ahead, behind = [], {}, {}, {}  # instruction index -> the states branches carry there
         page = {}  # register -> ((page, index of its ADRP in out), ...); None where nothing falls through
+        switch = {}  # the registers at the last BR, for the blocks of its jump table
 
         def drop(*regs):
             for r in regs:
@@ -236,6 +237,8 @@ def masked(m, resolve, addr, size):
             pc, w = addr + i, struct.unpack_from("<I", code, i)[0]
             rd, rn = w & 31, (w >> 5) & 31
             ways = ([page] if page is not None else []) + ahead.pop(i // 4, []) + back.get(i // 4, [])
+            if not ways:
+                ways = [switch]  # nothing falls or branches here: a case of the last jump table
             page = {}
             for way in ways:  # every ADRP that may reach here, the fall-through's first
                 for r, v in way.items():
@@ -285,8 +288,10 @@ def masked(m, resolve, addr, size):
             else:
                 out.append(w)
                 if w & 0x0a000000 == 0x08000000:  # loads and stores
-                    if not w & 0x04000000:
-                        drop(rd)  # Rt, which only a load writes; dropping a stored one loses tracking only
+                    pair_or_exclusive = w & 0x38000000 == 0x28000000 or w & 0x3f000000 == 0x08000000
+                    load = w & 0x00400000 if pair_or_exclusive else w & 0x00c00000  # L, or opc != 00
+                    if not w & 0x04000000 and load:
+                        drop(rd)  # Rt; a store only reads it
                         if w & 0x38000000 == 0x28000000:
                             drop((w >> 10) & 31)  # a pair's Rt2
                     if w & 0x3f000000 == 0x08000000:
@@ -297,7 +302,9 @@ def masked(m, resolve, addr, size):
                     drop(rd)
                 if w & 0xfffffc1f == 0xd63f0000:  # BLR
                     drop(*CALL_CLOBBERED)
-                elif w & 0xfffffc1f in (0xd65f0000, 0xd61f0000):  # RET, BR: no fall-through
+                elif w & 0xfffffc1f == 0xd61f0000:  # BR, a jump table's dispatch
+                    switch, page = dict(page), None
+                elif w & 0xfffffc1f == 0xd65f0000:  # RET
                     page = None
         return out, uses, behind
 
