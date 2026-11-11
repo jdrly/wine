@@ -3,9 +3,9 @@
  * every mode of WINE_HEAT_WAKE (off, one, skip, one,skip), and under the engine's own ntdll.so.
  *
  *   13  20,000 single jobs to 7 workers that sleep between them, all taken. A producer that
- *       outpaces its consumer for 20 seconds (the semaphore reaches its maximum), every release
- *       taken, no stall. matrix.zsh runs this program three times in each mode, so each mode
- *       gets the minute the issue asks for, in three parts.
+ *       outpaces its consumer for a minute (the semaphore reaches its maximum), every release
+ *       taken, no stall. GW2_TEST_PRODUCER_SECONDS shortens the minute: matrix.zsh keeps it for
+ *       the first of a mode's three runs and gives the other runs 20 seconds.
  *   14  A waiter on a duplicated handle and a release through it. A named semaphore opened
  *       twice. A semaphore duplicated into a child process, released by the parent after
  *       300 ms: the child wakes (with a real handle to this process and with the pseudo-handle,
@@ -31,7 +31,7 @@
 
 #define WORKERS 7
 #define JOBS 20000
-#define PRODUCER_SECONDS 20
+#define PRODUCER_SECONDS 60
 #define ROUNDS 200
 #define NO_WAITER 1000000
 
@@ -149,13 +149,17 @@ static DWORD WINAPI slow_consumer( void *arg )
 static void test_producer(void)
 {
     LONG released = 0, full = 0;
-    DWORD t0;
+    DWORD t0, seconds = PRODUCER_SECONDS;
     HANDLE consumer;
+    char buf[16];
+
+    if (GetEnvironmentVariableA( "GW2_TEST_PRODUCER_SECONDS", buf, sizeof(buf) ) && atoi( buf ) > 0)
+        seconds = atoi( buf );
 
     start( "13 producer" );
     fast_sem = private_semaphore( 1000 );
     consumer = thread( slow_consumer, NULL );
-    for (t0 = GetTickCount(); GetTickCount() - t0 < PRODUCER_SECONDS * 1000;)
+    for (t0 = GetTickCount(); GetTickCount() - t0 < seconds * 1000;)
     {
         if (ReleaseSemaphore( fast_sem, 1, NULL )) released++;
         else if (GetLastError() == ERROR_TOO_MANY_POSTS)
@@ -172,7 +176,7 @@ static void test_producer(void)
     release( fast_sem, 1 );
     join( consumer, 10000 );
     if (fast_taken != released) FAIL( "%ld taken of %ld released", fast_taken, released );
-    printf( "gw2 test wakes: %ld releases in %d s, the semaphore full %ld times\n", released, PRODUCER_SECONDS, full );
+    printf( "gw2 test wakes: %ld releases in %lu s, the semaphore full %ld times\n", released, seconds, full );
     CloseHandle( fast_sem );
 }
 
