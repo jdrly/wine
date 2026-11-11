@@ -40,9 +40,8 @@ env:
   BASE_COMMIT: 53def89293adfe1a62c43ef46abe80a536e9ca49
   # What Mach9's release run of v0.3.1 used (athei/mach9 run 42769825957): Xcode 26.6 (SDK 26.5,
   # clang-2100.1.1.101) on the macos-26 image (macos-26-arm64 20261102.0473.1), and its
-  # pins/redist.env and bin/lib/profile.sh. Mine runs on the xcode-27 image, which GitHub gives
-  # runners to when it has none for macos-26, with the same Xcode selected by name: the baseline
-  # compare shows whether the image's macOS version reaches the file.
+  # pins/redist.env and bin/lib/profile.sh. Mine runs on the same image, with Xcode 26.6 selected
+  # by name.
   XCODE_VERSION: "26.6"
   LLVM_MINGW_VERSION: "20261104"
   LLVM_MINGW_SHA256: 66cbd5178c4a71b0d473e68ede172f8eb7d15d023e67f39201d0a69e21f6bf3c
@@ -56,7 +55,7 @@ defaults:
 jobs:
   build:
     name: Build ntdll.so
-    runs-on: xcode-27
+    runs-on: macos-26
     timeout-minutes: 60
     env:
       MACOSX_DEPLOYMENT_TARGET: "26.4"
@@ -85,9 +84,9 @@ jobs:
           {
             echo "### Toolchain"
             echo '```'
-            xcodebuild -version | head -1
+            xcodebuild -version | sed -n 1p
             echo "macOS SDK $(xcrun -sdk macosx --show-sdk-version)"
-            clang --version | head -1
+            clang --version | sed -n 1p
             echo '```'
           } | tee -a "$GITHUB_STEP_SUMMARY"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -181,7 +180,7 @@ jobs:
         run: |
           engine=toolchains/engine/lib/wine/aarch64-unix/ntdll.so
           # shellcheck disable=SC2016 # the backticks are the report's
-          sed -n 's/^  - `[a-z0-9_]*\.c: \([^ `]*\)`$/\1/p' "$RUNNER_TEMP/baseline.md" | head -5 | while read -r f; do
+          sed -n 's/^  - `[a-z0-9_]*\.c: \([^ `]*\)`$/\1/p' "$RUNNER_TEMP/baseline.md" | sed -n 1,5p | while read -r f; do
             echo "== $f (< the engine's, > mine)"
             diff <(xcrun objdump -d --no-show-raw-insn --no-leading-addr --disassemble-symbols="_$f" "$engine" | tail -n +5) \
               <(xcrun objdump -d --no-show-raw-insn --no-leading-addr --disassemble-symbols="_$f" "$RUNNER_TEMP/baseline-ntdll.so" | tail -n +5) || true
@@ -238,7 +237,7 @@ jobs:
             echo "commit: $COMMIT"
             echo "base: $BASE_COMMIT ($(git -C "$SRC" describe "$BASE_COMMIT"))"
             echo "engine: Mach9 $MACH9_VERSION (wine-$MACH9_VERSION-macos-arm64.tar.xz, sha256 $MACH9_SHA256)"
-            echo "toolchain: Xcode $(xcodebuild -version | sed -n 's/^Xcode //p') (macOS SDK $(xcrun -sdk macosx --show-sdk-version)), $(clang --version | head -1), llvm-mingw $LLVM_MINGW_VERSION, macOS $MACOSX_DEPLOYMENT_TARGET"
+            echo "toolchain: Xcode $(xcodebuild -version | sed -n 's/^Xcode //p') (macOS SDK $(xcrun -sdk macosx --show-sdk-version)), $(clang --version | sed -n 1p), llvm-mingw $LLVM_MINGW_VERSION, macOS $MACOSX_DEPLOYMENT_TARGET"
             echo "ntdll.so: sha256 $(shasum -a 256 dist/ntdll.so | cut -d' ' -f1)"
             echo
             cat "$RUNNER_TEMP/baseline.md"
@@ -257,7 +256,7 @@ jobs:
   tests:
     name: Tests on the engine
     needs: build
-    runs-on: xcode-27
+    runs-on: macos-26
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -378,7 +377,8 @@ jobs:
               --notes "CI output for GW2 on Mac's arm64 line, not a release of Wine: my ntdll.so for Mach9 $MACH9_VERSION's engine, built and checked by .github/workflows/gw2.yml for each push to gw2-on-mac. One asset per commit, ntdll-mach9-<full sha>.tar.xz; the 30 newest stay."
           fi
           uploaded=0
-          if gh release view "$RELEASE" --json assets -q '.assets[].name' | grep -qxF "$name"; then
+          # grep without -q, which would end the pipe early and fail it under pipefail
+          if gh release view "$RELEASE" --json assets -q '.assets[].name' | grep -xF "$name" >/dev/null; then
             echo "$name is there already, and a published file is never replaced"
           else
             gh release upload "$RELEASE" "$name"
