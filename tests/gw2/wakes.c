@@ -3,8 +3,9 @@
  * every mode of WINE_HEAT_WAKE (off, one, skip, one,skip), and under the engine's own ntdll.so.
  *
  *   13  20,000 single jobs to 7 workers that sleep between them, all taken. A producer that
- *       outpaces its consumer for a minute (the semaphore reaches its maximum), every release
- *       taken, no stall.
+ *       outpaces its consumer for 20 seconds (the semaphore reaches its maximum), every release
+ *       taken, no stall. matrix.zsh runs this program three times in each mode, so each mode
+ *       gets the minute the issue asks for, in three parts.
  *   14  A waiter on a duplicated handle and a release through it. A named semaphore opened
  *       twice. A semaphore duplicated into a child process, released by the parent after
  *       300 ms: the child wakes (with a real handle to this process and with the pseudo-handle,
@@ -30,7 +31,7 @@
 
 #define WORKERS 7
 #define JOBS 20000
-#define PRODUCER_SECONDS 60
+#define PRODUCER_SECONDS 20
 #define ROUNDS 200
 #define NO_WAITER 1000000
 
