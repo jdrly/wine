@@ -14,12 +14,18 @@
  *   select      The same with WSAEventSelect on a socket and the data that signals it.
  *   twice       A second close of an event fails with ERROR_INVALID_HANDLE, and so does a
  *               duplicate of it.
+ *   eligible    Which closed events stay open, parked: with the pool on, only a plain one. Not one
+ *               that was pulsed, given new handle flags, duplicated, or given to a registry
+ *               notification, nor one with a name, inheritable, or without EVENT_ALL_ACCESS. A
+ *               duplicate through a real handle to this process reaches the server and tells.
+ *   waiter      An event closed while another thread waits on it; 1,100 new events of its
+ *               kind are each set: the wait still times out.
  *   counters    With WINE_HEAT_COUNT=1 and WINE_HEAT_EXE naming this program: the log's mode
  *               names the pool exactly when WINE_HEAT_EVPOOL is on. With the pool on, a thread
  *               that makes 1,000 create, set, wait, close rounds on parked events has 1,000
  *               evpool_hit and 1,000 evpool_put, and its few server calls are its own start
  *               and end (at most 50), not three for each round; the process counted the double
- *               closes.
+ *               closes and the waiter's busy event.
  *
  * Each case prints its name first; a stall shows as the run's time limit with the last name
  * printed. Prints "gw2 test evpool: passed" and exits 0, or names what failed and exits 1. */
@@ -165,7 +171,7 @@ static void none_is( HANDLE old, BOOL manual, void (*check)(void) )
         made[i] = event( manual, FALSE );
         if (check) continue;
         if (!SetEvent( made[i] )) FAIL( "SetEvent: error %lu", GetLastError() );
-        if (signaled( old )) FAIL( "new event %d is the old one", i );
+        if (old && signaled( old )) FAIL( "new event %d is the old one", i );
     }
     if (check)
     {
@@ -209,20 +215,22 @@ static void test_dup(void)
 /* read */
 
 static HANDLE pipe_client;
+static OVERLAPPED pipe_ov;
 
 static void write_pipe(void)
 {
-    DWORD written;
+    DWORD written, t0;
     if (!WriteFile( pipe_client, "x", 1, &written, NULL ) || written != 1) FAIL( "WriteFile: error %lu", GetLastError() );
+    for (t0 = GetTickCount(); !HasOverlappedIoCompleted( &pipe_ov ); Sleep( 1 ))
+        if (GetTickCount() - t0 > 5000) FAIL( "the read didn't complete" );
+    Sleep( 50 );
 }
 
 static void test_read(void)
 {
     WCHAR name[64];
-    OVERLAPPED ov = {0};
     HANDLE server;
-    char buf[16];
-    DWORD t0;
+    static char buf[16];
 
     start( "overlapped read" );
     swprintf( name, ARRAYSIZE(name), L"\\\\.\\pipe\\gw2-evpool-%lu", GetCurrentProcessId() );
@@ -232,13 +240,11 @@ static void test_read(void)
     pipe_client = CreateFileW( name, GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL );
     if (pipe_client == INVALID_HANDLE_VALUE) FAIL( "CreateFile: error %lu", GetLastError() );
 
-    ov.hEvent = event( TRUE, FALSE );
-    if (ReadFile( server, buf, sizeof(buf), NULL, &ov ) || GetLastError() != ERROR_IO_PENDING)
+    pipe_ov.hEvent = event( TRUE, FALSE );
+    if (ReadFile( server, buf, sizeof(buf), NULL, &pipe_ov ) || GetLastError() != ERROR_IO_PENDING)
         FAIL( "the read didn't stay pending: error %lu", GetLastError() );
-    CloseHandle( ov.hEvent );
+    CloseHandle( pipe_ov.hEvent );
     none_is( NULL, TRUE, write_pipe );
-    for (t0 = GetTickCount(); !HasOverlappedIoCompleted( &ov ); Sleep( 1 ))
-        if (GetTickCount() - t0 > 5000) FAIL( "the read didn't complete" );
     CloseHandle( pipe_client );
     CloseHandle( server );
 }
@@ -317,14 +323,114 @@ static void test_twice(void)
         FAIL( "a duplicate of the closed handle: %lu", GetLastError() );
 }
 
-/* counters */
-
 static BOOL env_is( const char *name, const char *value )
 {
     char buf[256];
     DWORD n = GetEnvironmentVariableA( name, buf, sizeof(buf) );
     return n && n < sizeof(buf) && !_stricmp( buf, value );
 }
+
+/* eligible */
+
+static BOOL pool_on(void)
+{
+    return (env_is( "WINE_HEAT_EVPOOL", "1" ) || env_is( "WINE_HEAT_EVPOOL", "1,mask" )) &&
+           env_is( "WINE_HEAT_EXE", "evpool.exe" );
+}
+
+/* whether <h>, which the caller closed, is still open at the server */
+static BOOL still_open( HANDLE self, HANDLE h )
+{
+    HANDLE d;
+    if (!DuplicateHandle( self, h, GetCurrentProcess(), &d, 0, FALSE, DUPLICATE_SAME_ACCESS )) return FALSE;
+    CloseHandle( d );
+    return TRUE;
+}
+
+static void closed( HANDLE self, HANDLE h, BOOL parked, const char *what )
+{
+    if (!CloseHandle( h )) FAIL( "%s: CloseHandle: error %lu", what, GetLastError() );
+    if (still_open( self, h ) != parked) FAIL( "%s: %s", what, parked ? "closed for real" : "parked" );
+}
+
+static void test_eligible(void)
+{
+    SECURITY_ATTRIBUTES sa = { sizeof(sa), NULL, TRUE };
+    WCHAR name[64];
+    HANDLE self, h, d;
+    HKEY key;
+    LONG ret;
+
+    start( "eligible" );
+    if (!(self = OpenProcess( PROCESS_DUP_HANDLE, FALSE, GetCurrentProcessId() )))
+        FAIL( "OpenProcess: error %lu", GetLastError() );
+
+    closed( self, event( FALSE, FALSE ), pool_on(), "a plain event" );
+
+    h = event( FALSE, FALSE );
+    PulseEvent( h );
+    closed( self, h, FALSE, "pulsed" );
+
+    h = event( TRUE, FALSE );
+    if (!SetHandleInformation( h, HANDLE_FLAG_PROTECT_FROM_CLOSE, 0 )) FAIL( "SetHandleInformation: error %lu", GetLastError() );
+    closed( self, h, FALSE, "new handle flags" );
+
+    h = event( TRUE, FALSE );
+    if (!DuplicateHandle( GetCurrentProcess(), h, GetCurrentProcess(), &d, 0, FALSE, DUPLICATE_SAME_ACCESS ))
+        FAIL( "DuplicateHandle: error %lu", GetLastError() );
+    CloseHandle( d );
+    closed( self, h, FALSE, "duplicated" );
+
+    if ((ret = RegOpenKeyExW( HKEY_CURRENT_USER, L"Software", 0, KEY_NOTIFY, &key ))) FAIL( "RegOpenKeyEx: %ld", ret );
+    h = event( FALSE, FALSE );
+    if ((ret = RegNotifyChangeKeyValue( key, FALSE, REG_NOTIFY_CHANGE_LAST_SET, h, TRUE )))
+        FAIL( "RegNotifyChangeKeyValue: %ld", ret );
+    closed( self, h, FALSE, "a registry notification's" );
+    RegCloseKey( key );
+
+    swprintf( name, ARRAYSIZE(name), L"gw2-evpool-%lu", GetCurrentProcessId() );
+    if (!(h = CreateEventW( NULL, FALSE, FALSE, name ))) FAIL( "CreateEvent: error %lu", GetLastError() );
+    closed( self, h, FALSE, "named" );
+
+    if (!(h = CreateEventW( &sa, FALSE, FALSE, NULL ))) FAIL( "CreateEvent: error %lu", GetLastError() );
+    closed( self, h, FALSE, "inheritable" );
+
+    if (!(h = CreateEventExW( NULL, NULL, 0, EVENT_MODIFY_STATE | SYNCHRONIZE ))) FAIL( "CreateEventEx: error %lu", GetLastError() );
+    closed( self, h, FALSE, "without EVENT_ALL_ACCESS" );
+
+    CloseHandle( self );
+}
+
+/* waiter */
+
+static HANDLE waited;
+
+static DWORD WINAPI wait_closed( void *ready )
+{
+    SetEvent( ready );
+    return WaitForSingleObject( waited, 3000 );
+}
+
+static void test_waiter(void)
+{
+    HANDLE ready = event( FALSE, FALSE ), t;
+    DWORD code;
+
+    start( "a waiter on a closed event" );
+    waited = event( TRUE, FALSE );
+    t = thread( wait_closed, ready );
+    if (WaitForSingleObject( ready, 5000 ) != WAIT_OBJECT_0) FAIL( "the waiter didn't start" );
+    Sleep( 50 );  /* asleep in its wait */
+    CloseHandle( waited );
+    none_is( NULL, TRUE, NULL );
+    if (WaitForSingleObject( t, 10000 ) != WAIT_OBJECT_0) FAIL( "the waiter didn't end" );
+    GetExitCodeThread( t, &code );
+    if (code != WAIT_TIMEOUT) FAIL( "the wait ended with %lu: a new event was the one it waited on", code );
+    CloseHandle( t );
+    CloseHandle( ready );
+}
+
+/* counters */
 
 /* counter <name> on a line of heat.c's log, -1 if it isn't there */
 static long long counter( const char *line, const char *name )
@@ -353,7 +459,7 @@ static void test_counters(void)
 {
     static HANDLE parked[HITS];
     char dir[MAX_PATH], path[MAX_PATH * 2], want[32], line[4096], head[512] = "", *mode, *end;
-    long long hit = -1, put = -1, server = -1, twice = -1;
+    long long hit = -1, put = -1, server = -1, twice = -1, busy = -1;
     BOOL pool, found = FALSE, mine;
     WIN32_FIND_DATAA fd;
     HANDLE t, find;
@@ -362,7 +468,7 @@ static void test_counters(void)
     int i;
 
     start( "counters" );
-    pool = env_is( "WINE_HEAT_EVPOOL", "1" ) || env_is( "WINE_HEAT_EVPOOL", "1,mask" );
+    pool = pool_on();
     /* HITS events parked, each looked up once, so their next set needs no request */
     for (i = 0; i < HITS; i++) SetEvent( parked[i] = event( FALSE, FALSE ) );
     for (i = 0; i < HITS; i++) CloseHandle( parked[i] );
@@ -386,7 +492,11 @@ static void test_counters(void)
         while (fgets( line, sizeof(line), f ))
         {
             if (!strncmp( line, "heat pid ", 9 )) snprintf( head, sizeof(head), "%s", line );
-            else if (!strncmp( line, "total ", 6 )) twice = counter( line, "evpool_double_close" );
+            else if (!strncmp( line, "total ", 6 ))
+            {
+                twice = counter( line, "evpool_double_close" );
+                busy = counter( line, "evpool_busy" );
+            }
             else if (!strncmp( line, want, strlen( want ) ))
             {
                 mine = TRUE;
@@ -402,8 +512,8 @@ static void test_counters(void)
     if (!found) FAIL( "no row for the thread in %s", dir );
 
     printf( "gw2 test evpool: %s", head );
-    printf( "gw2 test evpool: the thread: evpool_hit %lld evpool_put %lld server %lld; the process: evpool_double_close %lld\n",
-            hit, put, server, twice );
+    printf( "gw2 test evpool: the thread: evpool_hit %lld evpool_put %lld server %lld; "
+            "the process: evpool_double_close %lld evpool_busy %lld\n", hit, put, server, twice, busy );
     /* "... mode count evpool seconds ...", and the exe's name may hold the word too */
     if (!(mode = strstr( head, " mode " )) || !(end = strstr( mode, " seconds " ))) FAIL( "no mode in the log" );
     *end = 0;
@@ -413,6 +523,7 @@ static void test_counters(void)
     /* its start and its end; without the pool each round makes three */
     if (server < 0 || server > 50) FAIL( "%lld server calls: the pool's creates and closes made some", server );
     if (twice < 2) FAIL( "the double close and its duplicate weren't counted" );
+    if (busy < 1) FAIL( "the waiter's event wasn't counted as busy" );
 }
 
 int main( int argc, char **argv )
@@ -424,6 +535,8 @@ int main( int argc, char **argv )
     test_read();
     test_select();
     test_twice();
+    test_eligible();
+    test_waiter();
     test_counters();
 
     printf( "gw2 test evpool: passed\n" );

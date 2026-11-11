@@ -345,7 +345,11 @@ BOOL heat_skip_wake_slow( unsigned int obj, const unsigned short *refcount )
  *
  * A close or a duplicate (from this process) of a parked handle returns STATUS_INVALID_HANDLE,
  * as Windows does for a closed handle, and never reaches the server: a parked handle must stay
- * open until the pool closes it. The 2 ms give a thread that still uses a closed handle time to
+ * open until the pool closes it. NtCreateEvent keeps HEAT_H_PARKED while it takes a handle out
+ * and resets it, and clears it only if HEAT_H_POOL is still set; otherwise it closes the handle
+ * for real. The pool clears a handle's bits right before it closes one for real, so a close of
+ * that value by this process's code in between is a real one too, as any close of a closed
+ * handle is without the pool. The 2 ms give a thread that still uses a closed handle time to
  * finish; a parked handle that a thread of this process still waits on or signals in-process when
  * its turn comes is closed for real (heat_inproc_sync_idle). What can't be seen from here:
  * another process that duplicated the handle out of this one without DUPLICATE_CLOSE_SOURCE
@@ -426,7 +430,7 @@ BOOL heat_evpool_get_slow( HANDLE *handle, ACCESS_MASK access, const OBJECT_ATTR
                            EVENT_TYPE type, BOOLEAN state )
 {
     struct heat_pool *pool = &heat_pools[type == NotificationEvent];
-    unsigned char flags = 0;
+    unsigned char *mark, flags;
     HANDLE h = 0;
     sigset_t sigset;
 
@@ -436,32 +440,32 @@ BOOL heat_evpool_get_slow( HANDLE *handle, ACCESS_MASK access, const OBJECT_ATTR
         h = pool->h[pool->head];
         pool->head = (pool->head + 1) % HEAT_POOL_SIZE;
         pool->count--;
-        /* a plain handle until it is handed out: a stale close or duplicate meanwhile is real */
-        flags = __atomic_fetch_and( &heat_handles[heat_handle_index( h )], ~HEAT_H_EVPOOL, __ATOMIC_ACQ_REL );
     }
     heat_pool_unlock( &sigset );
     if (!h) return FALSE;
 
-    if (!(flags & HEAT_H_POOL))  /* forgotten while parked */
+    /* Out of the pool but still HEAT_H_PARKED, so a stale close or duplicate meanwhile gets
+     * STATUS_INVALID_HANDLE and the handle stays open. Only a forget can change the byte now:
+     * it clears HEAT_H_POOL, and then the handle isn't handed out. */
+    mark = &heat_handles[heat_handle_index( h )];
+    flags = __atomic_load_n( mark, __ATOMIC_ACQUIRE );
+    if (!heat_inproc_sync_idle( h )) heat_count( HC_EVPOOL_BUSY );
+    else if ((flags & HEAT_H_POOL) && !(state ? NtSetEvent( h, NULL ) : NtResetEvent( h, NULL )))
     {
-        NtClose( h );
-        return FALSE;
+        while (flags & HEAT_H_POOL)
+        {
+            if (!__atomic_compare_exchange_n( mark, &flags, flags & ~HEAT_H_PARKED, FALSE,
+                                              __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE ))
+                continue;
+            *handle = h;
+            heat_count( HC_EVPOOL_HIT );
+            return TRUE;
+        }
     }
-    if (!heat_inproc_sync_idle( h ))
-    {
-        heat_count( HC_EVPOOL_BUSY );
-        NtClose( h );
-        return FALSE;
-    }
-    if (state ? NtSetEvent( h, NULL ) : NtResetEvent( h, NULL ))
-    {
-        NtClose( h );
-        return FALSE;
-    }
-    __atomic_fetch_or( &heat_handles[heat_handle_index( h )], flags & (HEAT_H_POOL | HEAT_H_MANUAL), __ATOMIC_RELEASE );
-    *handle = h;
-    heat_count( HC_EVPOOL_HIT );
-    return TRUE;
+    /* forgotten while parked, or still in use: close it for real */
+    __atomic_fetch_and( mark, ~HEAT_H_EVPOOL, __ATOMIC_ACQ_REL );
+    NtClose( h );
+    return FALSE;
 }
 
 void heat_evpool_created_slow( HANDLE handle, ACCESS_MASK access, const OBJECT_ATTRIBUTES *attr, EVENT_TYPE type )
