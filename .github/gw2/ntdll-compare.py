@@ -46,7 +46,7 @@ LC_RPATH, LC_BUILD_VERSION = 0x1c | LC_REQ_DYLD, 0x32
 DYLIB_CMDS = {LC_LOAD_DYLIB: "", LC_LOAD_WEAK_DYLIB: " (weak)", LC_REEXPORT_DYLIB: " (reexport)",
               LC_LAZY_LOAD_DYLIB: " (lazy)", LC_LOAD_UPWARD_DYLIB: " (upward)"}
 N_STAB, N_TYPE, N_EXT, N_UNDF, N_SECT = 0xe0, 0x0e, 0x01, 0x0, 0xe
-N_FUN, N_SO, N_OSO = 0x24, 0x64, 0x66
+N_FUN, N_STSYM, N_SO, N_OSO = 0x24, 0x26, 0x64, 0x66
 S_NON_LAZY_SYMBOL_POINTERS, S_LAZY_SYMBOL_POINTERS, S_SYMBOL_STUBS = 0x6, 0x7, 0x8
 INDIRECT_SYMBOL_LOCAL, INDIRECT_SYMBOL_ABS = 0x80000000, 0x40000000
 
@@ -150,9 +150,67 @@ class MachO:
                     pending = None
         return funcs
 
+    @functools.cached_property
+    def const_bounds(self):
+        """where __TEXT,__const's pieces start: its symbols, and every address the code computes
+        into it (a straight pass over each function, ADRP and the ADD or load after it)"""
+        s = self.section("__TEXT,__const")
+        if not s:
+            return []
+        lo, hi = s["addr"], s["addr"] + s["size"]
+        bounds = {hi} | {v for n, t, _, _, v in self.syms
+                         if not t & N_STAB and t & N_TYPE == N_SECT and lo <= v < hi}
+        for addr, size in self.functions().values():
+            code, page = self.bytes_of(addr, size), {}
+            for i in range(0, size - size % 4, 4):
+                w = struct.unpack_from("<I", code, i)[0]
+                rd, rn, t = w & 31, (w >> 5) & 31, None
+                if w & 0x9f000000 == 0x90000000:
+                    page[rd] = ((addr + i) & ~0xfff) + (sext(((w >> 5) & 0x7ffff) << 2 | (w >> 29) & 3, 21) << 12)
+                    continue
+                if w & 0xffc00000 == 0x91000000 and rn in page:
+                    t = page[rn] + ((w >> 10) & 0xfff)
+                elif w & 0x3b000000 == 0x39000000 and rn in page:
+                    t = page[rn] + (((w >> 10) & 0xfff) << (4 if w & 0x04800000 == 0x04800000 else w >> 30))
+                if t is not None and lo <= t < hi:
+                    bounds.add(t)
+                page.pop(rd, None)
+        return sorted(bounds)
+
+    def const_end(self, addr):
+        """where the piece of __TEXT,__const that starts at addr ends"""
+        bounds = self.const_bounds
+        return bounds[bisect.bisect_right(bounds, addr)]
+
+    def jump_table(self, table, width, signed, base, lo, hi):
+        """the targets in [lo, hi) of a jump table at <table>: entries of <width> bytes, each a
+        count of instructions after <base>. Its end is where the next piece of the section starts."""
+        s = self.section("__TEXT,__const")
+        if not s or not s["addr"] <= table < s["addr"] + s["size"]:
+            return None
+        n = min((self.const_end(table) - table) // width, 4096)
+        fmt = {1: "b", 2: "h", 4: "i"}[width]
+        fmt = fmt if signed else fmt.upper()
+        raw = self.bytes_of(table, n * width)
+        targets = (base + 4 * e for e in struct.unpack_from(f"<{n}{fmt}", raw))
+        return sorted({t for t in targets if lo <= t < hi})
+
+    def statics(self):
+        """address -> object file, for the static functions and data the debug map lists"""
+        where, obj = {}, None
+        for n, t, _, _, value in self.syms:
+            if t == N_OSO:
+                obj = os.path.splitext(os.path.basename(n))[0]
+            elif t in (N_FUN, N_STSYM) and n and obj:
+                where[value] = obj
+        return where
+
     def resolver(self):
-        """address -> what it points to, independent of where the linker put it"""
-        defined = sorted((v, n) for n, t, sect, _, v in self.syms
+        """address -> what it points to, independent of where the linker put it. A file-local
+        symbol is named with its object file, since two files may each have one of that name."""
+        where = self.statics()
+        defined = sorted((v, n if t & N_EXT or v not in where else f"{where[v]}:{n}")
+                         for n, t, sect, _, v in self.syms
                          if not t & N_STAB and t & N_TYPE == N_SECT and n and not n.startswith(("ltmp", "l_", "L")))
         addrs = [v for v, _ in defined]
         pointers = []
@@ -187,11 +245,13 @@ class MachO:
                         return f"cfstr:{name(chars & ((1 << 36) - 1))}+{addr - entry}"
                     i = bisect.bisect_right(addrs, addr) - 1
                     if s["name"] == "__TEXT,__const" and (i < 0 or addrs[i] != addr):
-                        # no symbol starts here: a jump table or other constant the linker
+                        # no symbol starts here: a jump table or another constant the linker
                         # dropped the label of. The symbol before it may be another file's,
-                        # whose data can change size, so it stands for its first 32 bytes.
-                        # A jump table's entries are relative to its own function.
-                        return f"const:{self.data[o:o + min(32, s['addr'] + s['size'] - addr)].hex()}"
+                        # whose data can change size, so it stands for its bytes, up to where
+                        # the next symbol or the next address the code computes starts. A jump
+                        # table's entries are relative to its own function.
+                        end = self.const_end(addr)
+                        return f"const:{end - addr}:{hashlib.sha256(self.data[o:o + end - addr]).hexdigest()[:24]}"
                     if i >= 0 and addrs[i] >= s["addr"]:
                         return f"{defined[i][1]}+{addr - addrs[i]}"
                     # nothing to name it by: the offset in its section, which moves when that
@@ -206,52 +266,140 @@ def sext(v, bits):
 
 
 CALL_CLOBBERED = set(range(19)) | {30}  # x0-x18 and the link register (AAPCS64)
+UNKNOWN = None  # a register's value on a way where no ADRP's page is known to be in it
+
+
+def written(w):
+    """the general registers an instruction other than a branch, ADR(P) or a tracked use writes.
+    Too many costs only tracking; too few could pair a use with a page no longer in its register."""
+    rd, rn = w & 31, (w >> 5) & 31
+    if w & 0x1c000000 == 0x10000000:  # data processing, immediate
+        return (rd,)
+    if w & 0x0e000000 == 0x0a000000:  # data processing, register
+        if w & 0x1fe00000 == 0x1a400000:  # CCMP, CCMN: bits 0-3 are flags
+            return ()
+        return (rd,)
+    if w & 0x1c000000 == 0x14000000:  # branches, system
+        return (rd,) if w & 0xfff00000 == 0xd5300000 else ()  # MRS
+    if w & 0x0e000000 == 0x0e000000:  # SIMD and floating point
+        if w & 0x5f20fc00 == 0x1e200000 or w & 0x9fe08400 == 0x0e000400:  # to/from general, UMOV/SMOV
+            return (rd,)
+        return ()
+    if w & 0x0a000000 == 0x08000000:  # loads and stores
+        regs = []
+        simd = w & 0x04000000
+        pair = w & 0x38000000 == 0x28000000
+        exclusive = w & 0x3f000000 == 0x08000000
+        if pair or exclusive:
+            load = w & 0x00400000
+        elif w & 0x3b200c00 == 0x38200000 or w & 0xff200400 == 0xf8200400:
+            load = True  # LSE atomics (LDADD, SWP...) and LDRAA/LDRAB write Rt whatever opc says
+        else:
+            load = w & 0x00c00000 and not (w >> 30 == 3 and (w >> 22) & 3 == 2)  # opc != 00, not PRFM
+        if load and not simd:
+            regs.append(rd)
+            if pair:
+                regs.append((w >> 10) & 31)
+        if exclusive:
+            regs.append((w >> 16) & 31)  # the status register of a store exclusive, CAS's Rs
+        if (w & 0x3b200000 == 0x38000000 and w & 0x400) or (pair and w & 0x00800000):
+            regs.append(rn)  # written back
+        return tuple(regs)
+    return (rd,)
 
 
 def masked(m, resolve, addr, size):
     """the function's instructions, with what an address points to in place of the address
 
     An ADRP's own token is what its uses point to: the ADD, load or store that completes it, which
-    may come after calls (a callee keeps x19-x28). An ADRP whose page this pass loses track of
-    stands for its page instead. So a changed ADRP always changes a token, and the cost of lost
-    tracking is a function reported changed, never one reported equal. The pass carries the
-    registers along branches. Where ways meet, a register may hold the page of more than one
-    ADRP, and a use then stands for all of their targets and counts as a use of each."""
+    may come after calls (a callee keeps x19-x28). An ADRP whose use this pass doesn't find stands
+    for its page. So a changed ADRP always changes a token.
+
+    The registers are carried along branches, along each jump table to the cases it lists, and
+    round loops until nothing changes. Where ways meet, a register holds every ADRP page any way
+    brings, and UNKNOWN for a way where it holds something else. A use stands for all of its
+    ADRPs' targets and counts as a use of each; where UNKNOWN is among them it also keeps its own
+    offset as it is, since that may be the whole address. A BR this pass can't read as a jump table
+    keeps every use's offset as it is from there on. Each loss of track makes a function compare
+    as changed, never as equal."""
     code = m.bytes_of(addr, size)
     end = addr + size
+    words = [struct.unpack_from("<I", code, i)[0] for i in range(0, len(code) - len(code) % 4, 4)]
 
-    def scan(back):
+    def merge(ways):
+        page = {}
+        for r in {r for way in ways for r in way}:
+            cands = []
+            for way in ways:
+                for c in way.get(r, (UNKNOWN,)):
+                    if c not in cands:
+                        cands.append(c)
+            if any(c is not UNKNOWN for c in cands):
+                page[r] = tuple(cands)
+        return page
+
+    def scan(back, optimistic):
+        """one pass. <back> is what the last pass saw reach the targets of backward branches.
+        Optimistic: code no way reaches yet (the head of a loop, before its backward branch is
+        known) carries nothing to where it branches; otherwise it carries a state of no registers."""
         out, uses, ahead, behind = [], {}, {}, {}  # instruction index -> the states branches carry there
-        page = {}  # register -> ((page, index of its ADRP in out), ...); None where nothing falls through
-        switch = {}  # the registers at the last BR, for the blocks of its jump table
+        page = {}  # register -> (candidate, ...): (page, index of its ADRP in out) or UNKNOWN
+        exact = {}  # register -> the address an ADRP and its ADD put in it, for jump tables
+        opaque = unreached = False
 
         def drop(*regs):
             for r in regs:
                 page.pop(r, None)
+                exact.pop(r, None)
 
         def branch(t):
-            if addr <= t < end and t != addr + len(out) * 4:
-                (ahead if t > addr + len(out) * 4 else behind).setdefault((t - addr) // 4, []).append(dict(page))
+            here = addr + len(out) * 4
+            if addr <= t < end and t != here and not (optimistic and unreached):
+                (ahead if t > here else behind).setdefault((t - addr) // 4, []).append(dict(page))
 
-        for i in range(0, len(code) - len(code) % 4, 4):
-            pc, w = addr + i, struct.unpack_from("<I", code, i)[0]
+        def jump_table(i):
+            """the jump table a BR at words[i] dispatches through, or None: adrp+add of the table,
+            adr of the base, ldrb/ldrh/ldr(sw) of the entry, add base, entry, lsl #2, br"""
+            target_reg, base, table, load = words[i] & 0x3e0, None, None, None
+            for j in range(i - 1, max(i - 9, -1), -1):
+                w = words[j]
+                if w & 0x9f000000 == 0x10000000 and base is None:  # ADR
+                    base = addr + j * 4 + sext(((w >> 5) & 0x7ffff) << 2 | (w >> 29) & 3, 21)
+                elif w & 0x3f200c00 == 0x38200800 and load is None:  # load, register offset
+                    load = w
+            if base is None or load is None:
+                return None
+            size_bits, opc = load >> 30, (load >> 22) & 3
+            if opc == 0 or (size_bits == 3) or (size_bits == 2 and opc == 3):
+                return None
+            table = exact.get((load >> 5) & 31)
+            if table is None:
+                return None
+            return m.jump_table(table, 1 << size_bits, opc >= 2, base, addr, end)
+
+        for i, w in enumerate(words):
+            pc = addr + i * 4
             rd, rn = w & 31, (w >> 5) & 31
-            ways = ([page] if page is not None else []) + ahead.pop(i // 4, []) + back.get(i // 4, [])
-            if not ways:
-                ways = [switch]  # nothing falls or branches here: a case of the last jump table
-            page = {}
-            for way in ways:  # every ADRP that may reach here, the fall-through's first
-                for r, v in way.items():
-                    page[r] = page.get(r, ()) + tuple(c for c in v if c not in page.get(r, ()))
+            fall = page is not None and not (optimistic and unreached)
+            ways = ([page] if fall else []) + ahead.pop(i, []) + back.get(i, [])
+            if not fall:
+                unreached = not ways
+            page = merge(ways) if len(ways) != 1 else dict(ways[0])
+            if len(ways) != 1:
+                exact = {}
 
             def target(t, keep):
                 return (keep, resolve(t)) if not addr <= t < end else w
 
             def use(reg, t, keep):
-                targets = tuple(resolve(p + t) for p, _ in page[reg])
-                for (_, at), name in zip(page[reg], targets):
+                cands = page[reg]
+                known = [c for c in cands if c is not UNKNOWN]
+                targets = tuple(resolve(p + t) for p, _ in known)
+                for (_, at), name in zip(known, targets):
                     uses.setdefault(at, []).append(name)
-                out.append((keep, targets))
+                out.append((w if opaque or UNKNOWN in cands else keep, targets))
+                return known[0][0] + t if len(cands) == 1 else None
+
             if w & 0x7c000000 == 0x14000000:  # B, BL
                 t = pc + sext(w & 0x3ffffff, 26) * 4
                 out.append(target(t, w & 0xfc000000))
@@ -267,6 +415,7 @@ def masked(m, resolve, addr, size):
                 out.append(w)
                 branch(pc + sext((w >> 5) & 0x3fff, 14) * 4)
             elif w & 0x9f000000 == 0x90000000:  # ADRP
+                drop(rd)
                 page[rd] = (((pc & ~0xfff) + (sext(((w >> 5) & 0x7ffff) << 2 | (w >> 29) & 3, 21) << 12), len(out)),)
                 uses.setdefault(len(out), [])
                 out.append(None)
@@ -277,9 +426,16 @@ def masked(m, resolve, addr, size):
                 out.append(target(pc + sext((w >> 5) & 0x7ffff, 19) * 4, w & 0xff00001f))
                 if not w & 0x04000000:
                     drop(rd)
-            elif w & 0xffc00000 == 0x91000000 and rn in page:  # ADD Xd, Xn, #imm (unshifted) after ADRP
-                use(rn, (w >> 10) & 0xfff, w & 0xffc003ff)
+            elif w & 0xffe0ffe0 == 0xaa0003e0 and (w >> 16) & 31 in page:  # MOV Xd, Xm: a copy of a page
+                out.append(w)
+                copy = page[(w >> 16) & 31]
                 drop(rd)
+                page[rd] = copy
+            elif w & 0xffc00000 == 0x91000000 and rn in page:  # ADD Xd, Xn, #imm (unshifted) after ADRP
+                a = use(rn, (w >> 10) & 0xfff, w & 0xffc003ff)
+                drop(rd)
+                if a is not None:
+                    exact[rd] = a
             elif w & 0x3b000000 == 0x39000000 and rn in page:  # load or store, unsigned offset, after ADRP
                 scale = 4 if w & 0x04800000 == 0x04800000 else w >> 30  # 128-bit SIMD, or the size
                 use(rn, ((w >> 10) & 0xfff) << scale, w & 0xffc003ff)
@@ -287,31 +443,32 @@ def masked(m, resolve, addr, size):
                     drop(rd)
             else:
                 out.append(w)
-                if w & 0x0a000000 == 0x08000000:  # loads and stores
-                    pair_or_exclusive = w & 0x38000000 == 0x28000000 or w & 0x3f000000 == 0x08000000
-                    load = w & 0x00400000 if pair_or_exclusive else w & 0x00c00000  # L, or opc != 00
-                    if not w & 0x04000000 and load:
-                        drop(rd)  # Rt; a store only reads it
-                        if w & 0x38000000 == 0x28000000:
-                            drop((w >> 10) & 31)  # a pair's Rt2
-                    if w & 0x3f000000 == 0x08000000:
-                        drop((w >> 16) & 31)  # an exclusive's status register Rs
-                    if (w & 0x3b200000 == 0x38000000 and w & 0x400) or (w & 0x3a000000 == 0x28000000 and w & 0x00800000):
-                        drop(rn)  # written back
-                else:
-                    drop(rd)
+                drop(*written(w))
                 if w & 0xfffffc1f == 0xd63f0000:  # BLR
                     drop(*CALL_CLOBBERED)
-                elif w & 0xfffffc1f == 0xd61f0000:  # BR, a jump table's dispatch
-                    switch, page = dict(page), None
+                elif w & 0xfffffc1f == 0xd61f0000:  # BR
+                    targets = jump_table(i)
+                    if targets is None:
+                        opaque = True  # where it goes is unknown: every use keeps its offset
+                    for t in targets or ():
+                        branch(t)
+                    # a case may start right after the BR, which branch() leaves to the fall-through
+                    page = page if targets and pc + 4 in targets else None
                 elif w & 0xfffffc1f == 0xd65f0000:  # RET
                     page = None
         return out, uses, behind
 
-    # twice: the second pass also has what the first saw reach a backward branch's target
-    out, uses, _ = scan(scan({})[2])
+    # again until what reaches the targets of backward branches stops changing: first leaving out
+    # code no way reaches yet, then with it as a state of no registers
+    back = {}
+    for optimistic in (True, False):
+        for _ in range(16):
+            out, uses, behind = scan(back, optimistic)
+            if behind == back:
+                break
+            back = behind
     for at, targets in uses.items():
-        w = struct.unpack_from("<I", code, at * 4)[0]
+        w = words[at]
         if targets:
             out[at] = ("adrp", w & 31, tuple(targets))
         else:
@@ -345,19 +502,96 @@ def sha256(path):
         return hashlib.sha256(f.read()).hexdigest()
 
 
+class Fixture:
+    """hand-made code for masked(): the words of one function at 0, and its jump tables"""
+
+    def __init__(self, words, tables=None):
+        self.code, self.tables = struct.pack(f"<{len(words)}I", *words), tables or {}
+
+    def bytes_of(self, addr, size):
+        return self.code[addr:addr + size]
+
+    def jump_table(self, table, width, signed, base, lo, hi):
+        return self.tables.get(table)
+
+
+def fixtures():
+    """The changes a review found the masking hid, each as two versions of a function laid out so
+    that a wrong pairing of a use with an ADRP makes them look alike. Each pair has to differ."""
+    def adrp(rd, pages):
+        return 0x90000000 | (pages & 3) << 29 | (pages >> 2 & 0x7ffff) << 5 | rd
+
+    def add(rd, rn, imm):
+        return 0x91000000 | imm << 10 | rn << 5 | rd
+
+    def adr(rd, off):
+        return 0x10000000 | (off & 3) << 29 | (off >> 2 & 0x7ffff) << 5 | rd
+
+    def ldrb_reg(rt, rn, rm):
+        return 0x38606800 | rm << 16 | rn << 5 | rt
+
+    def add_lsl(rd, rn, rm, sh):
+        return 0x8b000000 | rm << 16 | sh << 10 | rn << 5 | rd
+
+    def br(rn):
+        return 0xd61f0000 | rn << 5
+
+    ret = 0xd65f03c0
+    failed = []
+
+    def check(name, a, b, names_a, names_b, tables=None):
+        size = len(a) * 4
+        if masked(Fixture(a, tables), lambda t: names_a.get(t, f"@{t:#x}"), 0, size) == \
+           masked(Fixture(b, tables), lambda t: names_b.get(t, f"@{t:#x}"), 0, size):
+            failed.append(name)
+
+    # an LSE atomic writes its Rt: x1's page is gone, and the ADD's offset is the change
+    lse = lambda imm: [adrp(1, 1), 0xf8200041, add(3, 1, imm), ret]  # LDADD x0, x1, [x2]
+    check("LDADD over an ADRP's register", lse(16), lse(32), {0x1010: "X"}, {0x1020: "X"})
+
+    # nested jump tables: the outer case at 15 gets x24 from the outer BR, not the inner one
+    def nested(imm):
+        return [adrp(24, 1),                                   # 0: x24 = page 0x1000
+                adrp(9, 2), add(9, 9, 0), adr(10, 16),          # 1-3: table 0x2000, base 0x1c
+                ldrb_reg(11, 9, 8), add_lsl(10, 10, 11, 2), br(10),  # 4-6
+                adrp(24, 3),                                   # 7, outer case 0: x24 = page 0x3000
+                adrp(9, 4), add(9, 9, 0), adr(10, 16),          # 8-10: table 0x4000, base 0x38
+                ldrb_reg(11, 9, 8), add_lsl(10, 10, 11, 2), br(10),  # 11-13
+                ret,                                           # 14, the inner case
+                add(0, 24, imm), ret]                          # 15-16, outer case 1
+    tables = {0x2000: [7 * 4, 15 * 4], 0x4000: [14 * 4]}
+    check("an outer case after an inner jump table", nested(0x20), nested(0x40),
+          {0x1020: "Y", 0x3020: "Z"}, {0x1040: "W", 0x3040: "Z"}, tables)
+    return failed
+
+
 def selftest(engine_dir):
     """Change one address-bearing instruction at a time in the engine's file, in memory, and
     require that the function's masked code changes: every ADRP's page, the offset of every ADD,
     load or store that completes one, every branch out of its function, every ADR and literal
-    load."""
+    load, and every ADRP and ADD pair that points into __TEXT,__const pointed at the pieces next
+    to its own and at others that start with the same bytes. Then the hand-made fixtures."""
     m = MachO(os.path.join(engine_dir, "ntdll.so"))
     m.data = bytearray(m.data)
-    resolve, text = m.resolver(), m.section("__TEXT,__text")
+    resolve, text, const = m.resolver(), m.section("__TEXT,__text"), m.section("__TEXT,__const")
+    bounds = m.const_bounds[:-1]
+    by_prefix = {}
+    for b in bounds:
+        by_prefix.setdefault(bytes(m.bytes_of(b, min(16, m.const_end(b) - b))), []).append(b)
     tried, missed = {}, []
+
+    def mutate(key, addr, size, want, changes, kind, where):
+        for o, new in changes:
+            struct.pack_into("<I", m.data, o, new)
+        if masked(m, resolve, addr, size) == want:
+            missed.append(f"{key[0]}.c: {key[1]} +{where:#x} ({kind})")
+        tried[kind] = tried.get(kind, 0) + 1
+
     for key, (addr, size) in sorted(m.functions().items(), key=lambda kv: kv[1]):
         want = masked(m, resolve, addr, size)
+        base = text["offset"] + addr - text["addr"]
         for i in range(0, size - size % 4, 4):
-            o = text["offset"] + addr - text["addr"] + i
+            o = base + i
             w = struct.unpack_from("<I", m.data, o)[0]
             if w & 0x9f000000 == 0x90000000:
                 kind, new = "adrp", w ^ (1 << 29)  # the page moves by one
@@ -370,20 +604,42 @@ def selftest(engine_dir):
                 kind, new = "bl" if w & 0x80000000 else "b", w ^ 1
             elif w & 0x3b000000 == 0x18000000:
                 kind, new = "literal", w ^ (1 << 5)
-            elif isinstance(want[i // 4], tuple):  # an ADD, load or store that completes an ADRP
+            elif isinstance(want[i // 4], tuple) and want[i // 4][0] != "adrp":  # completes an ADRP
                 kind, new = "imm12", w ^ (1 << 10)
             else:
                 continue
-            struct.pack_into("<I", m.data, o, new)
-            if masked(m, resolve, addr, size) == want:
-                missed.append(f"{key[0]}.c: {key[1]} +{i:#x} ({kind})")
+            mutate(key, addr, size, want, [(o, new)], kind, i)
             struct.pack_into("<I", m.data, o, w)
-            tried[kind] = tried.get(kind, 0) + 1
-    print("selftest: changed " + ", ".join(f"{n} {k}" for k, n in sorted(tried.items())) + " instructions one at a time")
+
+            # an ADRP and the ADD after it, into __TEXT,__const: another piece of it instead
+            nxt = struct.unpack_from("<I", m.data, o + 4)[0] if i + 4 < size else 0
+            if kind != "adrp" or nxt & 0xffc00000 != 0x91000000 or (nxt >> 5) & 31 != w & 31:
+                continue
+            pc = addr + i
+            t = (pc & ~0xfff) + (sext(((w >> 5) & 0x7ffff) << 2 | (w >> 29) & 3, 21) << 12) + ((nxt >> 10) & 0xfff)
+            if not const or not const["addr"] <= t < const["addr"] + const["size"]:
+                continue
+            j = bisect.bisect_left(bounds, t)
+            others = {bounds[k] for k in (j - 1, j + 1) if 0 <= k < len(bounds)}
+            others |= set(by_prefix.get(bytes(m.bytes_of(t, min(16, m.const_end(t) - t))), [])[:4])
+            for alt in sorted(others - {t}):
+                if resolve(alt) == resolve(t) and resolve(t).startswith("const:"):
+                    continue  # the same bytes, as long: no change the code could see
+                pages = ((alt & ~0xfff) - (pc & ~0xfff)) >> 12
+                new_adrp = (w & 0x9f00001f) | (pages & 3) << 29 | (pages >> 2 & 0x7ffff) << 5
+                new_add = (nxt & ~(0xfff << 10)) | (alt & 0xfff) << 10
+                mutate(key, addr, size, want, [(o, new_adrp), (o + 4, new_add)], "const", i)
+                struct.pack_into("<I", m.data, o, w)
+                struct.pack_into("<I", m.data, o + 4, nxt)
+    print("selftest: changed " + ", ".join(f"{n} {k}" for k, n in sorted(tried.items())) + " one at a time")
     for item in missed:
         print(f"- **FAIL**: hidden by the masking: {item}")
-    print("selftest: every change showed" if not missed else f"selftest: {len(missed)} changes hidden")
-    return 1 if missed else 0
+    failed = fixtures()
+    for item in failed:
+        print(f"- **FAIL**: hidden by the masking: fixture: {item}")
+    print(f"selftest: {len(missed) + len(failed)} changes hidden" if missed or failed else
+          "selftest: every change showed, and every fixture")
+    return 1 if missed or failed else 0
 
 
 def main():
