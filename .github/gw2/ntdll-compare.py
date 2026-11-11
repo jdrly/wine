@@ -674,9 +674,10 @@ def object_functions(m):
     starts = sorted({(v - text["addr"], n) for n, t, sect, _, v in m.syms
                      if not t & N_STAB and t & N_TYPE == N_SECT and sect == index and not n.startswith(("ltmp", "l_", "L"))})
     relocs = relocations(m, text)
+    addresses = sorted({start for start, _ in starts}) + [text["size"]]
     out = {}
-    for k, (start, name) in enumerate(starts):
-        end = starts[k + 1][0] if k + 1 < len(starts) else text["size"]
+    for start, name in starts:  # names at one address (aliases) share its range
+        end = addresses[addresses.index(start) + 1]
         out[name] = (bytes(m.data[text["offset"] + start:text["offset"] + end]),
                      tuple((a - start, *rest) for a, *rest in relocs if start <= a < end))
     return out
@@ -1012,6 +1013,9 @@ def selftest(engine_dir):
     moved = fake_object(four, rel(0), b"", functions=(("_f1", 0), ("_f2", 8), ("_f3", 12)))
     moved.sections[0]["addr"] = 0x100  # the same functions, with __text at another address
     moved.syms = [(n, t, sect, desc, v + 0x100 if t == 0x0f else v) for n, t, sect, desc, v in moved.syms]
+    aliased = lambda f1: fake_object(four, rel(f1), b"", functions=(("_f0", 0), ("_f1", 0), ("_f2", 8), ("_f3", 12)))
+    if function_changes(aliased(0), aliased(1), "x.c")[0] != ["x.c: f0", "x.c: f1"]:
+        failed.append("touched object: two names at one address, both changed")
     try:
         got = function_changes(before, moved, "x.c")
     except Exception as e:
