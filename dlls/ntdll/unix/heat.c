@@ -347,9 +347,11 @@ BOOL heat_skip_wake_slow( unsigned int obj, const unsigned short *refcount )
  * as Windows does for a closed handle, and never reaches the server: a parked handle must stay
  * open until the pool closes it. NtCreateEvent keeps HEAT_H_PARKED while it takes a handle out
  * and resets it, and clears it only if HEAT_H_POOL is still set; otherwise it closes the handle
- * for real. The pool clears a handle's bits right before it closes one for real, so a close of
- * that value by this process's code in between is a real one too, as any close of a closed
- * handle is without the pool. The 2 ms give a thread that still uses a closed handle time to
+ * for real. The pool's own closes (heat_pool_close) never take the pool path, and clear the
+ * handle's bits before and after the server closes it. A second close of that value by this
+ * process's code between the two is a real one, and then the pool's close may hit a new object
+ * that got the value meanwhile: the same as two closes of one handle without the pool, and only
+ * after code closed a handle it had already closed. The 2 ms give a thread that still uses a closed handle time to
  * finish; a parked handle that a thread of this process still waits on or signals in-process when
  * its turn comes is closed for real (heat_inproc_sync_idle). What can't be seen from here:
  * another process that duplicated the handle out of this one without DUPLICATE_CLOSE_SOURCE
@@ -383,6 +385,7 @@ struct heat_pool
 static struct heat_pool *heat_pools;  /* [0] auto-reset, [1] manual-reset */
 static pthread_mutex_t heat_pool_mutex = PTHREAD_MUTEX_INITIALIZER;
 static __thread int heat_pool_busy;
+static __thread HANDLE heat_pool_closing;  /* the handle heat_pool_close() is closing */
 
 static BOOL heat_pool_lock( sigset_t *sigset )
 {
@@ -418,6 +421,20 @@ static BOOL heat_evpool_eligible( ACCESS_MASK access, const OBJECT_ATTRIBUTES *a
     if (access != EVENT_ALL_ACCESS) return FALSE;
     return !attr || (!attr->RootDirectory && (!attr->ObjectName || !attr->ObjectName->Length) &&
                      !attr->SecurityDescriptor && !(attr->Attributes & OBJ_INHERIT));
+}
+
+/* a handle the pool took out of use, closed for real and never parked again */
+static void heat_pool_close( HANDLE handle )
+{
+    unsigned char *mark = &heat_handles[heat_handle_index( handle )];
+
+    __atomic_fetch_and( mark, ~HEAT_H_EVPOOL, __ATOMIC_ACQ_REL );
+    heat_pool_closing = handle;
+    NtClose( handle );
+    heat_pool_closing = 0;
+    /* an eligible event that got the value after a stale close in between would leave its bits
+     * on a value the server has freed */
+    __atomic_fetch_and( mark, ~HEAT_H_EVPOOL, __ATOMIC_ACQ_REL );
 }
 
 static NTSTATUS heat_evpool_closed_twice(void)
@@ -463,8 +480,7 @@ BOOL heat_evpool_get_slow( HANDLE *handle, ACCESS_MASK access, const OBJECT_ATTR
         }
     }
     /* forgotten while parked, or still in use: close it for real */
-    __atomic_fetch_and( mark, ~HEAT_H_EVPOOL, __ATOMIC_ACQ_REL );
-    NtClose( h );
+    heat_pool_close( h );
     return FALSE;
 }
 
@@ -489,7 +505,7 @@ NTSTATUS heat_evpool_close_slow( HANDLE handle )
     HANDLE evict = 0;
     sigset_t sigset;
 
-    if (i >= HEAT_HANDLES) return STATUS_PENDING;
+    if (i >= HEAT_HANDLES || handle == heat_pool_closing) return STATUS_PENDING;
     flags = __atomic_load_n( &heat_handles[i], __ATOMIC_ACQUIRE );
     if (flags & HEAT_H_PARKED) return heat_evpool_closed_twice();
     if (!(flags & HEAT_H_POOL)) return STATUS_PENDING;
@@ -511,7 +527,6 @@ NTSTATUS heat_evpool_close_slow( HANDLE handle )
         evict = pool->h[pool->head];
         pool->head = (pool->head + 1) % HEAT_POOL_SIZE;
         pool->count--;
-        __atomic_fetch_and( &heat_handles[heat_handle_index( evict )], ~HEAT_H_EVPOOL, __ATOMIC_ACQ_REL );
     }
     slot = (pool->head + pool->count) % HEAT_POOL_SIZE;
     pool->h[slot] = handle;
@@ -522,7 +537,7 @@ NTSTATUS heat_evpool_close_slow( HANDLE handle )
     if (evict)
     {
         heat_count( HC_EVPOOL_EVICTED );
-        NtClose( evict );
+        heat_pool_close( evict );
     }
     heat_count( HC_EVPOOL_PUT );
     return STATUS_SUCCESS;
