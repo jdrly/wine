@@ -7,7 +7,7 @@
 #   ntdll.zsh configure           configure a tree in $BUILD for $SRC
 #   ntdll.zsh build               build dlls/ntdll/ntdll.so in $BUILD and check its version string
 #
-# $SRC is a clone of this repository with its whole history, as the workflow checks it out. $SRC
+# $MINGW_DIR is llvm-mingw. $SRC is a clone of this repository with its whole history, as the workflow checks it out. $SRC
 # and $BUILD are the engine's own paths (its debug map names them), since the paths reach the
 # file. The configure arguments are Mach9's, except that GStreamer, OpenGL and Vulkan are off: Mach9
 # builds those itself, and nothing under dlls/ntdll/unix reads what they set. The baseline compare
@@ -16,7 +16,10 @@ emulate -L zsh
 setopt err_exit pipe_fail no_unset extended_glob
 
 : ${SRC:=/Users/runner/work/mach9/mach9/src} ${BUILD:=/Users/runner/work/mach9/mach9/build/wine}
+: ${MINGW_DIR:?the llvm-mingw directory}
 brew=/opt/homebrew
+# appended, as Mach9 does: llvm-mingw's unprefixed clang mustn't replace Apple's
+path+=("$MINGW_DIR/bin")
 
 prepare() {
   local commit=$1 version

@@ -59,6 +59,7 @@ jobs:
       MACOSX_DEPLOYMENT_TARGET: "26.4"
       SRC: /Users/runner/work/mach9/mach9/src
       BUILD: /Users/runner/work/mach9/mach9/build/wine
+      MINGW_DIR: ${{ github.workspace }}/toolchains/llvm-mingw
       HOMEBREW_NO_AUTO_UPDATE: 1
       HOMEBREW_NO_INSTALL_CLEANUP: 1
     steps:
@@ -116,6 +117,9 @@ jobs:
           echo "$MACH9_SHA256  toolchains/mach9.tar.xz" | shasum -a 256 -c
           mkdir -p toolchains/engine
           tar -xf toolchains/mach9.tar.xz -C toolchains/engine --strip-components 1 wine/lib/wine/aarch64-unix
+      # every address-bearing instruction of the engine's file changed in turn has to show
+      - name: The compare's masking hides no change
+        run: python3 -I .github/gw2/ntdll-compare.py selftest toolchains/engine/lib/wine/aarch64-unix
 
       - name: Restore llvm-mingw
         id: mingw
@@ -144,9 +148,6 @@ jobs:
 
       - name: Configure
         run: |
-          # appended, as Mach9 does: llvm-mingw's unprefixed clang mustn't replace Apple's
-          echo "$PWD/toolchains/llvm-mingw/bin" >>"$GITHUB_PATH"
-          export PATH="$PATH:$PWD/toolchains/llvm-mingw/bin"
           mkdir -p "${SRC%/*}"
           mv src "$SRC"
           .github/gw2/ntdll.zsh prepare "$BASE_COMMIT"

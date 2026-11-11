@@ -25,6 +25,8 @@
 # compared by what it points to: a stub or GOT slot by the imported name, a C string by its text,
 # another symbol by name and offset, anything else by its section. Branches inside the function
 # stay as they are, since they don't move when the function does.
+import bisect
+import functools
 import hashlib
 import os
 import struct
@@ -158,8 +160,8 @@ class MachO:
             if s["type"] in (S_SYMBOL_STUBS, S_NON_LAZY_SYMBOL_POINTERS, S_LAZY_SYMBOL_POINTERS):
                 width = s["reserved2"] if s["type"] == S_SYMBOL_STUBS else 8
                 pointers.append((s, width))
-        import bisect
-
+        # cached: the selftest changes only __TEXT,__text, which no name is read from
+        @functools.lru_cache(maxsize=None)
         def name(addr):
             for s, width in pointers:
                 if s["addr"] <= addr < s["addr"] + s["size"]:
@@ -177,10 +179,18 @@ class MachO:
                         while self.data[end:end + 2] not in (b"\0\0", b""):
                             end += 2
                         return f"ustr:{self.data[o:end].decode('utf-16-le', 'replace')!r}"
+                    if s["name"] == "__DATA_CONST,__cfstring":
+                        # a CFString is 32 bytes: isa, flags, the characters, the length. The
+                        # characters' pointer is a rebase, whose low 36 bits are the address.
+                        entry = addr - (addr - s["addr"]) % 32
+                        chars = struct.unpack_from("<Q", self.data, s["offset"] + entry - s["addr"] + 16)[0]
+                        return f"cfstr:{name(chars & ((1 << 36) - 1))}+{addr - entry}"
                     i = bisect.bisect_right(addrs, addr) - 1
                     if i >= 0 and addrs[i] >= s["addr"]:
                         return f"{defined[i][1]}+{addr - addrs[i]}"
-                    return f"{s['name']}:?"
+                    # nothing to name it by: the offset in its section, which moves when that
+                    # section's earlier content changes size, so this errs towards "differs"
+                    return f"{s['name']}+{addr - s['addr']}"
             return "?"
         return name
 
@@ -189,47 +199,110 @@ def sext(v, bits):
     return v - (1 << bits) if v & (1 << (bits - 1)) else v
 
 
+CALL_CLOBBERED = set(range(19)) | {30}  # x0-x18 and the link register (AAPCS64)
+
+
 def masked(m, resolve, addr, size):
-    """the function's instructions, with what an address points to in place of the address"""
+    """the function's instructions, with what an address points to in place of the address
+
+    An ADRP's own token is what its uses point to: the ADD, load or store that completes it, which
+    may come after calls (a callee keeps x19-x28). An ADRP whose page this pass loses track of
+    stands for its page instead. So a changed ADRP always changes a token, and the cost of lost
+    tracking is a function reported changed, never one reported equal. The pass carries the
+    registers along branches. Where ways meet, a register may hold the page of more than one
+    ADRP, and a use then stands for all of their targets and counts as a use of each."""
     code = m.bytes_of(addr, size)
     end = addr + size
-    out, page = [], {}
-    for i in range(0, len(code) - len(code) % 4, 4):
-        pc, w = addr + i, struct.unpack_from("<I", code, i)[0]
-        rd, rn = w & 31, (w >> 5) & 31
 
-        def target(t, keep):
-            return (keep, resolve(t)) if not addr <= t < end else w
+    def scan(back):
+        out, uses, ahead, behind = [], {}, {}, {}  # instruction index -> the states branches carry there
+        page = {}  # register -> ((page, index of its ADRP in out), ...); None where nothing falls through
 
-        if w & 0x7c000000 == 0x14000000:  # B, BL
-            out.append(target(pc + sext(w & 0x3ffffff, 26) * 4, w & 0xfc000000))
-            if w & 0x80000000:
-                page.clear()  # a call doesn't keep x0-x17
-        elif w & 0x9f000000 == 0x90000000:  # ADRP
-            page[rd] = (pc & ~0xfff) + (sext(((w >> 5) & 0x7ffff) << 2 | (w >> 29) & 3, 21) << 12)
-            out.append(("adrp", rd))
-        elif w & 0x9f000000 == 0x10000000:  # ADR
-            out.append(target(pc + sext(((w >> 5) & 0x7ffff) << 2 | (w >> 29) & 3, 21), w & 0x9f00001f))
-            page.pop(rd, None)
-        elif w & 0x3b000000 == 0x18000000:  # LDR (literal), PRFM (literal)
-            out.append(target(pc + sext((w >> 5) & 0x7ffff, 19) * 4, w & 0xff00001f))
-            page.pop(rd, None)
-        elif w & 0xffc00000 == 0x91000000 and rn in page:  # ADD Xd, Xn, #imm (unshifted) after ADRP
-            out.append((w & 0xffc003ff, resolve(page[rn] + ((w >> 10) & 0xfff))))
-            page.pop(rd, None)
-        elif w & 0x3b000000 == 0x39000000 and rn in page:  # load or store, unsigned offset, after ADRP
-            scale = w >> 30
-            if w & 0x04800000 == 0x04800000:  # a 128-bit SIMD register
-                scale = 4
-            out.append((w & 0xffc003ff, resolve(page[rn] + (((w >> 10) & 0xfff) << scale))))
-            if w & 0x00400000 or (w & 0x04000000 and w & 0x00c00000 == 0x00c00000):
-                page.pop(rd, None)  # a load writes Rt
+        def drop(*regs):
+            for r in regs:
+                page.pop(r, None)
+
+        def branch(t):
+            if addr <= t < end and t != addr + len(out) * 4:
+                (ahead if t > addr + len(out) * 4 else behind).setdefault((t - addr) // 4, []).append(dict(page))
+
+        for i in range(0, len(code) - len(code) % 4, 4):
+            pc, w = addr + i, struct.unpack_from("<I", code, i)[0]
+            rd, rn = w & 31, (w >> 5) & 31
+            ways = ([page] if page is not None else []) + ahead.pop(i // 4, []) + back.get(i // 4, [])
+            page = {}
+            for way in ways:  # every ADRP that may reach here, the fall-through's first
+                for r, v in way.items():
+                    page[r] = page.get(r, ()) + tuple(c for c in v if c not in page.get(r, ()))
+
+            def target(t, keep):
+                return (keep, resolve(t)) if not addr <= t < end else w
+
+            def use(reg, t, keep):
+                targets = tuple(resolve(p + t) for p, _ in page[reg])
+                for (_, at), name in zip(page[reg], targets):
+                    uses.setdefault(at, []).append(name)
+                out.append((keep, targets))
+            if w & 0x7c000000 == 0x14000000:  # B, BL
+                t = pc + sext(w & 0x3ffffff, 26) * 4
+                out.append(target(t, w & 0xfc000000))
+                if w & 0x80000000:
+                    drop(*CALL_CLOBBERED)
+                else:
+                    branch(t)
+                    page = None
+            elif w & 0xff000010 == 0x54000000 or w & 0x7e000000 == 0x34000000:  # B.cond, CBZ, CBNZ
+                out.append(w)
+                branch(pc + sext((w >> 5) & 0x7ffff, 19) * 4)
+            elif w & 0x7e000000 == 0x36000000:  # TBZ, TBNZ
+                out.append(w)
+                branch(pc + sext((w >> 5) & 0x3fff, 14) * 4)
+            elif w & 0x9f000000 == 0x90000000:  # ADRP
+                page[rd] = (((pc & ~0xfff) + (sext(((w >> 5) & 0x7ffff) << 2 | (w >> 29) & 3, 21) << 12), len(out)),)
+                uses.setdefault(len(out), [])
+                out.append(None)
+            elif w & 0x9f000000 == 0x10000000:  # ADR
+                out.append(target(pc + sext(((w >> 5) & 0x7ffff) << 2 | (w >> 29) & 3, 21), w & 0x9f00001f))
+                drop(rd)
+            elif w & 0x3b000000 == 0x18000000:  # LDR (literal), PRFM (literal)
+                out.append(target(pc + sext((w >> 5) & 0x7ffff, 19) * 4, w & 0xff00001f))
+                if not w & 0x04000000:
+                    drop(rd)
+            elif w & 0xffc00000 == 0x91000000 and rn in page:  # ADD Xd, Xn, #imm (unshifted) after ADRP
+                use(rn, (w >> 10) & 0xfff, w & 0xffc003ff)
+                drop(rd)
+            elif w & 0x3b000000 == 0x39000000 and rn in page:  # load or store, unsigned offset, after ADRP
+                scale = 4 if w & 0x04800000 == 0x04800000 else w >> 30  # 128-bit SIMD, or the size
+                use(rn, ((w >> 10) & 0xfff) << scale, w & 0xffc003ff)
+                if not w & 0x04000000 and w & 0x00c00000:  # a general register load (opc != 00)
+                    drop(rd)
+            else:
+                out.append(w)
+                if w & 0x0a000000 == 0x08000000:  # loads and stores
+                    if not w & 0x04000000:
+                        drop(rd)  # Rt, which only a load writes; dropping a stored one loses tracking only
+                        if w & 0x38000000 == 0x28000000:
+                            drop((w >> 10) & 31)  # a pair's Rt2
+                    if w & 0x3f000000 == 0x08000000:
+                        drop((w >> 16) & 31)  # an exclusive's status register Rs
+                    if (w & 0x3b200000 == 0x38000000 and w & 0x400) or (w & 0x3a000000 == 0x28000000 and w & 0x00800000):
+                        drop(rn)  # written back
+                else:
+                    drop(rd)
+                if w & 0xfffffc1f == 0xd63f0000:  # BLR
+                    drop(*CALL_CLOBBERED)
+                elif w & 0xfffffc1f in (0xd65f0000, 0xd61f0000):  # RET, BR: no fall-through
+                    page = None
+        return out, uses, behind
+
+    # twice: the second pass also has what the first saw reach a backward branch's target
+    out, uses, _ = scan(scan({})[2])
+    for at, targets in uses.items():
+        w = struct.unpack_from("<I", code, at * 4)[0]
+        if targets:
+            out[at] = ("adrp", w & 31, tuple(targets))
         else:
-            out.append(w)
-            if w & 0x0a000000 != 0x08000000 or w & 0x00400000:  # anything but a store may write Rd
-                page.pop(rd, None)
-            if w & 0xfffffc1f == 0xd65f0000 or w & 0xfffffc1f == 0xd61f0000:  # RET, BR
-                page.clear()
+            out[at] = ("adrp", w & 31, "page", resolve((addr + at * 4 & ~0xfff) + (sext(((w >> 5) & 0x7ffff) << 2 | (w >> 29) & 3, 21) << 12)))
     return out
 
 
@@ -259,7 +332,50 @@ def sha256(path):
         return hashlib.sha256(f.read()).hexdigest()
 
 
+def selftest(engine_dir):
+    """Change one address-bearing instruction at a time in the engine's file, in memory, and
+    require that the function's masked code changes: every ADRP's page, the offset of every ADD,
+    load or store that completes one, every branch out of its function, every ADR and literal
+    load."""
+    m = MachO(os.path.join(engine_dir, "ntdll.so"))
+    m.data = bytearray(m.data)
+    resolve, text = m.resolver(), m.section("__TEXT,__text")
+    tried, missed = {}, []
+    for key, (addr, size) in sorted(m.functions().items(), key=lambda kv: kv[1]):
+        want = masked(m, resolve, addr, size)
+        for i in range(0, size - size % 4, 4):
+            o = text["offset"] + addr - text["addr"] + i
+            w = struct.unpack_from("<I", m.data, o)[0]
+            if w & 0x9f000000 == 0x90000000:
+                kind, new = "adrp", w ^ (1 << 29)  # the page moves by one
+            elif w & 0x9f000000 == 0x10000000:
+                kind, new = "adr", w ^ (1 << 29)
+            elif w & 0x7c000000 == 0x14000000:
+                t = addr + i + sext(w & 0x3ffffff, 26) * 4
+                if addr <= t < addr + size:
+                    continue
+                kind, new = "bl" if w & 0x80000000 else "b", w ^ 1
+            elif w & 0x3b000000 == 0x18000000:
+                kind, new = "literal", w ^ (1 << 5)
+            elif isinstance(want[i // 4], tuple):  # an ADD, load or store that completes an ADRP
+                kind, new = "imm12", w ^ (1 << 10)
+            else:
+                continue
+            struct.pack_into("<I", m.data, o, new)
+            if masked(m, resolve, addr, size) == want:
+                missed.append(f"{key[0]}.c: {key[1]} +{i:#x} ({kind})")
+            struct.pack_into("<I", m.data, o, w)
+            tried[kind] = tried.get(kind, 0) + 1
+    print("selftest: changed " + ", ".join(f"{n} {k}" for k, n in sorted(tried.items())) + " instructions one at a time")
+    for item in missed:
+        print(f"- **FAIL**: hidden by the masking: {item}")
+    print("selftest: every change showed" if not missed else f"selftest: {len(missed)} changes hidden")
+    return 1 if missed else 0
+
+
 def main():
+    if len(sys.argv) == 3 and sys.argv[1] == "selftest":
+        return selftest(sys.argv[2])
     if len(sys.argv) < 4 or sys.argv[1] not in ("baseline", "patched"):
         print(__doc__ or "usage: ntdll-compare.py baseline|patched <mine> <engine-unix-dir> [<touched source>...]",
               file=sys.stderr)
