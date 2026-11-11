@@ -3,7 +3,7 @@
 # and runs nothing.
 #
 #   ntdll-compare.py baseline <mine> <engine-unix-dir>
-#   ntdll-compare.py patched <mine> <engine-unix-dir> <base ntdll.so> <base objects> <objects>
+#   ntdll-compare.py patched <mine> <engine-unix-dir> <build dir> <base ntdll.so> <base objects>
 #                            <base make log> <make log> <checkout time> [<touched source>...]
 #   ntdll-compare.py selftest <engine-unix-dir>
 #
@@ -15,7 +15,8 @@
 # baseline: my build of the engine's commit. Its exports and imports are the engine's, and every
 #   section of every loaded segment, every load command and the link edit data are the engine's
 #   byte for byte (byte_gate: what it leaves out, and why, is in its report line). Where they
-#   aren't, the functions are compared with the addresses masked, only to list what differs.
+#   aren't, the functions are compared with the addresses masked to list what differs. That
+#   listing (diagnose, masked) is not the gate: it never passes or fails a build.
 # patched: my build of a later commit, made in the same tree after the baseline with every object
 #   compiled again. Its exports are a superset of the engine's. Its objects are compared with the
 #   base build's (compare_objects): first that both sets are what their files linked (the link
@@ -32,6 +33,7 @@ import hashlib
 import os
 import struct
 import sys
+import tempfile
 
 # The names compatdb.so looks up with dlsym (Mach9's docs/maintenance.md, "Wine-side contract")
 COMPATDB = ["prepend_dll_path", "add_load_order_override", "set_compat_dpi_awareness",
@@ -571,6 +573,8 @@ def byte_gate(mine, theirs, r):
     """the linked file against the engine's, section by section and through the link edit data;
     the names of what differs"""
     differ = []
+    if mine.data[:32] != theirs.data[:32]:
+        differ.append("the Mach-O header")
     if [s["name"] for s in mine.segments] != [s["name"] for s in theirs.segments]:
         differ.append("the segments")
     for sm, st in zip(mine.segments, theirs.segments):
@@ -599,7 +603,7 @@ def byte_gate(mine, theirs, r):
     if debug_map_free(mine) != debug_map_free(theirs):
         differ.append("the symbol table")
     r.check(not differ,
-            f"every section of every loaded segment, the load commands and the link edit data are "
+            f"the header, every section of every loaded segment, the load commands and the link edit data are "
             f"the engine's byte for byte. Zero-filled, so compared by place and size: {', '.join(zerofill)}. "
             f"Left out: LC_UUID and the code signature (hashes of the whole file), the string table's "
             f"length and __LINKEDIT's size, the symbol table's N_SO source directories and N_OSO times",
@@ -626,19 +630,38 @@ def relocations(m, sec):
     return out
 
 
+BLOB_COMMANDS = {0x1d, 0x1e, 0x26, 0x29, 0x2b, 0x2e, 0x80000033, 0x80000034}  # (dataoff, datasize)
+
+
 def canonical(m):
-    """what of an object file reaches the linked file: every section outside __DWARF, with its
-    bytes and relocations, and the symbols that aren't debug entries"""
+    """what of an object file can reach the linked file: the header's CPU, type and flags; every
+    load command but the segment and symbol table ones, with the data a link edit command points
+    to (data in code, optimization hints...) in place of its offset; every section outside __DWARF
+    with its bytes, relocations and reserved fields; the symbols that aren't debug entries; the
+    indirect symbol table by name; the dynamic symbol table's counts, and any relocations it has"""
+    _, cputype, subtype, filetype, _, _, flags, _ = struct.unpack_from("<IiiIIIII", m.data, 0)
+    commands = []
+    for cmd, off, size in m.commands:
+        if cmd in (LC_SEGMENT_64, LC_SYMTAB, LC_DYSYMTAB):
+            continue
+        commands.append((cmd, linkedit_blob(m, cmd) if cmd in BLOB_COMMANDS else bytes(m.data[off:off + size])))
     sections = []
     for sec in m.sections:
         if sec["name"].startswith("__DWARF,"):
             continue
         data = None if sec["type"] in S_ZEROFILL_TYPES else bytes(m.data[sec["offset"]:sec["offset"] + sec["size"]])
-        sections.append((sec["name"], sec["size"], sec["align"], sec["flags"], data, tuple(relocations(m, sec))))
+        sections.append((sec["name"], sec["size"], sec["align"], sec["flags"], sec["reserved1"], sec["reserved2"],
+                         data, tuple(relocations(m, sec))))
     names = [sec["name"] for sec in m.sections]
     symbols = sorted((n, t, names[sect - 1] if sect else "", desc, value)
                      for n, t, sect, desc, value in m.syms if not t & N_STAB)
-    return sections, symbols
+    indirect = tuple(m.syms[i][0] if i < len(m.syms) else f"special {i:#x}" for i in m.indirect)
+    counts, extra = (), ()
+    if m.dysymtab:
+        counts = tuple(m.dysymtab[i] for i in (0, 1, 2, 3, 4, 5, 7, 9, 11, 13, 15, 17))
+        extra = tuple(bytes(m.data[o:o + 8 * n]) for o, n in ((m.dysymtab[14], m.dysymtab[15]),
+                                                             (m.dysymtab[16], m.dysymtab[17])))
+    return (cputype, subtype, filetype, flags), commands, sections, symbols, indirect, counts, extra
 
 
 def object_functions(m):
@@ -659,7 +682,8 @@ def object_functions(m):
 
 
 def build_commands(log):
-    """from a make log: object -> its compile command, and the objects of ntdll.so's link"""
+    """from a make log: object -> its compile command, and ntdll.so's link as (its .o arguments in
+    order, the rest of its words)"""
     lines, cur = [], ""
     for line in open(log, errors="replace"):
         line = line.rstrip("\n")
@@ -674,37 +698,62 @@ def build_commands(log):
         if "-c" in words and "-o" in words:
             target = words[words.index("-o") + 1]
             if target.startswith("dlls/ntdll/unix/") and target.endswith(".o"):
-                compiles[os.path.basename(target)] = line.strip()
+                compiles[os.path.basename(target)] = " ".join(words)
         elif "-o" in words and words[words.index("-o") + 1] == "dlls/ntdll/ntdll.so":
-            link = sorted(os.path.basename(w) for w in words if w.endswith(".o"))
+            link = ([w for w in words if w.endswith(".o")], [w for w in words if not w.endswith(".o")])
     return compiles, link
 
 
 def linked_objects(m):
-    """the debug map's objects: basename -> modification time"""
-    return {os.path.basename(n): value for n, t, _, _, value in m.syms if t == N_OSO}
+    """the debug map's objects in order: (path, modification time)"""
+    return [(os.path.normpath(n), value) for n, t, _, _, value in m.syms if t == N_OSO]
 
 
-def compare_objects(r, base_file, base_dir, head_file, head_dir, base_log, head_log, since, touched):
+def link_proof(link_objects, debug_map, compared, build_dir):
+    """what is wrong with the claim that <compared> ({path the link used: file compared}) are the
+    objects a file was linked from: the link line's objects (relative to <build_dir>) and the debug
+    map's [(path, time)] must name the same paths in the same order, each once, and each compared
+    file must have the time the link saw"""
+    problems = []
+    used = [os.path.normpath(o if os.path.isabs(o) else os.path.join(build_dir, o)) for o in link_objects]
+    mapped = [p for p, _ in debug_map]
+    if used != mapped:
+        problems.append("the link line and the debug map name different objects or another order")
+    if len(set(mapped)) != len(mapped):
+        problems.append("an object is linked twice")
+    if set(compared) != set(mapped):
+        problems.append("the objects compared aren't the ones linked")
+    times = dict(debug_map)
+    stale = [os.path.basename(p) for p, f in compared.items() if int(os.stat(f).st_mtime) != times.get(p)]
+    if stale:
+        problems.append(f"changed since the link: {listing(stale)}")
+    return problems
+
+
+def compare_objects(r, build_dir, base_file, base_dir, head_file, base_log, head_log, since, touched):
     """the patched build's objects against my base build's: proof that both sets are what their
     files linked, then every untouched object equal through its relocations, and the functions of
-    the touched ones listed"""
+    the touched ones listed. The base build's objects are copies in <base_dir> of the ones it
+    linked from <build_dir>/dlls/ntdll/unix; this build's are there still."""
+    unix = os.path.join(build_dir, "dlls/ntdll/unix")
     base_objs = {f: os.path.join(base_dir, f) for f in os.listdir(base_dir) if f.endswith(".o")}
-    head_objs = {f: os.path.join(head_dir, f) for f in os.listdir(head_dir) if f.endswith(".o")}
+    head_objs = {f: os.path.join(unix, f) for f in os.listdir(unix) if f.endswith(".o")}
     base_cc, base_link = build_commands(base_log)
     head_cc, head_link = build_commands(head_log)
     for label, objs, file, link, cc in (("my base build", base_objs, base_file, base_link, base_cc),
                                        ("this build", head_objs, head_file, head_link, head_cc)):
-        linked = linked_objects(MachO(file))
-        stale = [f for f, p in objs.items() if int(os.stat(p).st_mtime) != linked.get(f)]
-        r.check(link is not None and set(link) == set(objs) == set(linked) and not stale,
-                f"{label}: the {len(objs)} objects compared are the ones its link line names and its debug "
-                f"map lists, with the times the link saw",
-                f"{label}: the objects compared ({len(objs)}), the link line's ({len(link or [])}) and the "
-                f"debug map's ({len(linked)}) aren't the same files{'; changed since the link: ' + listing(stale) if stale else ''}")
+        compared = {os.path.normpath(os.path.join(unix, f)): p for f, p in objs.items()}
+        problems = (["no link of ntdll.so in its make log"] if link is None else
+                    link_proof(link[0], linked_objects(MachO(file)), compared, build_dir))
+        r.check(not problems, f"{label}: the {len(objs)} objects compared are the ones its link line names and its "
+                              f"debug map lists, by path and in order, with the times the link saw",
+                f"{label}: {'; '.join(problems)}")
         missing = [f for f in objs if f not in cc]
         r.check(not missing, f"{label}: the make log has the compile command of every object",
                 f"{label}: no compile command in the make log for {listing(missing)}")
+    r.check(bool(base_link and head_link and base_link[1] == head_link[1]),
+            "both builds linked ntdll.so with the same command, objects aside",
+            "the two builds linked ntdll.so with different commands, objects aside")
     old = [f for f, p in head_objs.items() if os.stat(p).st_mtime < since]
     r.check(not old, "this build compiled every object after the checkout",
             f"objects older than the checkout, so not rebuilt: {listing(old)}")
@@ -854,18 +903,26 @@ def fixtures():
     return failed
 
 
-def fake_object(code, relocs, data, dwarf=b"", syms=(("_f", 0x0f, 1, 0, 0),)):
-    """a minimal object file for canonical(): __text with relocations, __data, and __debug_info"""
+def fake_object(code, relocs, data, dwarf=b"", flags=0x2000, indirect=(), pointer_r1=0):
+    """a minimal object file for canonical(): a header, __text with relocations, __data, a
+    __nl_symbol_ptr section on the indirect symbol table, and __debug_info"""
     m = MachO.__new__(MachO)
-    reloff = len(code) + len(data) + len(dwarf)
-    m.data = code + data + dwarf + b"".join(struct.pack("<iI", a, info) for a, info in relocs)
-    m.sections = [dict(name="__TEXT,__text", offset=0, size=len(code), align=2, flags=0x80000400, type=0,
-                       reloff=reloff, nreloc=len(relocs), reserved1=0, reserved2=0),
-                  dict(name="__DATA,__data", offset=len(code), size=len(data), align=3, flags=0, type=0,
-                       reloff=0, nreloc=0, reserved1=0, reserved2=0),
-                  dict(name="__DWARF,__debug_info", offset=len(code) + len(data), size=len(dwarf), align=0,
-                       flags=0x02000000, type=0, reloff=0, nreloc=0, reserved1=0, reserved2=0)]
-    m.syms = list(syms) + [("_a", 0x01, 0, 0, 0), ("_b", 0x01, 0, 0, 0)]
+    header = struct.pack("<IiiIIIII", 0xfeedfacf, 0x0100000c, 0, 1, 0, 0, flags, 0)
+    o_code, o_data = 32, 32 + len(code)
+    o_ptr = o_data + len(data)
+    o_dwarf = o_ptr + 8 * len(indirect)
+    reloff = o_dwarf + len(dwarf)
+    m.data = (header + code + data + bytes(8 * len(indirect)) + dwarf
+              + b"".join(struct.pack("<iI", a, info) for a, info in relocs))
+    section = lambda name, off, size, flags, r1=0, reloff=0, nreloc=0: dict(
+        name=name, offset=off, size=size, align=3, flags=flags, type=flags & 0xff, reloff=reloff, nreloc=nreloc,
+        reserved1=r1, reserved2=0)
+    m.sections = [section("__TEXT,__text", o_code, len(code), 0x80000400, reloff=reloff, nreloc=len(relocs)),
+                  section("__DATA,__data", o_data, len(data), 0),
+                  section("__DATA,__nl_symbol_ptr", o_ptr, 8 * len(indirect), 0x6, r1=pointer_r1),
+                  section("__DWARF,__debug_info", o_dwarf, len(dwarf), 0x02000000)]
+    m.syms = [("_f", 0x0f, 1, 0, 0), ("_a", 0x01, 0, 0, 0), ("_b", 0x01, 0, 0, 0)]
+    m.commands, m.indirect, m.dysymtab = [], list(indirect), None
     return m
 
 
@@ -892,6 +949,12 @@ def selftest(engine_dir):
         mine.syms = [(n + "x" if t == N_OSO else n, t, sect, desc, value) for n, t, sect, desc, value in theirs.syms]
         if byte_gate(mine, theirs, quiet):
             failed.append("byte gate: an object's path in the debug map")
+        mine.syms = theirs.syms
+        data = bytearray(theirs.data)
+        data[24] &= ~0x80  # MH_TWOLEVEL
+        mine.data = bytes(data)
+        if byte_gate(mine, theirs, quiet):
+            failed.append("byte gate: the header's flags")
 
     # the object compare: a relocation's target, an addend, a byte of data; not a debug section
     code = struct.pack("<2I", 0x90000008, 0x91000108)  # adrp x8, _a@PAGE; add x8, x8, _a@PAGEOFF
@@ -904,6 +967,26 @@ def selftest(engine_dir):
             failed.append(f"object compare: {what}")
     if canonical(fake_object(code, [(0, page | 1), (4, off | 1)], b"\x01\x02", b"\x07")) != base:
         failed.append("object compare: the debug information only")
+    # the review of the object compare: header flags, an indirect slot, a section's reserved1
+    ptrs = canonical(fake_object(code, [], b"", indirect=(1,)))
+    for what, obj in (("the header's flags", fake_object(code, [], b"", flags=0, indirect=(1,))),
+                      ("an indirect symbol slot", fake_object(code, [], b"", indirect=(2,))),
+                      ("a section's reserved1", fake_object(code, [], b"", indirect=(1,), pointer_r1=1))):
+        if canonical(obj) == ptrs:
+            failed.append(f"object compare: {what}")
+
+    # the link proof: an object of the same name from another directory, and one linked twice
+    with tempfile.TemporaryDirectory() as tmp:
+        obj = os.path.join(tmp, "loader.o")
+        open(obj, "wb").close()
+        when = int(os.stat(obj).st_mtime)
+        real = "/build/dlls/ntdll/unix/loader.o"
+        if not link_proof(["replacement/loader.o"], [("/build/replacement/loader.o", when)], {real: obj}, "/build"):
+            failed.append("link proof: an object of the same name from another directory")
+        if not link_proof(["dlls/ntdll/unix/loader.o"] * 2, [(real, when)] * 2, {real: obj}, "/build"):
+            failed.append("link proof: an object linked twice")
+        if link_proof(["dlls/ntdll/unix/loader.o"], [(real, when)], {real: obj}, "/build"):
+            failed.append("link proof: the right object")
 
     for item in fixtures():
         failed.append(f"masking fixture: {item}")
@@ -920,13 +1003,13 @@ def main():
         return selftest(args[1])
     if not ((len(args) == 3 and args[0] == "baseline") or (len(args) >= 9 and args[0] == "patched")):
         print("usage: ntdll-compare.py baseline <mine> <engine-unix-dir>\n"
-              "       ntdll-compare.py patched <mine> <engine-unix-dir> <base ntdll.so> <base objects> "
-              "<objects> <base make log> <make log> <checkout time> [<touched source>...]\n"
+              "       ntdll-compare.py patched <mine> <engine-unix-dir> <build dir> <base ntdll.so> "
+              "<base objects> <base make log> <make log> <checkout time> [<touched source>...]\n"
               "       ntdll-compare.py selftest <engine-unix-dir>", file=sys.stderr)
         return 2
     mode, mine_path, engine_dir = args[:3]
     if mode == "patched":
-        base_file, base_objs, head_objs, base_log, head_log, since = args[3:9]
+        build_dir, base_file, base_objs, base_log, head_log, since = args[3:9]
         since, touched = float(since), args[9:]
     mine, theirs = MachO(mine_path), MachO(os.path.join(engine_dir, "ntdll.so"))
     r = Report()
@@ -975,7 +1058,7 @@ def main():
         if not byte_gate(mine, theirs, r):
             diagnose(mine, theirs)
     else:
-        changed, new, removed = compare_objects(r, base_file, base_objs, mine_path, head_objs, base_log,
+        changed, new, removed = compare_objects(r, build_dir, base_file, base_objs, mine_path, base_log,
                                                 head_log, since, touched)
         print(f"\n#### Changed by this branch ({', '.join(sorted(touched)) or 'no source file of ntdll.so'})\n")
         for title, items in (("changed", changed), ("new", new), ("removed", removed)):

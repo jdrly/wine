@@ -6,11 +6,14 @@
 #   engine's paths, with Xcode $XCODE_VERSION, macOS $MACOSX_DEPLOYMENT_TARGET and llvm-mingw
 #   $LLVM_MINGW_VERSION. In it, one after the other:
 #   - $BASE_COMMIT, the commit the engine was built from, compared with the engine's ntdll.so by
-#     .github/gw2/ntdll-compare.py baseline: the same exports, imports, libraries and minos, and
-#     every function equal with the addresses masked
+#     .github/gw2/ntdll-compare.py baseline: the same exports and imports, and the header, every
+#     section, the load commands and the link edit data byte for byte
 #   - the same with one line of NtYieldExecution changed, which that compare has to fail and name
-#   - this commit, compared by ntdll-compare.py patched: every function of a source file the commit
-#     doesn't touch is the engine's, and the summary lists the changed ones
+#   - this commit, every object compiled again, compared by ntdll-compare.py patched: each object
+#     of a source file the commit doesn't touch is the base build's, by its compile command, code,
+#     data, relocations and symbols, and the summary lists the touched files' changed functions
+#   The per-function listing with masked addresses that follows a failed byte gate only names
+#   what differs; it is not the gate and never passes or fails a build.
 #   Artifact ntdll-mach9-<commit>: ntdll.so, VERSION, COPYING.LIB, LICENSE, kept 7 days.
 # tests: tests/gw2/*.c built for Win64 x86_64 with llvm-mingw and run with tests/gw2/run.zsh under
 #   the engine from the release tarball, once with its own ntdll.so and once with mine.
@@ -179,7 +182,7 @@ jobs:
             >"$RUNNER_TEMP/baseline.md" || status=$?
           tee -a "$GITHUB_STEP_SUMMARY" <"$RUNNER_TEMP/baseline.md"
           exit "$status"
-      # what differs, for the first functions the compare names
+      # what differs, for the first functions the compare's listing names (the listing is not the gate)
       - name: Disassemble what differs
         if: failure() && steps.baseline.outcome == 'failure'
         run: |
@@ -237,7 +240,7 @@ jobs:
           while IFS= read -r f; do touched+=("$f"); done < <(git -C "$SRC" diff --name-only "$BASE_COMMIT" "$COMMIT" -- dlls/ntdll)
           status=0
           python3 -I .github/gw2/ntdll-compare.py patched "$BUILD/dlls/ntdll/ntdll.so" toolchains/engine/lib/wine/aarch64-unix \
-            "$RUNNER_TEMP/baseline-ntdll.so" "$RUNNER_TEMP/base-objects" "$BUILD/dlls/ntdll/unix" \
+            "$BUILD" "$RUNNER_TEMP/baseline-ntdll.so" "$RUNNER_TEMP/base-objects" \
             "$RUNNER_TEMP/base-build.log" "$RUNNER_TEMP/head-build.log" "$(cat "$RUNNER_TEMP/checkout-time")" \
             "${touched[@]}" >"$RUNNER_TEMP/compare.md" || status=$?
           tee -a "$GITHUB_STEP_SUMMARY" <"$RUNNER_TEMP/compare.md"

@@ -53,6 +53,8 @@ for exe in "$@"; do
   # grep without -q, which would end the pipe early and fail it under pipe_fail
   if (( rc == 0 )) && tr -d '\r' <"$log" | grep -xF "gw2 test $name: passed" >/dev/null; then
     print "ok    $name"
+    # what the program said on the way, the counters it read for instance
+    tr -d '\r' <"$log" | grep "^gw2 test $name: " | grep -vxF "gw2 test $name: passed" | sed 's/^/      /' || true
   else
     print "FAIL  $name (exit $rc$( (( rc == 142 )) && print ', the time limit' ))"
     sed 's/^/      /' "$log"
