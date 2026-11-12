@@ -29,6 +29,8 @@
  *                         priority is p, and repeats; ":game" is ":not=1", GW2's ABOVE_NORMAL
  *                         workers; ":all", the default, leaves out none.
  *   WINE_HEAT_SPIN_PAUSE=<n>  waits without a spin after 4 misses in a row (default 32)
+ *   WINE_HEAT_PROF=1      the game thread's sampler under FEX (heatprof.c, jdrly/gw2-on-mac#43).
+ *                         With FEX_PROFILESTATS=1 the log also gets the game thread's FEX counters.
  *
  * See jdrly/gw2-on-mac#40 and, for 0.1.x's version of the same switches, gw2-on-mac's
  * docs/research/heat-locks-2026-10-29.md.
@@ -70,6 +72,7 @@
 #include "winternl.h"
 #include "unix_private.h"
 #include "heat.h"
+#include "heatprof.h"
 
 unsigned int heat_mode;
 
@@ -192,12 +195,18 @@ static void heat_dump(void)
         for (j = 0; j < HC_NB; j++) total_c[j] += __atomic_load_n( &heat_rows[i].c[j], __ATOMIC_RELAXED );
         for (j = 0; j < HT_NB; j++) total_t[j] += __atomic_load_n( &heat_rows[i].t[j], __ATOMIC_RELAXED );
     }
-    len = snprintf( buf, sizeof(buf), "heat pid %d exe %s mode%s%s%s%s seconds %.1f threads %u\n%stotal",
+    len = snprintf( buf, sizeof(buf), "heat pid %d exe %s mode%s%s%s%s%s seconds %.1f threads %u\n%s",
                     getpid(), heat_exe, heat_mode & HEAT_COUNT ? " count" : "",
                     heat_mode & HEAT_WAKE_ONE ? " one" : "", heat_mode & HEAT_WAKE_SKIP ? " skip" : "",
                     heat_mode & HEAT_EVPOOL_MASK ? " evpool,mask" : heat_mode & HEAT_EVPOOL ? " evpool" : "",
-                    (heat_now() - heat_started) / 1e9, n, heat_spin_line );
-    len += heat_print_row( buf + len, sizeof(buf) - len, total_c, total_t );
+                    heat_mode & HEAT_PROF ? " prof" : "", (heat_now() - heat_started) / 1e9, n, heat_spin_line );
+    /* jdrly/gw2-on-mac#43: FEX's counters of the game thread, when FEX keeps them */
+    if (heat_mode & HEAT_PROF) len += heat_prof_fex_stats( buf + len, sizeof(buf) - len );
+    if (heat_mode & HEAT_COUNT)
+    {
+        len += snprintf( buf + len, sizeof(buf) - len, "total" );
+        len += heat_print_row( buf + len, sizeof(buf) - len, total_c, total_t );
+    }
     for (i = 0; i < n && len < sizeof(buf) - 1; i++)
     {
         for (j = 0; j < HC_NB; j++) c[j] = __atomic_load_n( &heat_rows[i].c[j], __ATOMIC_RELAXED );
@@ -876,6 +885,8 @@ void heat_init(void)
         unsigned long n = strtoul( p, &end, 10 );
         if (!*end && n <= 1000000) heat_spin_pause = n;
     }
+    /* jdrly/gw2-on-mac#43 */
+    if ((p = getenv( "WINE_HEAT_PROF" )) && !strcmp( p, "1" )) mode |= HEAT_PROF;
     if (!mode) return;
     if (!exe || !*exe) exe = "Gw2-64.exe";
     if (!peb || !peb->ProcessParameters || !heat_is_exe( exe )) return;
@@ -891,7 +902,7 @@ void heat_init(void)
     /* jdrly/gw2-on-mac#45 */
     if ((mode & HEAT_SPIN_EVENT) && !(heat_spinners = heat_map( HEAT_SLOTS * sizeof(*heat_spinners) )))
         mode &= ~HEAT_SPIN_EVENT;
-    if (mode & HEAT_COUNT)
+    if (mode & (HEAT_COUNT | HEAT_PROF))
     {
         mach_timebase_info( &heat_timebase );
         heat_started = heat_now();
@@ -904,8 +915,11 @@ void heat_init(void)
         mach_timebase_info( &heat_timebase );
         heat_spin_describe( mode );
     }
+    /* jdrly/gw2-on-mac#43: the sampler's thread; its handler comes once FEX is loaded and checked */
+    if ((mode & HEAT_PROF) && !heat_prof_init( dir && *dir ? dir : "/tmp" )) mode &= ~HEAT_PROF;
     heat_mode = mode;
-    if (mode & HEAT_COUNT)
+    /* the dumper prints the counters, and with the sampler FEX's counters */
+    if (mode & (HEAT_COUNT | HEAT_PROF))
     {
         /* the dumper isn't a Wine thread: no signal of Wine's may land on it */
         sigfillset( &all );
