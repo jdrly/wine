@@ -27,6 +27,7 @@
 #import "cocoa_app.h"
 #import "cocoa_event.h"
 #import "cocoa_window.h"
+#import "gcmouse_scale.h"
 
 #pragma GCC diagnostic ignored "-Wdeclaration-after-statement"
 
@@ -68,10 +69,8 @@ static void gcmouse_post_movement(void)
     int x, y;
 
     os_unfair_lock_lock(&gcmouse_lock);
-    x = gcmouse_accum_x;
-    y = gcmouse_accum_y;
-    gcmouse_accum_x -= x;
-    gcmouse_accum_y -= y;
+    x = gcmouse_take_counts(&gcmouse_accum_x);
+    y = gcmouse_take_counts(&gcmouse_accum_y);
     gcmouse_post_pending = FALSE;
     os_unfair_lock_unlock(&gcmouse_lock);
 
@@ -103,8 +102,7 @@ static void gcmouse_moved(float delta_x, float delta_y)
     if (!delta_x && !delta_y) return;
 
     os_unfair_lock_lock(&gcmouse_lock);
-    gcmouse_accum_x += delta_x;
-    gcmouse_accum_y -= delta_y;  /* GameController's y axis points up */
+    gcmouse_add_movement(&gcmouse_accum_x, &gcmouse_accum_y, delta_x, delta_y, gcmouse_scale);
     post = !gcmouse_post_pending;
     gcmouse_post_pending = TRUE;
     os_unfair_lock_unlock(&gcmouse_lock);
