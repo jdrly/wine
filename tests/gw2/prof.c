@@ -299,6 +299,7 @@ int main(void)
 {
     BOOL on = env_is( "WINE_HEAT_PROF", "1" ) && env_is( "WINE_HEAT_EXE", "prof.exe" );
     unsigned int seconds = 1;
+    ULONGLONG start;
     char buf[32];
     HANDLE thread;
     DWORD tid;
@@ -317,6 +318,7 @@ int main(void)
     range( R_GAME, "game", game );
 
     if (!(thread = CreateThread( NULL, 0, game, NULL, 0, &tid ))) FAIL( "CreateThread: error %lu", GetLastError() );
+    start = GetTickCount64();
     Sleep( seconds * 1000 );
     if (on && env_is( "FEX_PROFILESTATS", "1" ))
     {
@@ -329,6 +331,7 @@ int main(void)
         }
     }
     InterlockedExchange( &stop, 1 );
+    seconds = (GetTickCount64() - start + 999) / 1000;  /* what the rate is checked over */
     if (WaitForSingleObject( thread, 60000 )) FAIL( "the thread didn't end" );
     CloseHandle( thread );
 
