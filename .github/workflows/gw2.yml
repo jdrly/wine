@@ -7,16 +7,16 @@
 # build of the engine's commit is held to the strict gate, byte for byte; with any other it is held
 # to the structural gate: the engine's exports and where each points, imports, libraries, install
 # name, rpaths, minos, segments, sections and functions by name, with the functions and sections
-# whose bytes differ only a report (.github/gw2/compare.py). Going back is one edit: RUNNER and XCODE_VERSION below to the engine's
-# values. Until 2026-11-12 it ran on macos-26 with Xcode 26.6, and my build of the engine's commit
-# was the engine's ntdll.so and winemac.so byte for byte in the header, every section of every
-# loaded segment, the load commands and the link edit data (run 43109476509 of pull request #1 and
-# run 43156131896 of #10). Since 2026-11-12 it runs on GitHub's Xcode 27 image: no macos-26 runner
-# was assigned all evening, and I have no Mac of my own for it. Xcode 27's clang isn't the
-# engine's, so my files can't be the engine's byte for byte. The patched compare is the same either
-# way, my base build against this commit's from one run and one toolchain, and the tests on the
-# engine are the proof that files from the other compiler work. The flags stay the engine's: its
-# unix side is built at -O0.
+# whose bytes differ only a report (.github/gw2/compare.py). Going back is one edit: RUNNER and
+# XCODE_VERSION below to the engine's values. Until 2026-11-12 it ran on macos-26 with Xcode 26.6,
+# and my build of the engine's commit was the engine's ntdll.so and winemac.so byte for byte in the
+# header, every section of every loaded segment, the load commands and the link edit data (run
+# 43109476509 of pull request #1 and run 43156131896 of #10). Since 2026-11-12 it runs on GitHub's
+# Xcode 27 image: no macos-26 runner was assigned all evening, and I have no Mac of my own for it.
+# Xcode 27's clang isn't the engine's, so my files can't be the engine's byte for byte. The patched
+# compare is the same either way, my base build against this commit's from one run and one
+# toolchain, and the tests on the engine are the proof that files from the other compiler work.
+# The flags stay the engine's: its unix side is built at -O0.
 #
 # build: one Wine tree configured as Mach9 configures its own (.github/gw2/wine.zsh), in the
 #   engine's paths, with Xcode $XCODE_VERSION, macOS $MACOSX_DEPLOYMENT_TARGET and llvm-mingw

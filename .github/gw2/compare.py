@@ -52,6 +52,7 @@ import functools
 import hashlib
 import io
 import os
+import re
 import struct
 import sys
 import tempfile
@@ -1396,6 +1397,22 @@ def selftest(engine_dir):
     failures, line, strict, out = structural(swap_sections)
     if failures or "sections in another order inside their segment: __DATA_CONST" not in out:
         failed.append(f"structural gate: two sections of a segment in another order, {failures} failed, not in the report")
+    def renumbered(m):  # clang's numbers of winemac.so's block helpers one lower, as Xcode 27's clang has them
+        for old, new in (("___Block_byref_object_copy_.468", "___Block_byref_object_copy_.467"),
+                         ("___Block_byref_object_dispose_.469", "___Block_byref_object_dispose_.468")):
+            i = next(i for i, (n, t, _, _, _) in enumerate(m.syms) if n == old and t == N_FUN)
+            sym_set(m, i, n=new)
+    failures, line, _, out = structural(renumbered, "winemac.so")
+    if failures:
+        failed.append(f"structural gate: winemac.so's block helpers numbered one lower, {failures} failed")
+    if not structural(lambda m: sym_set(m, next(i for i, (n, t, _, _, _) in enumerate(m.syms)
+                                                if n == "___Block_byref_object_copy_.468" and t == N_FUN),
+                                        n="___Block_byref_object_copy"), "winemac.so")[0]:
+        failed.append("structural gate: a block helper renamed beyond its number passed")
+    if not structural(lambda m: sym_set(m, next(i for i, (n, t, _, _, _) in enumerate(m.syms)
+                                                if n == "_macdrv_copy_pasteboard_types" and t == N_FUN),
+                                        n="_macdrv_copy_pasteboard_types.123"), "winemac.so")[0]:
+        failed.append("structural gate: a function of the source given a number passed")
     if not structural(table_moved, "winemac.so")[0]:
         failed.append("structural gate: winemac.so's data export macdrv_functions 8 bytes on passed")
     if not structural(table_high8, "winemac.so")[0]:
@@ -1539,10 +1556,11 @@ def structural_gate(mine, theirs, r):
              for g in segs if sorted(sec(mine, g)) == sorted(sec(theirs, g)) and sec(mine, g) != sec(theirs, g)]
     print(f"- report: sections in another order inside their segment: {'; '.join(order) if order else 'none'}")
     fm, ft = mine.functions(), theirs.functions()
-    missing, extra = set(ft) - set(fm), set(fm) - set(ft)
+    nm, nt = unnumbered(fm), unnumbered(ft)
     name = lambda k: f"{k[0]}: {k[1][1:] if k[1].startswith('_') else k[1]}"
+    missing, extra = [name(nt[k]) for k in set(nt) - set(nm)], [name(nm[k]) for k in set(nm) - set(nt)]
     r.check(not missing and not extra, f"the engine's {len(ft)} functions by source and name",
-            f"functions differ: missing {listing(map(name, missing))}; extra {listing(map(name, extra))}")
+            f"functions differ: missing {listing(missing)}; extra {listing(extra)}")
     code = [(s["addr"], s["addr"] + s["size"]) for s in mine.sections
             if s["flags"] & (S_ATTR_PURE_INSTRUCTIONS | S_ATTR_SOME_INSTRUCTIONS)]
     bad = [name(k) for k, (a, n) in fm.items() if n <= 0 or not any(lo <= a and a + n <= hi for lo, hi in code)]
@@ -1554,7 +1572,9 @@ def structural_gate(mine, theirs, r):
     r.check(not moved, f"each of the {len(et)} exports in the engine's section, with its weak flag, and in code at "
                        f"the start of the function of the same source and name",
             f"exports other than the engine's (mine / the engine's): {listing(moved)}")
-    differ = differing(mine, theirs, fm, ft)
+    # the same functions paired, by the engine's names
+    pm, pt = {nt[k]: fm[nm[k]] for k in set(nm) & set(nt)}, {nt[k]: ft[nt[k]] for k in set(nm) & set(nt)}
+    differ = differing(mine, theirs, pm, pt)
     line = f"structural, {len(differ)} of {len(ft)} functions differ from the engine's file"
     print(f"- report: {len(differ)} of the {len(ft)} functions differ in their bytes with the addresses masked, "
           f"the other compiler's doing and not a check" + (f": {listing(differ)}" if differ else ""))
@@ -1609,6 +1629,26 @@ def data_contents(m, s, addr):
             h.update(m.data[s["offset"] + a - s["addr"]:s["offset"] + a - s["addr"] + 1])
             a += 1
     return f"{end - addr} bytes {h.hexdigest()[:24]}"
+
+
+def unnumbered(funcs):
+    """the debug map's functions keyed without clang's numbers: a C or Objective-C name has no dot,
+    so a trailing .<n> is clang's own, which it gives the helpers it makes (blocks' byref copy and
+    dispose helpers, a block's invoke) in the order it makes them, and another clang counts
+    otherwise (__Block_byref_object_copy_.468 in the engine's winemac.so, .467 in Xcode 27's). Only
+    the helpers' names lose it: they start with clang's two underscores after the symbol's own one,
+    a function of the source with one. Within a source, the helpers of one name pair in the order of
+    their numbers, an unnumbered one first. That order is clang's, and if another clang made one
+    helper of a name more or fewer, the count per name and source differs and the gate fails; if it
+    made them in another order, the bytes of the wrong bodies are compared, which only the report
+    shows, as for every function under this gate.
+    (source, name without the number, its place in that order) -> the function's key."""
+    groups = {}
+    for key in funcs:
+        m = re.fullmatch(r"(___.*)\.(\d+)", key[1])
+        base, number = (m.group(1), int(m.group(2))) if m else (key[1], -1)
+        groups.setdefault((key[0], base), []).append((number, key))
+    return {(src, base, i): key for (src, base), items in groups.items() for i, (_, key) in enumerate(sorted(items))}
 
 
 def differing(mine, theirs, fm, ft):
