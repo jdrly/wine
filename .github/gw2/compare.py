@@ -24,9 +24,10 @@
 # baseline structural: my build of the engine's commit with another toolchain than the engine's
 #   (jdrly/gw2-on-mac#124). Its exports, imports, libraries, install name, rpaths and minos are the
 #   engine's, as with the strict gate, and so are its segments with their protections, its sections
-#   in their order with their types, and its functions by source and name (structural_gate). How
-#   many functions differ in their bytes, with the addresses masked, is a report: that is the other
-#   compiler, and it never fails a build. With either gate a baseline that passes ends with the line
+#   in their order with their flags, its functions by source and name, each with code in an
+#   executable section, and each export's section, weak flag and function (structural_gate). Which
+#   functions differ in their bytes (addresses masked), which sections in their size and which other
+#   sections in their bytes is a report: that is the other compiler, and it never fails a build. With either gate a baseline that passes ends with the line
 #   "baseline: <library> <the gate that held>", which the workflow copies into VERSION, in the form
 #   my FEX fork's record has.
 # patched: my build of a later commit, made in the same tree after the baseline with every object
@@ -78,7 +79,9 @@ LC_REEXPORT_DYLIB, LC_LAZY_LOAD_DYLIB, LC_LOAD_UPWARD_DYLIB = 0x1f | LC_REQ_DYLD
 LC_RPATH, LC_BUILD_VERSION = 0x1c | LC_REQ_DYLD, 0x32
 DYLIB_CMDS = {LC_LOAD_DYLIB: "", LC_LOAD_WEAK_DYLIB: " (weak)", LC_REEXPORT_DYLIB: " (reexport)",
               LC_LAZY_LOAD_DYLIB: " (lazy)", LC_LOAD_UPWARD_DYLIB: " (upward)"}
-N_STAB, N_TYPE, N_EXT, N_UNDF, N_SECT = 0xe0, 0x0e, 0x01, 0x0, 0xe
+N_STAB, N_PEXT, N_TYPE, N_EXT, N_UNDF, N_SECT = 0xe0, 0x10, 0x0e, 0x01, 0x0, 0xe
+N_WEAK_DEF = 0x0080
+S_ATTR_PURE_INSTRUCTIONS, S_ATTR_SOME_INSTRUCTIONS = 0x80000000, 0x00000400
 N_FUN, N_STSYM, N_SO, N_OSO = 0x24, 0x26, 0x64, 0x66
 S_NON_LAZY_SYMBOL_POINTERS, S_LAZY_SYMBOL_POINTERS, S_SYMBOL_STUBS = 0x6, 0x7, 0x8
 INDIRECT_SYMBOL_LOCAL, INDIRECT_SYMBOL_ABS = 0x80000000, 0x40000000
@@ -153,7 +156,7 @@ class MachO:
 
         # what this file defines and exports, and what it imports from which library
         self.exports = sorted(n[1:] for n, t, _, _, _ in self.syms
-                              if not t & N_STAB and t & N_EXT and t & N_TYPE == N_SECT)
+                              if not t & (N_STAB | N_PEXT) and t & N_EXT and t & N_TYPE == N_SECT)
         self.imports = {}
         for n, t, _, desc, _ in self.syms:
             if not t & N_STAB and t & N_EXT and t & N_TYPE == N_UNDF:
@@ -1219,17 +1222,52 @@ def selftest(engine_dir):
             failed.append("link proof: an object with code the debug map leaves out")
 
     # the structural gate (jdrly/gw2-on-mac#124), on the engine's ntdll.so against itself: a missing
-    # export, a changed import, another minos, another section type and a missing function each
-    # fail; other bytes in a function alone don't, and the byte gate still fails on those
+    # export, a changed import, another minos, another section type or attribute, a missing function,
+    # a function without code, and an export moved, in another section or private each fail; other
+    # bytes in a function or in data alone don't, and are in the report, and the byte gate still
+    # fails on those
     def structural(change):
         mine = MachO(os.path.join(engine_dir, "ntdll.so"))
         change(mine)
-        r = Report()
-        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+        r, out = Report(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
             shape(r, "structural", "ntdll.so", mine, theirs, engine_dir)
             line = structural_gate(mine, theirs, r)
             strict = byte_gate(mine, theirs, Report())
-        return r.failed, line, strict
+        return r.failed, line, strict, out.getvalue()
+
+    def export_index(m, name):  # the symbol table entry of an export
+        return next(i for i, (n, t, _, _, _) in enumerate(m.syms)
+                    if n == "_" + name and not t & N_STAB and t & N_EXT and t & N_TYPE == N_SECT)
+
+    def sym_set(m, i, **kw):  # one symbol table entry changed: name, type, sect, desc or value
+        n, t, sect, desc, v = m.syms[i]
+        new = dict(dict(n=n, t=t, sect=sect, desc=desc, v=v), **kw)
+        m.syms = m.syms[:i] + [(new["n"], new["t"], new["sect"], new["desc"], new["v"])] + m.syms[i + 1:]
+
+    def no_code(m):  # the debug map's first function with no bytes: its end N_FUN says 0
+        i = next(i for i, (n, t, _, _, _) in enumerate(m.syms) if t == N_FUN and n)
+        sym_set(m, i + 1, v=0)
+
+    def redirect(m):  # an export in code at the start of another function than the engine's
+        funcs = m.functions()
+        i = export_index(m, code_export)
+        other = next(a for k, (a, _) in funcs.items() if a != m.syms[i][4])
+        sym_set(m, i, v=other)
+
+    def to_data(m):  # an export in another section
+        sym_set(m, export_index(m, code_export), sect=1 + next(j for j, sec in enumerate(m.sections)
+                                                                if sec["name"].startswith("__DATA")))
+
+    def private(m):  # an export made private extern
+        i = export_index(m, code_export)
+        sym_set(m, i, t=m.syms[i][1] | N_PEXT)
+
+    def data_bytes(m):
+        sec = next(sec for sec in m.sections if sec["name"] == "__DATA,__data")
+        data = bytearray(m.data)
+        data[sec["offset"]] ^= 0x01
+        m.data = bytes(data)
 
     def no_function(m):  # the debug map's first function gone: its two N_FUN entries made N_BNSYM
         i = next(i for i, (n, t, _, _, _) in enumerate(m.syms) if t == N_FUN and n)
@@ -1242,7 +1280,11 @@ def selftest(engine_dir):
         m.data = bytes(data)
 
     theirs = MachO(os.path.join(engine_dir, "ntdll.so"))
-    failures, line, strict = structural(lambda m: None)
+    starts = {a for a, _ in theirs.functions().values()}
+    code_export = next(n[1:] for n, t, sect, _, v in theirs.syms
+                       if not t & (N_STAB | N_PEXT) and t & N_EXT and t & N_TYPE == N_SECT and v in starts
+                       and theirs.sections[sect - 1]["name"] == "__TEXT,__text")
+    failures, line, strict, _ = structural(lambda m: None)
     if failures or not line.startswith("structural, 0 of ") or not strict:
         failed.append(f"structural gate: the engine's file against itself, {failures} failed, {line}")
     # an export no other module of the engine imports and compatdb.so doesn't look up, so only the
@@ -1255,15 +1297,26 @@ def selftest(engine_dir):
                          ("a changed import", lambda m: setattr(m, "imports", dict(
                              m.imports, **{next(iter(m.imports)): "/usr/lib/libother.dylib"}))),
                          ("another minos", lambda m: setattr(m, "minos", "27.0")),
-                         ("another section type", lambda m: m.sections[0].update(type=m.sections[0]["type"] ^ 1)),
-                         ("a missing function", no_function)):
+                         ("another section type", lambda m: m.sections[1].update(flags=m.sections[1]["flags"] ^ 1)),
+                         ("a section attribute gone", lambda m: m.sections[0].update(
+                             flags=m.sections[0]["flags"] & ~S_ATTR_PURE_INSTRUCTIONS)),
+                         ("a missing function", no_function),
+                         ("a function without code", no_code),
+                         ("an export at another function", redirect),
+                         ("an export in another section", to_data),
+                         ("an export made private", private)):
         if not structural(change)[0]:
             failed.append(f"structural gate: {what} passed")
-    failures, line, strict = structural(other_bytes)
+    failures, line, strict, _ = structural(other_bytes)
     if failures or not line.startswith("structural, 1 of "):
         failed.append(f"structural gate: other bytes in one function, {failures} failed, {line}")
     if strict:
         failed.append("byte gate: other bytes in one function passed")
+    failures, line, strict, out = structural(data_bytes)
+    if failures or "other sections whose bytes differ: `__DATA,__data`" not in out:
+        failed.append(f"structural gate: other bytes in __DATA,__data, {failures} failed, not in the report")
+    if strict:
+        failed.append("byte gate: other bytes in __DATA,__data passed")
 
     for item in fixtures():
         failed.append(f"masking fixture: {item}")
@@ -1377,28 +1430,69 @@ def shape(r, mode, lib, mine, theirs, engine_dir):
 
 def structural_gate(mine, theirs, r):
     """my build with another toolchain against the engine's file: the same segments with the same
-    protections, the same sections in the same order with the same types, the same functions by
-    source and name. Which functions differ in their bytes, with the addresses masked, is a report
-    and not a check. Returns the gate that held, for VERSION's baseline line."""
+    protections; the same sections in the same order with the same flags (type and attributes);
+    the same functions by source and name, each with code in an executable section; each export
+    in the same section, with the same weak flag, and in code at the start of the function of the
+    same source and name. Which functions differ in their bytes (addresses masked), which sections
+    differ in their size, and which other sections in their bytes, is a report and not a check.
+    Returns the gate that held, for VERSION's baseline line."""
     seg = lambda m: [(s["name"], s["maxprot"], s["initprot"]) for s in m.segments]
-    sec = lambda m: [(s["name"], s["type"]) for s in m.sections]
+    sec = lambda m: [(s["name"], s["flags"]) for s in m.sections]
     r.check(seg(mine) == seg(theirs), f"the engine's {len(theirs.segments)} segments with their protections: "
                                       f"{', '.join(n for n, _, _ in seg(theirs))}",
             f"segments differ: mine {seg(mine)}, the engine's {seg(theirs)}")
-    r.check(sec(mine) == sec(theirs), f"the engine's {len(theirs.sections)} sections, in order and of the same types",
-            f"sections differ: mine {sec(mine)}, the engine's {sec(theirs)}")
+    r.check(sec(mine) == sec(theirs), f"the engine's {len(theirs.sections)} sections, in order and with the same flags",
+            f"sections differ: mine {[(n, hex(f)) for n, f in sec(mine)]}, the engine's {[(n, hex(f)) for n, f in sec(theirs)]}")
     fm, ft = mine.functions(), theirs.functions()
     missing, extra = set(ft) - set(fm), set(fm) - set(ft)
     name = lambda k: f"{k[0]}: {k[1][1:] if k[1].startswith('_') else k[1]}"
     r.check(not missing and not extra, f"the engine's {len(ft)} functions by source and name",
             f"functions differ: missing {listing(map(name, missing))}; extra {listing(map(name, extra))}")
+    code = [(s["addr"], s["addr"] + s["size"]) for s in mine.sections
+            if s["flags"] & (S_ATTR_PURE_INSTRUCTIONS | S_ATTR_SOME_INSTRUCTIONS)]
+    bad = [name(k) for k, (a, n) in fm.items() if n <= 0 or not any(lo <= a and a + n <= hi for lo, hi in code)]
+    r.check(not bad, "each function has code in an executable section",
+            f"functions without code in an executable section: {listing(bad)}")
+    em, et = export_shapes(mine, fm), export_shapes(theirs, ft)
+    moved = sorted(f"{n} {em.get(n, 'not exported')} / {et.get(n, 'not exported')}"
+                   for n in set(em) | set(et) if em.get(n) != et.get(n))
+    r.check(not moved, f"each of the {len(et)} exports in the engine's section, with its weak flag, and in code at "
+                       f"the start of the function of the same source and name",
+            f"exports other than the engine's (mine / the engine's): {listing(moved)}")
     differ = differing(mine, theirs, fm, ft)
     line = f"structural, {len(differ)} of {len(ft)} functions differ from the engine's file"
     print(f"- report: {len(differ)} of the {len(ft)} functions differ in their bytes with the addresses masked, "
           f"the other compiler's doing and not a check" + (f": {listing(differ)}" if differ else ""))
+    sizes = [f"{a['name']} {a['size']:#x} / {b['size']:#x}" for a, b in zip(mine.sections, theirs.sections)
+             if a["name"] == b["name"] and a["size"] != b["size"]]
+    print(f"- report: sections of another size (mine / the engine's): {listing(sizes) if sizes else 'none'}")
+    other = [a["name"] for a, b in zip(mine.sections, theirs.sections)
+             if a["name"] == b["name"] and not a["flags"] & (S_ATTR_PURE_INSTRUCTIONS | S_ATTR_SOME_INSTRUCTIONS)
+             and a["type"] not in S_ZEROFILL_TYPES and section_bytes(mine, a) != section_bytes(theirs, b)]
+    print(f"- report: other sections whose bytes differ: {listing(other) if other else 'none'}")
     for d in differ:  # all of them, in the job's log
         print(f"differs from the engine's: {d}", file=sys.stderr)
     return line
+
+
+def section_bytes(m, sec):
+    return bytes(m.data[sec["offset"]:sec["offset"] + sec["size"]])
+
+
+def export_shapes(m, funcs):
+    """each export (from the symbol table, as m.exports) -> its section, whether it is a weak
+    definition, and in code the source and name of the debug map's function that starts there"""
+    starts = {}
+    for key, (addr, _) in funcs.items():
+        starts.setdefault(addr, key)
+    out = {}
+    for n, t, sect, desc, value in m.syms:
+        if not t & (N_STAB | N_PEXT) and t & N_EXT and t & N_TYPE == N_SECT:
+            s = m.sections[sect - 1] if 0 < sect <= len(m.sections) else None
+            in_code = s and s["flags"] & (S_ATTR_PURE_INSTRUCTIONS | S_ATTR_SOME_INSTRUCTIONS)
+            out[n[1:]] = (s["name"] if s else f"section {sect}", bool(desc & N_WEAK_DEF),
+                          starts.get(value) if in_code else None)
+    return out
 
 
 def differing(mine, theirs, fm, ft):

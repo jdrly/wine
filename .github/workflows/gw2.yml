@@ -5,9 +5,9 @@
 # The toolchain and the gate (jdrly/gw2-on-mac#124). The build and test jobs run on $RUNNER with
 # Xcode $XCODE_VERSION. With the engine's own, $ENGINE_RUNNER and Xcode $ENGINE_XCODE_VERSION, my
 # build of the engine's commit is held to the strict gate, byte for byte; with any other it is held
-# to the structural gate: the engine's exports, imports, libraries, install name, rpaths, minos,
-# segments, sections and functions by name, with the functions whose bytes differ only a report
-# (.github/gw2/compare.py). Going back is one edit: RUNNER and XCODE_VERSION below to the engine's
+# to the structural gate: the engine's exports and where each points, imports, libraries, install
+# name, rpaths, minos, segments, sections and functions by name, with the functions and sections
+# whose bytes differ only a report (.github/gw2/compare.py). Going back is one edit: RUNNER and XCODE_VERSION below to the engine's
 # values. Until 2026-11-12 it ran on macos-26 with Xcode 26.6, and my build of the engine's commit
 # was the engine's ntdll.so and winemac.so byte for byte in the header, every section of every
 # loaded segment, the load commands and the link edit data (run 43109476509 of pull request #1 and
@@ -420,6 +420,21 @@ jobs:
     runs-on: *runner
     timeout-minutes: 30
     steps:
+      # the Xcode the build used, for the native test's clang
+      - name: Select Xcode
+        run: |
+          app=/Applications/Xcode_$XCODE_VERSION.app
+          [[ -d $app ]] || { echo "::error::Xcode $XCODE_VERSION isn't on this runner's image ($ImageOS $ImageVersion)"; exit 1; }
+          sudo xcode-select -s "$app"
+          {
+            echo "### Toolchain"
+            echo '```'
+            echo "$RUNNER, image $ImageOS $ImageVersion, macOS $(sw_vers -productVersion)"
+            xcodebuild -version | sed -n 1p
+            echo "macOS SDK $(xcrun -sdk macosx --show-sdk-version)"
+            clang --version | sed -n 1p
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
       # only the scripts and the test programs, not the whole Wine tree; the Mac driver's sources for
       # the header tests/gw2/native/frames.c builds
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
