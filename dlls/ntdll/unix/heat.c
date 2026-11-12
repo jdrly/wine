@@ -9,6 +9,8 @@
  *   WINE_HEAT_COUNT=1     per-thread counters (enum heat_counter), which a thread of their own
  *                         adds up and writes to $WINE_HEAT_LOG/heat-<pid>.log (default /tmp)
  *                         every 5 seconds and at exit. No clock is read while it is off.
+ *                         The game thread's server requests go to heat-requests-<pid>.log
+ *                         (jdrly/gw2-on-mac#60, "server requests" below).
  *   WINE_HEAT_WAKE=one    a semaphore release of count n makes at most n wake-one calls and
  *                         stops at the first that finds no waiter. msync wakes every waiter on
  *                         every release. Events and mutexes keep that.
@@ -63,6 +65,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <time.h>
 #include <unistd.h>
 #include <mach/mach_time.h>
 
@@ -73,6 +76,7 @@
 #include "unix_private.h"
 #include "heat.h"
 #include "heatprof.h"
+#include "heatreq.h"
 
 unsigned int heat_mode;
 
@@ -221,12 +225,195 @@ static void heat_dump(void)
     close( fd );
 }
 
+/***********************************************************************
+ *  server requests (WINE_HEAT_COUNT=1, jdrly/gw2-on-mac#60)
+ *
+ * Each thread's row has a second part, in a mapping of its own: its server requests by code with
+ * their time, and three splits read from the request and its reply. set_cursor by flag, and of
+ * the handle requests those whose reply names the same handle as the previous one; get_message by
+ * its internal flag, by whether the reply had a message, and by the message; set_queue_mask without
+ * and with poll_events. Every 5 s and at exit the dumper appends the game thread's part to
+ * $WINE_HEAT_LOG/heat-requests-<pid>.log, as the change since that thread's last block:
+ *
+ *   requests thread 01a4 from 115.0 to 120.0 time 1762912345
+ *   req set_cursor 1010 21.345                 count and ms of the twelve most frequent
+ *   set_cursor handle 1010 repeat 1000 count 0 pos 0 clip 0 noclip 0
+ *   get_message internal 3 other 150 none 2    none: the reply had no message
+ *   message 0x8001 100                         the ten most frequent messages of the replies
+ *   message unlisted 0                         those past the first HEAT_MSGS kinds the thread got
+ *   set_queue_mask poll 0 nopoll 100
+ *
+ * from and to are seconds since heat_init, time is the end in seconds since 1970. A thread's first
+ * block starts at 0. The game thread is the row with the most semaphore releases, the session
+ * report's rule. The hook runs on the row's own thread with the server's signals blocked, so only
+ * the dumper reads a row while it changes.
+ */
+#define HEAT_REQ_TOP 12
+#define HEAT_MSG_TOP 10
+#define HEAT_MSGS    32
+
+enum heat_split
+{
+    HS_CURSOR_HANDLE, HS_CURSOR_REPEAT, HS_CURSOR_COUNT, HS_CURSOR_POS, HS_CURSOR_CLIP, HS_CURSOR_NOCLIP,
+    HS_MSG_INTERNAL, HS_MSG_OTHER, HS_MSG_NONE, HS_MSG_UNLISTED,
+    HS_POLL, HS_NOPOLL,
+    HS_NB
+};
+
+struct heat_req_row
+{
+    unsigned long long n[REQ_NB_REQUESTS];  /* requests by code */
+    unsigned long long t[REQ_NB_REQUESTS];  /* their nanoseconds */
+    unsigned long long s[HS_NB];
+    unsigned int       msgs;                /* kinds of message in msg[] */
+    unsigned int       msg[HEAT_MSGS];
+    unsigned long long msg_n[HEAT_MSGS];
+    double             printed;             /* heat_reqs_prev only: the end of the thread's last block */
+};
+
+#define HEAT_REQ_NAME(name) [REQ_##name] = #name,
+#define HEAT_REQ_ONE(name) + 1
+static const char * const heat_req_names[REQ_NB_REQUESTS] = { HEAT_REQUESTS(HEAT_REQ_NAME) };
+C_ASSERT( 0 HEAT_REQUESTS(HEAT_REQ_ONE) == REQ_NB_REQUESTS );
+
+static struct heat_req_row *heat_reqs;       /* by row, as heat_rows */
+static struct heat_req_row *heat_reqs_prev;  /* the dumper's: each row at its last block */
+static char heat_req_path[1024];
+
+void heat_server_done( const union generic_request *sent, const union generic_reply *reply,
+                       unsigned int status, unsigned long long start )
+{
+    struct heat_row *row = heat_row();
+    unsigned long long d = heat_now() - start;
+    unsigned int code = sent->request_header.req, flags, msg, i;
+    struct heat_req_row *r;
+
+    if (!row) return;
+    heat_bump( &row->c[HC_SERVER], 1 );
+    heat_bump( &row->t[HT_SERVER], d );
+    if (code >= REQ_NB_REQUESTS) return;
+    r = &heat_reqs[row - heat_rows];
+    heat_bump( &r->n[code], 1 );
+    heat_bump( &r->t[code], d );
+
+    switch (code)
+    {
+    case REQ_set_cursor:
+        flags = sent->set_cursor_request.flags;
+        if (flags & SET_CURSOR_HANDLE)
+        {
+            heat_bump( &r->s[HS_CURSOR_HANDLE], 1 );
+            if (!status && reply->set_cursor_reply.prev_handle == sent->set_cursor_request.handle)
+                heat_bump( &r->s[HS_CURSOR_REPEAT], 1 );
+        }
+        if (flags & SET_CURSOR_COUNT) heat_bump( &r->s[HS_CURSOR_COUNT], 1 );
+        if (flags & SET_CURSOR_POS) heat_bump( &r->s[HS_CURSOR_POS], 1 );
+        if (flags & SET_CURSOR_CLIP) heat_bump( &r->s[HS_CURSOR_CLIP], 1 );
+        if (flags & SET_CURSOR_NOCLIP) heat_bump( &r->s[HS_CURSOR_NOCLIP], 1 );
+        break;
+    case REQ_get_message:
+        heat_bump( &r->s[sent->get_message_request.internal ? HS_MSG_INTERNAL : HS_MSG_OTHER], 1 );
+        if (status)
+        {
+            heat_bump( &r->s[HS_MSG_NONE], 1 );
+            break;
+        }
+        msg = reply->get_message_reply.msg;
+        for (i = 0; i < r->msgs && r->msg[i] != msg; i++) ;
+        if (i == r->msgs && i < HEAT_MSGS)
+        {
+            r->msg[i] = msg;
+            __atomic_store_n( &r->msgs, i + 1, __ATOMIC_RELEASE );  /* after the message */
+        }
+        heat_bump( i < HEAT_MSGS ? &r->msg_n[i] : &r->s[HS_MSG_UNLISTED], 1 );
+        break;
+    case REQ_set_queue_mask:
+        heat_bump( &r->s[sent->set_queue_mask_request.poll_events ? HS_POLL : HS_NOPOLL], 1 );
+        break;
+    }
+}
+
+/* <cur> - <prev> into <d>, and <cur> into <prev> */
+static void heat_req_delta( unsigned long long *d, unsigned long long *cur, unsigned long long *prev,
+                            unsigned int nb )
+{
+    unsigned int i;
+
+    for (i = 0; i < nb; i++)
+    {
+        unsigned long long v = __atomic_load_n( &cur[i], __ATOMIC_RELAXED );
+        d[i] = v - prev[i];
+        prev[i] = v;
+    }
+}
+
+/* the index of the largest of <v>, or <nb> if all are 0 */
+static unsigned int heat_req_top( const unsigned long long *v, unsigned int nb )
+{
+    unsigned int i, best = nb;
+
+    for (i = 0; i < nb; i++) if (v[i] && (best == nb || v[i] > v[best])) best = i;
+    return best;
+}
+
+/* under heat_dump_mutex */
+static void heat_req_dump(void)
+{
+    static char buf[8192];
+    unsigned long long n[REQ_NB_REQUESTS], t[REQ_NB_REQUESTS], s[HS_NB], m[HEAT_MSGS];
+    unsigned int i, k, game = 0, msgs, rows = __atomic_load_n( &heat_nrows, __ATOMIC_RELAXED );
+    double now = (heat_now() - heat_started) / 1e9;
+    struct heat_req_row *cur, *prev;
+    int len, fd;
+
+    if (rows > HEAT_ROWS) rows = HEAT_ROWS;
+    if (!rows) return;
+    for (i = 1; i < rows; i++)
+        if (__atomic_load_n( &heat_rows[i].c[HC_RELEASE], __ATOMIC_RELAXED ) >
+            __atomic_load_n( &heat_rows[game].c[HC_RELEASE], __ATOMIC_RELAXED ))
+            game = i;
+    cur = &heat_reqs[game];
+    prev = &heat_reqs_prev[game];
+    msgs = __atomic_load_n( &cur->msgs, __ATOMIC_ACQUIRE );
+    heat_req_delta( n, cur->n, prev->n, REQ_NB_REQUESTS );
+    heat_req_delta( t, cur->t, prev->t, REQ_NB_REQUESTS );
+    heat_req_delta( s, cur->s, prev->s, HS_NB );
+    heat_req_delta( m, cur->msg_n, prev->msg_n, msgs );
+
+    len = snprintf( buf, sizeof(buf), "requests thread %04x from %.1f to %.1f time %lld\n",
+                    __atomic_load_n( &heat_rows[game].tid, __ATOMIC_RELAXED ), prev->printed, now,
+                    (long long)time( NULL ) );
+    prev->printed = now;
+    for (i = 0; i < HEAT_REQ_TOP && (k = heat_req_top( n, REQ_NB_REQUESTS )) < REQ_NB_REQUESTS; i++)
+    {
+        len += snprintf( buf + len, sizeof(buf) - len, "req %s %llu %.3f\n", heat_req_names[k], n[k], t[k] / 1e6 );
+        n[k] = 0;
+    }
+    len += snprintf( buf + len, sizeof(buf) - len,
+                     "set_cursor handle %llu repeat %llu count %llu pos %llu clip %llu noclip %llu\n"
+                     "get_message internal %llu other %llu none %llu\n",
+                     s[HS_CURSOR_HANDLE], s[HS_CURSOR_REPEAT], s[HS_CURSOR_COUNT], s[HS_CURSOR_POS],
+                     s[HS_CURSOR_CLIP], s[HS_CURSOR_NOCLIP], s[HS_MSG_INTERNAL], s[HS_MSG_OTHER], s[HS_MSG_NONE] );
+    for (i = 0; i < HEAT_MSG_TOP && (k = heat_req_top( m, msgs )) < msgs; i++)
+    {
+        len += snprintf( buf + len, sizeof(buf) - len, "message %#x %llu\n", cur->msg[k], m[k] );
+        m[k] = 0;
+    }
+    len += snprintf( buf + len, sizeof(buf) - len, "message unlisted %llu\nset_queue_mask poll %llu nopoll %llu\n",
+                     s[HS_MSG_UNLISTED], s[HS_POLL], s[HS_NOPOLL] );
+
+    if ((fd = open( heat_req_path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644 )) == -1) return;
+    write( fd, buf, len );
+    close( fd );
+}
+
 static pthread_mutex_t heat_dump_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 static void heat_dump_locked(void)
 {
     pthread_mutex_lock( &heat_dump_mutex );
     heat_dump();
+    if (heat_mode & HEAT_COUNT) heat_req_dump();  /* jdrly/gw2-on-mac#60 */
     pthread_mutex_unlock( &heat_dump_mutex );
 }
 
@@ -902,6 +1089,14 @@ void heat_init(void)
     /* jdrly/gw2-on-mac#45 */
     if ((mode & HEAT_SPIN_EVENT) && !(heat_spinners = heat_map( HEAT_SLOTS * sizeof(*heat_spinners) )))
         mode &= ~HEAT_SPIN_EVENT;
+    /* jdrly/gw2-on-mac#60: the rows' requests, then the dumper's copy of them */
+    if ((mode & HEAT_COUNT) && !(heat_reqs = heat_map( 2 * HEAT_ROWS * sizeof(*heat_reqs) )))
+        mode &= ~HEAT_COUNT;
+    if (mode & HEAT_COUNT)
+    {
+        heat_reqs_prev = heat_reqs + HEAT_ROWS;
+        snprintf( heat_req_path, sizeof(heat_req_path), "%s/heat-requests-%d.log", dir && *dir ? dir : "/tmp", getpid() );
+    }
     if (mode & (HEAT_COUNT | HEAT_PROF))
     {
         mach_timebase_info( &heat_timebase );
