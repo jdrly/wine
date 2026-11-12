@@ -153,12 +153,13 @@ static void check_log(void)
     if (!blocks) FAIL( "no block of this thread: it isn't the game thread" );
     if (req_cursor != ROUNDS * (2 + A_RUN)) FAIL( "%lld set_cursor requests, not %d", req_cursor, ROUNDS * (2 + A_RUN) );
     if (cursor_ms <= 0) FAIL( "no time for set_cursor" );
-    if (handle != req_cursor || others) FAIL( "set_cursor: %lld handle requests, %lld with other flags", handle, others );
+    /* the splits count every request of a block, the req lines only a block's twelve most frequent */
+    if (handle != ROUNDS * (2 + A_RUN) || others) FAIL( "set_cursor: %lld handle requests, %lld with other flags", handle, others );
     if (repeat != ROUNDS * A_RUN) FAIL( "%lld repeats, not %d", repeat, ROUNDS * A_RUN );
     if (app1 != POSTS / 3 * 2 || app2 != POSTS / 3) FAIL( "messages 0x8001 %lld and 0x8002 %lld, not %d and %d",
                                                          app1, app2, POSTS / 3 * 2, POSTS / 3 );
     if (req_message < POSTS || other < POSTS) FAIL( "%lld get_message requests, %lld not internal", req_message, other );
-    if (req_mask < WAITS || poll + nopoll != req_mask) FAIL( "%lld set_queue_mask requests, poll %lld nopoll %lld",
+    if (req_mask < WAITS || poll + nopoll < req_mask) FAIL( "%lld set_queue_mask requests, poll %lld nopoll %lld",
                                                             req_mask, poll, nopoll );
 }
 
