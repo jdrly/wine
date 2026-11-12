@@ -19,6 +19,9 @@
 #    WINE_HEAT_SPIN unset and in three settings, three runs each, one setting at a time: the app's string
 #    (lock and event at :game), sem alone at its default scope with WINE_HEAT_WAKE=one,skip (the
 #    spin against the wake skip's sleeper count), and every kind on with a scope of its own.
+# 5. (jdrly/gw2-on-mac#43) prof.exe under mine as WINE_HEAT_EXE with WINE_HEAT_PROF=1 and
+#    FEX_PROFILESTATS=1, once, 8 seconds. Block 2 runs it for a second with the sampler unset and set
+#    for another program, where no file of the sampler's may appear either.
 # Prints each run's lines and exits 1 if any failed.
 emulate -L zsh
 setopt err_exit pipe_fail no_unset extended_glob
@@ -73,9 +76,9 @@ quiet() {
   shift 3
   [[ $wine == "$engine" ]] && programs=(${programs:#*/(${(~j:|:)engine_bugs}).exe})
   mkdir -p "$log"
-  env -u WINE_HEAT_COUNT -u WINE_HEAT_WAKE -u WINE_HEAT_EVPOOL -u WINE_HEAT_SPIN -u WINE_HEAT_EXE -u WINE_HEAT_LOG "$@" GW2_TEST_PRODUCER_SECONDS=20 GW2_TEST_SECONDS=300 \
+  env -u WINE_HEAT_COUNT -u WINE_HEAT_WAKE -u WINE_HEAT_EVPOOL -u WINE_HEAT_SPIN -u WINE_HEAT_PROF -u WINE_HEAT_EXE -u WINE_HEAT_LOG "$@" GW2_TEST_PRODUCER_SECONDS=20 GW2_TEST_SECONDS=300 \
     "$run" "$wine" "$work/prefix-$name" $programs
-  left=("$log"/*(N) /tmp/heat-*.log(N))
+  left=("$log"/*(N) /tmp/heat-*(N))
   if (( ${#left} )); then
     print "FAIL  a counters file was written: $left"
     return 1
@@ -108,7 +111,7 @@ collect
 side engine quiet engine "$engine" "$work/log-engine" WINE_HEAT_LOG=$work/log-engine
 side unset quiet unset "$mine" "$work/log-unset"
 side other quiet other "$mine" "$work/log-other" WINE_HEAT_EXE=other.exe WINE_HEAT_COUNT=1 \
-  WINE_HEAT_WAKE=one,skip WINE_HEAT_EVPOOL=1 WINE_HEAT_SPIN=lock=20,event=30,sem=5 WINE_HEAT_LOG=$work/log-other
+  WINE_HEAT_WAKE=one,skip WINE_HEAT_EVPOOL=1 WINE_HEAT_SPIN=lock=20,event=30,sem=5 WINE_HEAT_PROF=1 WINE_HEAT_LOG=$work/log-other
 collect
 
 # 3. jdrly/gw2-on-mac#44
@@ -168,6 +171,14 @@ collect
 side spin-sem spin sem "sem=5" one,skip
 collect
 side spin-scopes spin scopes "lock=20:all,event=30:not=2,sem=20:game"
+collect
+
+# 5. jdrly/gw2-on-mac#43
+
+mkdir -p "$work/log-prof"
+side prof env -u WINE_HEAT_COUNT -u WINE_HEAT_WAKE -u WINE_HEAT_EVPOOL -u WINE_HEAT_SPIN WINE_HEAT_EXE=prof.exe \
+  WINE_HEAT_PROF=1 FEX_PROFILESTATS=1 WINE_HEAT_LOG=$work/log-prof GW2_TEST_SECONDS=300 \
+  "$run" "$mine" "$work/prefix-prof" "$exes/prof.exe"
 collect
 
 (( failed == 0 ))
