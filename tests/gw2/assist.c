@@ -7,7 +7,8 @@
  * so and passes: the matrix runs every program, and nothing moves the pointer there.
  *
  * Prints "gw2 test assist: passed" and exits 0, or names what failed and exits 1, also when no
- * right click came within 30 seconds of "ready". */
+ * right click came within 120 seconds of "ready": the workflow waits up to 5 s for each of its 21
+ * moves. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <windows.h>
@@ -57,7 +58,7 @@ int main( void )
     if (!GetWindowRect( hwnd, &rect )) return fail( "GetWindowRect" );
     printf( "gw2 test assist: ready %ld %ld %ld %ld\n", on.x, on.y, rect.left - 100, on.y );
 
-    for (start = GetTickCount(); !clicked && GetTickCount() - start < 30000;)
+    for (start = GetTickCount(); !clicked && GetTickCount() - start < 120000;)
     {
         while (PeekMessageW( &msg, NULL, 0, 0, PM_REMOVE ))
         {
@@ -71,7 +72,7 @@ int main( void )
     printf( "gw2 test assist: %u WM_MOUSEMOVE\n", moves );
     if (!clicked)
     {
-        printf( "gw2 test assist: no right click within 30 s\n" );
+        printf( "gw2 test assist: no right click within 120 s\n" );
         return 1;
     }
     if (!DestroyWindow( hwnd )) return fail( "DestroyWindow" );

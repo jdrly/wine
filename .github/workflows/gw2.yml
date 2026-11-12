@@ -492,9 +492,11 @@ jobs:
           done
       # test 4 of jdrly/gw2-on-mac#88: assist.exe's window under the engine with my winemac.so and the
       # macsurface channel on. tests/gw2/native/pointer.c clicks it, then moves the pointer off and
-      # onto it ten times. In those trips the driver has to change the presentation options 20 times
-      # with WINE_MACDRV_ASSIST unset, and never in the whole run with leave. Only where the Mac
-      # driver starts, like test 12.
+      # onto it ten times. While the application is active the driver prints one line per call of
+      # updateCursorLocationAssistance, in both modes: where the pointer is, and what became of the
+      # options. Each move waits for its line, at most 5 s. The trips have to give 10 lines off and
+      # 10 on; with WINE_MACDRV_ASSIST unset, 20 changes of the options among them, and with leave
+      # none in the whole run. Only where the Mac driver starts, like test 12.
       - name: Cursor Location Assistance
         if: github.event_name == 'pull_request'
         run: |
@@ -505,12 +507,22 @@ jobs:
           fi
           clang -std=gnu23 -O2 -Wall -Werror -framework CoreGraphics -o "$RUNNER_TEMP/pointer" tests/gw2/native/pointer.c
           prefix=$RUNNER_TEMP/assist-prefix log=$RUNNER_TEMP/assist-prefix/assist.log
-          # the driver's line per change of the options
-          changes() { tr -d '\r' <"$log" | grep -c 'macsurface:.*presentation options' || true; }
+          on='pointer on a Wine window' off='pointer off a Wine window' change='a Wine window, options [0-9a-fx]* -> '
+          # count <pattern>: the driver's lines with it
+          count() { tr -d '\r' <"$log" | grep -c "macsurface:.*$1" || true; }
+          # await <pattern> <n>: until the log has <n> such lines, at most 5 s
+          await() {
+            local _
+            for _ in $(seq 50); do
+              if (( $(count "$1") >= $2 )); then return 0; fi
+              sleep 0.1
+            done
+            return 1
+          }
           for mode in unset leave; do
             if [[ $mode == unset ]]; then unset WINE_MACDRV_ASSIST; else export WINE_MACDRV_ASSIST=leave; fi
             rm -f "$log"
-            GW2_TEST_ASSIST=1 GW2_TEST_SECONDS=90 GW2_TEST_WINEDEBUG=-all,+macsurface \
+            GW2_TEST_ASSIST=1 GW2_TEST_SECONDS=180 GW2_TEST_WINEDEBUG=-all,+macsurface \
               tests/gw2/run.zsh "$RUNNER_TEMP/macdrv/wine" "$prefix" "$RUNNER_TEMP/tests/assist.exe" >"$RUNNER_TEMP/assist-$mode.txt" 2>&1 &
             run=$!
             # the prefix boot comes first
@@ -520,26 +532,36 @@ jobs:
               if [[ -n $ready ]] || ! kill -0 "$run" 2>/dev/null; then break; fi
               sleep 0.2
             done
-            status=0
-            if [[ -n $ready ]]; then
+            fail="" ons=0 offs=0 changes=0
+            if [[ -z $ready ]]; then
+              fail="assist.exe never said ready"
+            else
               read -r on_x on_y off_x off_y <<<"$ready"
-              "$RUNNER_TEMP/pointer" click "$on_x" "$on_y" || status=1
-              sleep 1
-              before=$(changes)
-              "$RUNNER_TEMP/pointer" trips 10 "$off_x" "$off_y" "$on_x" "$on_y" || status=1
-              sleep 0.5
-              after=$(changes)
-              "$RUNNER_TEMP/pointer" rclick "$on_x" "$on_y" || status=1
+              # the application active, with the pointer on the window
+              if ! { "$RUNNER_TEMP/pointer" click "$on_x" "$on_y" && await "$on" 1; }; then
+                fail="no line with the pointer on the window after the click"
+              fi
+              on0=$(count "$on") off0=$(count "$off") changes0=$(count "$change")
+              for i in $(seq 10); do
+                [[ -z $fail ]] || break
+                if ! { "$RUNNER_TEMP/pointer" move "$off_x" "$off_y" && await "$off" $((off0 + i)); }; then
+                  fail="trip $i: no line with the pointer off the window"
+                elif ! { "$RUNNER_TEMP/pointer" move "$on_x" "$on_y" && await "$on" $((on0 + i)); }; then
+                  fail="trip $i: no line with the pointer back on the window"
+                fi
+              done
+              ons=$(( $(count "$on") - on0 )) offs=$(( $(count "$off") - off0 )) changes=$(( $(count "$change") - changes0 ))
+              "$RUNNER_TEMP/pointer" rclick "$on_x" "$on_y" || fail=${fail:-"the right click failed"}
             fi
-            wait "$run" || status=1
+            wait "$run" || fail=${fail:-"assist.exe failed"}
             cat "$RUNNER_TEMP/assist-$mode.txt"
-            [[ -n $ready ]] || { echo "::error::WINE_MACDRV_ASSIST=$mode: assist.exe never said ready"; exit 1; }
-            total=$(changes)
-            line="WINE_MACDRV_ASSIST=$mode: $((after - before)) changes of the presentation options in the 10 trips, $total in the run"
-            echo "$line" | tee -a "$GITHUB_STEP_SUMMARY"
-            (( status == 0 )) || { echo "::error::WINE_MACDRV_ASSIST=$mode: assist.exe or the pointer failed"; exit 1; }
+            total=$(count "$change")
+            echo "WINE_MACDRV_ASSIST=$mode: in the 10 trips $offs lines off, $ons on, $changes changes of the options; $total changes in the run" |
+              tee -a "$GITHUB_STEP_SUMMARY"
+            [[ -z $fail ]] || { echo "::error::WINE_MACDRV_ASSIST=$mode: $fail"; exit 1; }
+            (( offs == 10 && ons == 10 )) || { echo "::error::WINE_MACDRV_ASSIST=$mode: expected 10 lines off and 10 on in the trips"; exit 1; }
             if [[ $mode == unset ]]; then
-              (( after - before == 20 )) || { echo "::error::WINE_MACDRV_ASSIST unset: expected 20 changes in the trips"; exit 1; }
+              (( changes == 20 )) || { echo "::error::WINE_MACDRV_ASSIST unset: expected 20 changes in the trips"; exit 1; }
             else
               (( total == 0 )) || { echo "::error::WINE_MACDRV_ASSIST=leave: expected no change in the run"; exit 1; }
             fi

@@ -2,12 +2,12 @@
  * for macOS and run without Wine. The events go into the HID stream (CGEventPost), so the window
  * server and AppKit see them as a hand's.
  *
- *   pointer click <x> <y>                     moves to the point, then a left click there
- *   pointer trips <n> <x1> <y1> <x2> <y2>     <n> times: to (x1,y1), then to (x2,y2)
- *   pointer rclick <x> <y>                    a right click at the point
+ *   pointer move <x> <y>      moves the pointer to the point
+ *   pointer click <x> <y>     moves to the point, then a left click there
+ *   pointer rclick <x> <y>    a right click at the point
  *
- * Each event is 100 ms after the one before, so AppKit handles every move on its own. Points are in
- * the global display space, the main display's top left at 0,0, which is Windows' screen space under
+ * The workflow waits for the driver's line after each move before the next. Points are in the
+ * global display space, the main display's top left at 0,0, which is Windows' screen space under
  * Wine's Mac driver without Retina mode.
  *
  * Exits 1 when this process may not post events, and 2 on bad arguments. */
@@ -23,51 +23,40 @@ static void post( CGEventType type, CGPoint point, CGMouseButton button )
 
     CGEventPost( kCGHIDEventTap, event );
     CFRelease( event );
-    usleep( 100000 );
 }
 
 static void click( CGPoint point, CGEventType down, CGEventType up, CGMouseButton button )
 {
     post( down, point, button );
+    usleep( 100000 );
     post( up, point, button );
 }
 
 int main( int argc, char **argv )
 {
-    CGPoint a, b;
-    int i, n;
+    CGPoint point;
 
+    if (argc != 4 || (strcmp( argv[1], "move" ) && strcmp( argv[1], "click" ) && strcmp( argv[1], "rclick" )))
+    {
+        fprintf( stderr, "usage: pointer move|click|rclick <x> <y>\n" );
+        return 2;
+    }
     if (!CGPreflightPostEventAccess())
     {
         printf( "pointer: this process may not post events (CGPreflightPostEventAccess)\n" );
         return 1;
     }
-    if (argc == 4 && !strcmp( argv[1], "click" ))
-    {
-        a = CGPointMake( atof( argv[2] ), atof( argv[3] ) );
-        post( kCGEventMouseMoved, a, kCGMouseButtonLeft );
-        click( a, kCGEventLeftMouseDown, kCGEventLeftMouseUp, kCGMouseButtonLeft );
-    }
-    else if (argc == 7 && !strcmp( argv[1], "trips" ))
-    {
-        n = atoi( argv[2] );
-        a = CGPointMake( atof( argv[3] ), atof( argv[4] ) );
-        b = CGPointMake( atof( argv[5] ), atof( argv[6] ) );
-        for (i = 0; i < n; i++)
-        {
-            post( kCGEventMouseMoved, a, kCGMouseButtonLeft );
-            post( kCGEventMouseMoved, b, kCGMouseButtonLeft );
-        }
-    }
-    else if (argc == 4 && !strcmp( argv[1], "rclick" ))
-    {
-        a = CGPointMake( atof( argv[2] ), atof( argv[3] ) );
-        click( a, kCGEventRightMouseDown, kCGEventRightMouseUp, kCGMouseButtonRight );
-    }
+    point = CGPointMake( atof( argv[2] ), atof( argv[3] ) );
+    if (!strcmp( argv[1], "rclick" ))
+        click( point, kCGEventRightMouseDown, kCGEventRightMouseUp, kCGMouseButtonRight );
     else
     {
-        fprintf( stderr, "usage: pointer click <x> <y> | trips <n> <x1> <y1> <x2> <y2> | rclick <x> <y>\n" );
-        return 2;
+        post( kCGEventMouseMoved, point, kCGMouseButtonLeft );
+        if (!strcmp( argv[1], "click" ))
+        {
+            usleep( 100000 );
+            click( point, kCGEventLeftMouseDown, kCGEventLeftMouseUp, kCGMouseButtonLeft );
+        }
     }
     return 0;
 }

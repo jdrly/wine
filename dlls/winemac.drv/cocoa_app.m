@@ -1107,13 +1107,20 @@ static NSString* WineLocalizedString(unsigned int stringID)
        window, whatever the cursor.  The options are left alone while inactive
        (see updateFullscreenPresentation:) and in native full screen, where
        window:willUseFullScreenPresentationOptions: sets the bit.
-       GW2 on Mac: WINE_MACDRV_ASSIST=leave never sets it. */
+       GW2 on Mac: WINE_MACDRV_ASSIST=leave never sets it.  While active, each
+       call prints one macsurface line, in both modes, which test 4 of
+       jdrly/gw2-on-mac#88 counts. */
     - (void) updateCursorLocationAssistance
     {
         NSApplicationPresentationOptions current, options;
+        const char *where = lastTargetWindow ? "on" : "off";
 
-        if (cursor_assist_leave) return;
         if (![NSApp isActive]) return;
+        if (cursor_assist_leave)
+        {
+            TRACE_(macsurface)("pointer %s a Wine window, options left alone\n", where);
+            return;
+        }
 
         current = [NSApp presentationOptions];
         if (current & NSApplicationPresentationFullScreen) return;
@@ -1125,9 +1132,12 @@ static NSString* WineLocalizedString(unsigned int stringID)
 
         if (options != current)
         {
-            TRACE_(macsurface)("presentation options %#lx -> %#lx\n", (unsigned long)current, (unsigned long)options);
+            TRACE_(macsurface)("pointer %s a Wine window, options %#lx -> %#lx\n", where,
+                               (unsigned long)current, (unsigned long)options);
             [NSApp setPresentationOptions:options];
         }
+        else
+            TRACE_(macsurface)("pointer %s a Wine window, options %#lx unchanged\n", where, (unsigned long)current);
     }
 
     /* +[NSCursor currentCursor] is AppKit's record of the last cursor this
