@@ -348,7 +348,7 @@ static void heat_prof_retarget(void)
         seen[HEAT_PROF_THREADS];
     unsigned long long best_d[HEAT_PROF_TARGETS] = { 0 };
     int best[HEAT_PROF_TARGETS] = { -1, -1, -1 };
-    unsigned int n = 0, i, k;
+    unsigned int n = 0, i, j, k;
 
     pthread_mutex_lock( &heat_prof_lock );
     for (i = 0; i < HEAT_PROF_THREADS; i++)
@@ -421,6 +421,10 @@ static void heat_prof_retarget(void)
         if (!(heat_prof_want & (1 << k)) || best[k] == -1) continue;
         t->cpu_ms = best_d[k] / 1000000;
         if (t->entry == seen[best[k]].entry) continue;
+        /* a thread is one target's at a time, so two targets never swap threads: each keeps its
+         * own until it ends or a third thread leads */
+        for (j = 0; j < HEAT_PROF_TARGETS; j++) if (heat_prof_targets[j].entry == seen[best[k]].entry) break;
+        if (j < HEAT_PROF_TARGETS) continue;
         /* with busy, no handler writes the ring or the counts: a handler running now keeps the
          * old target until the next second */
         if (__atomic_exchange_n( &t->busy, 1, __ATOMIC_ACQUIRE )) continue;
