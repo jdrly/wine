@@ -2,7 +2,7 @@
 # gw2 (jdrly/gw2-on-mac#40, #57): compare my ntdll.so or winemac.so with the one in Mach9's
 # engine. It reads files and runs nothing.
 #
-#   compare.py baseline <library> <mine> <engine-unix-dir>
+#   compare.py baseline <library> <mine> <engine-unix-dir> [strict | structural]
 #   compare.py patched <library> <mine> <engine-unix-dir> <source dir> <build dir> <base file>
 #                      <base objects> <base make log> <make log> <base Makefile> <Makefile>
 #                      <checkout time> [<changed file>...]
@@ -15,12 +15,23 @@
 # compatdb.so looks up and every symbol the engine's win32u.so, winemac.so and winemetal.so import
 # from it.
 #
-# baseline: my build of the engine's commit. Its exports and imports are the engine's, and every
-#   section of every loaded segment, every load command and the link edit data are the engine's
-#   byte for byte (byte_gate: what it leaves out, and why, is in its report line). Where they
+# baseline (strict, the default): my build of the engine's commit. Its exports and imports are the
+#   engine's, and every section of every loaded segment, every load command and the link edit data
+#   are the engine's byte for byte (byte_gate: what it leaves out, and why, is in its report line). Where they
 #   aren't, the functions are compared with the addresses masked to list what differs. That
 #   listing (diagnose, masked) is not the gate: it never passes or fails a build. A function is
 #   named by its source file, an Objective-C method or block like any other.
+# baseline structural: my build of the engine's commit with another toolchain than the engine's
+#   (jdrly/gw2-on-mac#124). Its exports, imports, libraries, install name, rpaths and minos are the
+#   engine's, as with the strict gate. So are its segments, in order with their protections, and
+#   each segment's sections with their flags, in any order there: Xcode 27's linker puts
+#   __DATA_CONST,__const before __got. So are its functions by source and name, each with code in
+#   an executable section, and each export's section, weak flag, and function or data contents
+#   (structural_gate). Which functions differ in their bytes (addresses masked), which sections in
+#   their order, their size or, outside code, their bytes, is a report: that is the other compiler,
+#   and it never fails a build. With either gate a baseline that passes ends with the line
+#   "baseline: <library> <the gate that held>", which the workflow copies into VERSION, in the form
+#   my FEX fork's record has. A file that fails its gate gets no such line.
 # patched: my build of a later commit, made in the same tree after the baseline with every object
 #   compiled again. Its exports are the engine's (ntdll.so's may be more). Its objects are compared with the
 #   base build's (compare_objects): first that both sets are what their files linked (the link
@@ -32,13 +43,16 @@
 #   bytes and relocations, with the changed inputs that touched each object. A header every file
 #   includes touches every object: all of them are listed, none is hidden. Naming why each listed
 #   function changed stays the pull request's job.
-#   With the baseline that makes the chain: the engine's file = my base build, byte for byte, and
-#   my base build's objects = this build's, except the touched ones.
+#   With the baseline that makes the chain: the engine's file = my base build, byte for byte (or in
+#   its structure, with another toolchain), and my base build's objects = this build's, except the
+#   touched ones.
 import bisect
 import contextlib
 import functools
 import hashlib
+import io
 import os
+import re
 import struct
 import sys
 import tempfile
@@ -68,7 +82,9 @@ LC_REEXPORT_DYLIB, LC_LAZY_LOAD_DYLIB, LC_LOAD_UPWARD_DYLIB = 0x1f | LC_REQ_DYLD
 LC_RPATH, LC_BUILD_VERSION = 0x1c | LC_REQ_DYLD, 0x32
 DYLIB_CMDS = {LC_LOAD_DYLIB: "", LC_LOAD_WEAK_DYLIB: " (weak)", LC_REEXPORT_DYLIB: " (reexport)",
               LC_LAZY_LOAD_DYLIB: " (lazy)", LC_LOAD_UPWARD_DYLIB: " (upward)"}
-N_STAB, N_TYPE, N_EXT, N_UNDF, N_SECT = 0xe0, 0x0e, 0x01, 0x0, 0xe
+N_STAB, N_PEXT, N_TYPE, N_EXT, N_UNDF, N_SECT = 0xe0, 0x10, 0x0e, 0x01, 0x0, 0xe
+N_WEAK_DEF = 0x0080
+S_ATTR_PURE_INSTRUCTIONS, S_ATTR_SOME_INSTRUCTIONS = 0x80000000, 0x00000400
 N_FUN, N_STSYM, N_SO, N_OSO = 0x24, 0x26, 0x64, 0x66
 S_NON_LAZY_SYMBOL_POINTERS, S_LAZY_SYMBOL_POINTERS, S_SYMBOL_STUBS = 0x6, 0x7, 0x8
 INDIRECT_SYMBOL_LOCAL, INDIRECT_SYMBOL_ABS = 0x80000000, 0x40000000
@@ -143,7 +159,7 @@ class MachO:
 
         # what this file defines and exports, and what it imports from which library
         self.exports = sorted(n[1:] for n, t, _, _, _ in self.syms
-                              if not t & N_STAB and t & N_EXT and t & N_TYPE == N_SECT)
+                              if not t & (N_STAB | N_PEXT) and t & N_EXT and t & N_TYPE == N_SECT)
         self.imports = {}
         for n, t, _, desc, _ in self.syms:
             if not t & N_STAB and t & N_EXT and t & N_TYPE == N_UNDF:
@@ -154,6 +170,60 @@ class MachO:
 
     def section(self, name):
         return next((s for s in self.sections if s["name"] == name), None)
+
+    @functools.cached_property
+    def fixups(self):
+        """address -> what dyld writes there, from LC_DYLD_CHAINED_FIXUPS: ("rebase", target, high8)
+        or ("bind", imported name, addend). Only the 64-bit pointer formats a dylib for arm64 has
+        (DYLD_CHAINED_PTR_64 and _64_OFFSET, whose target is the address in an image based at 0),
+        with any of the three import formats (dyld's mach-o/fixup-chains.h)."""
+        out, d = {}, self.data
+        cmd = next(((off, size) for c, off, size in self.commands if c == 0x80000034), None)
+        if not cmd:
+            return out
+        base = struct.unpack_from("<I", d, cmd[0] + 8)[0]
+        _, starts, imports, symbols, nimports, imports_format, _ = struct.unpack_from("<7I", d, base)
+        names = []  # each import's name and addend
+        for i in range(nimports):
+            if imports_format == 1:  # DYLD_CHAINED_IMPORT
+                name_off, addend = struct.unpack_from("<I", d, base + imports + 4 * i)[0] >> 9, 0
+            elif imports_format == 2:  # DYLD_CHAINED_IMPORT_ADDEND
+                word, addend = struct.unpack_from("<Ii", d, base + imports + 8 * i)
+                name_off = word >> 9
+            elif imports_format == 3:  # DYLD_CHAINED_IMPORT_ADDEND64
+                word, addend = struct.unpack_from("<QQ", d, base + imports + 16 * i)
+                name_off = word >> 32
+            else:
+                raise SystemExit(f"{self.path}: chained import format {imports_format}, which compare.py doesn't read")
+            names.append((cstr(d, base + symbols + name_off), addend))
+        nsegs = struct.unpack_from("<I", d, base + starts)[0]
+        for k in range(nsegs):
+            info = struct.unpack_from("<I", d, base + starts + 4 + 4 * k)[0]
+            if not info:
+                continue
+            at = base + starts + info
+            _, page_size, fmt, seg_off, _, npages = struct.unpack_from("<IHHQIH", d, at)
+            if fmt not in (2, 6):
+                raise SystemExit(f"{self.path}: chained pointer format {fmt}, which compare.py doesn't read")
+            seg = next(sg for sg in self.segments if sg["vmaddr"] <= seg_off < sg["vmaddr"] + max(sg["vmsize"], 1))
+            for page in range(npages):
+                start = struct.unpack_from("<H", d, at + 22 + 2 * page)[0]
+                if start == 0xffff:  # DYLD_CHAINED_PTR_START_NONE
+                    continue
+                addr = seg_off + page * page_size + start
+                while True:
+                    v = struct.unpack_from("<Q", d, seg["fileoff"] + addr - seg["vmaddr"])[0]
+                    if v >> 63:
+                        ordinal = v & 0xffffff
+                        name, addend = names[ordinal] if ordinal < len(names) else (f"import {ordinal}", 0)
+                        out[addr] = ("bind", name, addend + ((v >> 24) & 0xff))
+                    else:
+                        out[addr] = ("rebase", v & ((1 << 36) - 1), (v >> 36) & 0xff)
+                    step = (v >> 51) & 0xfff
+                    if not step:
+                        break
+                    addr += 4 * step
+        return out
 
     def bytes_of(self, addr, size):
         for s in self.sections:
@@ -219,6 +289,15 @@ class MachO:
         lo, hi = s["addr"], s["addr"] + s["size"]
         return sorted({hi} | {v for n, t, _, _, v in self.syms
                               if not t & N_STAB and t & N_TYPE == N_SECT and lo <= v < hi})
+
+    def const_symbols_in(self, s):
+        """where the pieces of section s start, by its symbols, and its end"""
+        cache = self.__dict__.setdefault("_symbols_in", {})
+        if s["name"] not in cache:
+            lo, hi = s["addr"], s["addr"] + s["size"]
+            cache[s["name"]] = sorted({hi} | {v for n, t, _, _, v in self.syms
+                                               if not t & N_STAB and t & N_TYPE == N_SECT and lo <= v < hi})
+        return cache[s["name"]]
 
     def const_extent_end(self, addr):
         """the farthest the constant at addr can reach: the next symbol, or the section's end. An
@@ -1208,12 +1287,148 @@ def selftest(engine_dir):
         if not link_proof(both, [(real, when)], {real: obj, other: obj}, "/build"):
             failed.append("link proof: an object with code the debug map leaves out")
 
+    # the structural gate (jdrly/gw2-on-mac#124), on the engine's ntdll.so against itself: a missing
+    # export, a changed import, another minos, another section type or attribute, a missing function,
+    # a function without code, and an export moved, in another section or private each fail; other
+    # bytes in a function or in data alone don't, and are in the report, and the byte gate still
+    # fails on those
+    def structural(change, lib="ntdll.so"):
+        mine, ref = MachO(os.path.join(engine_dir, lib)), theirs if lib == "ntdll.so" else MachO(os.path.join(engine_dir, lib))
+        change(mine)
+        r, out = Report(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            shape(r, "structural", lib, mine, ref, engine_dir)
+            line = structural_gate(mine, ref, r)
+            strict = byte_gate(mine, ref, Report())
+        return r.failed, line, strict, out.getvalue()
+
+    def swap_sections(m):  # the first two sections of __DATA_CONST in the other order, as Xcode 27 puts them
+        i = next(i for i, sec in enumerate(m.sections) if sec["name"].startswith("__DATA_CONST,"))
+        m.sections = m.sections[:i] + [m.sections[i + 1], m.sections[i]] + m.sections[i + 2:]
+
+    def table_moved(m):  # winemac.so's export macdrv_functions, DXMT's table, 8 bytes on in its section
+        i = export_index(m, "macdrv_functions")
+        sym_set(m, i, v=m.syms[i][4] + 8)
+
+    def table_high8(m):  # bit 36 of the table's first pointer, its rebase's high8, set
+        i = export_index(m, "macdrv_functions")
+        a = m.syms[i][4]
+        sec = next(sec for sec in m.sections if sec["addr"] <= a < sec["addr"] + sec["size"])
+        data = bytearray(m.data)
+        data[sec["offset"] + a - sec["addr"] + 4] ^= 0x10
+        m.data = bytes(data)
+
+    def export_index(m, name):  # the symbol table entry of an export
+        return next(i for i, (n, t, _, _, _) in enumerate(m.syms)
+                    if n == "_" + name and not t & N_STAB and t & N_EXT and t & N_TYPE == N_SECT)
+
+    def sym_set(m, i, **kw):  # one symbol table entry changed: name, type, sect, desc or value
+        n, t, sect, desc, v = m.syms[i]
+        new = dict(dict(n=n, t=t, sect=sect, desc=desc, v=v), **kw)
+        m.syms = m.syms[:i] + [(new["n"], new["t"], new["sect"], new["desc"], new["v"])] + m.syms[i + 1:]
+
+    def no_code(m):  # the debug map's first function with no bytes: its end N_FUN says 0
+        i = next(i for i, (n, t, _, _, _) in enumerate(m.syms) if t == N_FUN and n)
+        sym_set(m, i + 1, v=0)
+
+    def redirect(m):  # an export in code at the start of another function than the engine's
+        funcs = m.functions()
+        i = export_index(m, code_export)
+        other = next(a for k, (a, _) in funcs.items() if a != m.syms[i][4])
+        sym_set(m, i, v=other)
+
+    def to_data(m):  # an export in another section
+        sym_set(m, export_index(m, code_export), sect=1 + next(j for j, sec in enumerate(m.sections)
+                                                                if sec["name"].startswith("__DATA")))
+
+    def private(m):  # an export made private extern
+        i = export_index(m, code_export)
+        sym_set(m, i, t=m.syms[i][1] | N_PEXT)
+
+    def data_bytes(m):
+        sec = next(sec for sec in m.sections if sec["name"] == "__DATA,__data")
+        data = bytearray(m.data)
+        data[sec["offset"]] ^= 0x01
+        m.data = bytes(data)
+
+    def no_function(m):  # the debug map's first function gone: its two N_FUN entries made N_BNSYM
+        i = next(i for i, (n, t, _, _, _) in enumerate(m.syms) if t == N_FUN and n)
+        m.syms = m.syms[:i] + [("", 0x2e, 0, 0, v) for _, _, _, _, v in m.syms[i:i + 2]] + m.syms[i + 2:]
+
+    def other_bytes(m):
+        text = m.section("__TEXT,__text")
+        data = bytearray(m.data)
+        data[text["offset"] + 4] ^= 0x01  # the second instruction of the file's first function
+        m.data = bytes(data)
+
+    theirs = MachO(os.path.join(engine_dir, "ntdll.so"))
+    starts = {a for a, _ in theirs.functions().values()}
+    code_export = next(n[1:] for n, t, sect, _, v in theirs.syms
+                       if not t & (N_STAB | N_PEXT) and t & N_EXT and t & N_TYPE == N_SECT and v in starts
+                       and theirs.sections[sect - 1]["name"] == "__TEXT,__text")
+    failures, line, strict, _ = structural(lambda m: None)
+    if failures or not line.startswith("structural, 0 of ") or not strict:
+        failed.append(f"structural gate: the engine's file against itself, {failures} failed, {line}")
+    # an export no other module of the engine imports and compatdb.so doesn't look up, so only the
+    # exports check can see it go
+    needed = set(COMPATDB) | {n for dep in LIBRARIES["ntdll.so"]["dependents"]
+                              for n, where in MachO(os.path.join(engine_dir, dep)).imports.items()
+                              if where == "@rpath/ntdll.so"}
+    unneeded = next(n for n in theirs.exports if n not in needed)
+    for what, change in (("a missing export", lambda m: setattr(m, "exports", [n for n in m.exports if n != unneeded])),
+                         ("a changed import", lambda m: setattr(m, "imports", dict(
+                             m.imports, **{next(iter(m.imports)): "/usr/lib/libother.dylib"}))),
+                         ("another minos", lambda m: setattr(m, "minos", "27.0")),
+                         ("another section type", lambda m: m.sections[1].update(flags=m.sections[1]["flags"] ^ 1)),
+                         ("a section attribute gone", lambda m: m.sections[0].update(
+                             flags=m.sections[0]["flags"] & ~S_ATTR_PURE_INSTRUCTIONS)),
+                         ("a missing function", no_function),
+                         ("a function without code", no_code),
+                         ("an export at another function", redirect),
+                         ("an export in another section", to_data),
+                         ("an export made private", private)):
+        if not structural(change)[0]:
+            failed.append(f"structural gate: {what} passed")
+    failures, line, strict, _ = structural(other_bytes)
+    if failures or not line.startswith("structural, 1 of "):
+        failed.append(f"structural gate: other bytes in one function, {failures} failed, {line}")
+    if strict:
+        failed.append("byte gate: other bytes in one function passed")
+    failures, line, strict, out = structural(swap_sections)
+    if failures or "sections in another order inside their segment: __DATA_CONST" not in out:
+        failed.append(f"structural gate: two sections of a segment in another order, {failures} failed, not in the report")
+    def renumbered(m):  # clang's numbers of winemac.so's block helpers one lower, as Xcode 27's clang has them
+        for old, new in (("___Block_byref_object_copy_.468", "___Block_byref_object_copy_.467"),
+                         ("___Block_byref_object_dispose_.469", "___Block_byref_object_dispose_.468")):
+            i = next(i for i, (n, t, _, _, _) in enumerate(m.syms) if n == old and t == N_FUN)
+            sym_set(m, i, n=new)
+    failures, line, _, out = structural(renumbered, "winemac.so")
+    if failures:
+        failed.append(f"structural gate: winemac.so's block helpers numbered one lower, {failures} failed")
+    if not structural(lambda m: sym_set(m, next(i for i, (n, t, _, _, _) in enumerate(m.syms)
+                                                if n == "___Block_byref_object_copy_.468" and t == N_FUN),
+                                        n="___Block_byref_object_copy"), "winemac.so")[0]:
+        failed.append("structural gate: a block helper renamed beyond its number passed")
+    if not structural(lambda m: sym_set(m, next(i for i, (n, t, _, _, _) in enumerate(m.syms)
+                                                if n == "_macdrv_copy_pasteboard_types" and t == N_FUN),
+                                        n="_macdrv_copy_pasteboard_types.123"), "winemac.so")[0]:
+        failed.append("structural gate: a function of the source given a number passed")
+    if not structural(table_moved, "winemac.so")[0]:
+        failed.append("structural gate: winemac.so's data export macdrv_functions 8 bytes on passed")
+    if not structural(table_high8, "winemac.so")[0]:
+        failed.append("structural gate: another high8 in a pointer of macdrv_functions passed")
+    failures, line, strict, out = structural(data_bytes)
+    if failures or "other sections whose bytes differ: `__DATA,__data`" not in out:
+        failed.append(f"structural gate: other bytes in __DATA,__data, {failures} failed, not in the report")
+    if strict:
+        failed.append("byte gate: other bytes in __DATA,__data passed")
+
     for item in fixtures():
         failed.append(f"masking fixture: {item}")
     for item in failed:
         print(f"- **FAIL**: {item}")
     print(f"selftest: {len(failed)} failed" if failed else
-          "selftest: the byte gate and the object compare see every change they must, and the masking fixtures hold")
+          "selftest: the byte gate, the structural gate and the object compare see every change they must, and the masking fixtures hold")
     return 1 if failed else 0
 
 
@@ -1221,9 +1436,9 @@ def main():
     args = sys.argv[1:]
     if len(args) == 2 and args[0] == "selftest":
         return selftest(args[1])
-    if not ((len(args) == 4 and args[0] == "baseline") or (len(args) >= 13 and args[0] == "patched")) \
-            or args[1] not in LIBRARIES:
-        print("usage: compare.py baseline <library> <mine> <engine-unix-dir>\n"
+    if not ((args[:1] == ["baseline"] and (len(args) == 4 or (len(args) == 5 and args[4] in ("strict", "structural"))))
+            or (len(args) >= 13 and args[0] == "patched")) or args[1] not in LIBRARIES:
+        print("usage: compare.py baseline <library> <mine> <engine-unix-dir> [strict | structural]\n"
               "       compare.py patched <library> <mine> <engine-unix-dir> <source dir> <build dir> <base file> "
               "<base objects> <base make log> <make log> <base Makefile> <Makefile> <checkout time> "
               "[<changed file>...]\n"
@@ -1231,17 +1446,49 @@ def main():
               f"<library> is one of {', '.join(LIBRARIES)}", file=sys.stderr)
         return 2
     mode, lib, mine_path, engine_dir = args[:4]
+    gate = args[4] if mode == "baseline" and len(args) == 5 else "strict"
     if mode == "patched":
         src_dir, build_dir, base_file, base_objs, base_log, head_log, base_mk, head_mk, since = args[4:13]
         since, touched = float(since), args[13:]
     mine, theirs = MachO(mine_path), MachO(os.path.join(engine_dir, lib))
-    spec = LIBRARIES[lib]
     r = Report()
 
-    print(f"### {lib} compare ({mode})\n")
+    print(f"### {lib} compare ({mode}{', ' + gate + ' gate' if mode == 'baseline' else ''})\n")
     print(f"- mine: {os.path.getsize(mine_path)} bytes, sha256 `{sha256(mine_path)}`")
     print(f"- the engine's: {os.path.getsize(theirs.path)} bytes, sha256 `{sha256(theirs.path)}`")
 
+    shape(r, mode, lib, mine, theirs, engine_dir)
+    if mode == "baseline" and gate == "strict":
+        held = "byte for byte"
+        if not byte_gate(mine, theirs, r):
+            diagnose(mine, theirs)
+    elif mode == "baseline":
+        held = structural_gate(mine, theirs, r)
+    else:
+        changed, new, removed, through = compare_objects(r, lib, src_dir, build_dir, base_file, base_objs, mine_path,
+                                                         base_log, head_log, base_mk, head_mk, since, touched)
+        print("\n#### Changed by this branch\n")
+        print("Objects compared function by function, and the changed inputs that made them so:\n")
+        for f, via in sorted(through.items()):
+            print(f"- `{f}`: through {', '.join(f'`{v}`' for v in via)}")
+        print()
+        for title, items in (("changed", changed), ("new", new), ("removed", removed)):
+            print(f"- {title}: {len(items)}")
+            for item in items:
+                print(f"  - `{item}`")
+
+    if mode == "baseline" and not r.failed:
+        print(f"\nbaseline: {lib} {held}")
+    print("\n" + ("all checks passed" if not r.failed else f"{r.failed} checks failed"))
+    return 1 if r.failed else 0
+
+
+def shape(r, mode, lib, mine, theirs, engine_dir):
+    """the linked file's shape against the engine's: what it is, its install name, rpaths,
+    libraries and minos, pipe2, its exports, the names other modules need from it, and its imports.
+    A baseline mode wants the engine's exports and imports exactly; patched lets ntdll.so export more
+    and lets imports differ, as long as nothing new comes from an @rpath library."""
+    spec = LIBRARIES[lib]
     r.check(mine.filetype == theirs.filetype == 6, "a dylib, as the engine's", "not a dylib like the engine's")
     r.check(mine.install_name == theirs.install_name, f"install name `{mine.install_name}`",
             f"install name `{mine.install_name}`, the engine's is `{theirs.install_name}`")
@@ -1255,7 +1502,7 @@ def main():
 
     mine_exp, theirs_exp = set(mine.exports), set(theirs.exports)
     missing, extra = theirs_exp - mine_exp, mine_exp - theirs_exp
-    if mode == "baseline" or not spec["more_exports"]:
+    if mode != "patched" or not spec["more_exports"]:
         r.check(not missing and not extra, f"exports the engine's {len(theirs_exp)} symbols, no more: {listing(theirs_exp, 3)}",
                 f"exports differ: missing {listing(missing)}; extra {listing(extra)}")
     else:
@@ -1282,26 +1529,134 @@ def main():
         diff = {f"{n} ({mine.imports.get(n)} / {theirs.imports.get(n)})"
                 for n in set(mine.imports) | set(theirs.imports) if mine.imports.get(n) != theirs.imports.get(n)}
         text = f"imports differ (mine / the engine's): {listing(diff)}"
-        r.fail(text) if mode == "baseline" else r.ok(text)
+        r.fail(text) if mode != "patched" else r.ok(text)
 
-    if mode == "baseline":
-        if not byte_gate(mine, theirs, r):
-            diagnose(mine, theirs)
-    else:
-        changed, new, removed, through = compare_objects(r, lib, src_dir, build_dir, base_file, base_objs, mine_path,
-                                                         base_log, head_log, base_mk, head_mk, since, touched)
-        print("\n#### Changed by this branch\n")
-        print("Objects compared function by function, and the changed inputs that made them so:\n")
-        for f, via in sorted(through.items()):
-            print(f"- `{f}`: through {', '.join(f'`{v}`' for v in via)}")
-        print()
-        for title, items in (("changed", changed), ("new", new), ("removed", removed)):
-            print(f"- {title}: {len(items)}")
-            for item in items:
-                print(f"  - `{item}`")
 
-    print("\n" + ("all checks passed" if not r.failed else f"{r.failed} checks failed"))
-    return 1 if r.failed else 0
+
+def structural_gate(mine, theirs, r):
+    """my build with another toolchain against the engine's file: the same segments in the same
+    order with the same protections; in each, the same sections with the same flags (type and
+    attributes), in any order, since Xcode 27's linker puts __DATA_CONST,__const before __got;
+    the same functions by source and name, each with code in an executable section; each export
+    in the same section, with the same weak flag, and in code at the start of the function of the
+    same source and name. Which functions differ in their bytes (addresses masked), which sections
+    differ in their size, and which other sections in their bytes, is a report and not a check.
+    Returns the gate that held, for VERSION's baseline line."""
+    seg = lambda m: [(s["name"], s["maxprot"], s["initprot"]) for s in m.segments]
+    sec = lambda m, g: [(s["name"], hex(s["flags"])) for s in m.sections if s["name"].split(",")[0] == g]
+    r.check(seg(mine) == seg(theirs), f"the engine's {len(theirs.segments)} segments in order with their protections: "
+                                      f"{', '.join(n for n, _, _ in seg(theirs))}",
+            f"segments differ: mine {seg(mine)}, the engine's {seg(theirs)}")
+    segs = [g for g, _, _ in seg(theirs)]
+    unlike = [f"{g}: mine {sorted(sec(mine, g))}, the engine's {sorted(sec(theirs, g))}"
+              for g in segs if sorted(sec(mine, g)) != sorted(sec(theirs, g))]
+    r.check(not unlike, f"each segment has the engine's sections with their flags ({len(theirs.sections)} in all)",
+            f"sections differ: {'; '.join(unlike)}")
+    order = [f"{g}: mine {[n for n, _ in sec(mine, g)]}, the engine's {[n for n, _ in sec(theirs, g)]}"
+             for g in segs if sorted(sec(mine, g)) == sorted(sec(theirs, g)) and sec(mine, g) != sec(theirs, g)]
+    print(f"- report: sections in another order inside their segment: {'; '.join(order) if order else 'none'}")
+    fm, ft = mine.functions(), theirs.functions()
+    nm, nt = unnumbered(fm), unnumbered(ft)
+    name = lambda k: f"{k[0]}: {k[1][1:] if k[1].startswith('_') else k[1]}"
+    missing, extra = [name(nt[k]) for k in set(nt) - set(nm)], [name(nm[k]) for k in set(nm) - set(nt)]
+    r.check(not missing and not extra, f"the engine's {len(ft)} functions by source and name",
+            f"functions differ: missing {listing(missing)}; extra {listing(extra)}")
+    code = [(s["addr"], s["addr"] + s["size"]) for s in mine.sections
+            if s["flags"] & (S_ATTR_PURE_INSTRUCTIONS | S_ATTR_SOME_INSTRUCTIONS)]
+    bad = [name(k) for k, (a, n) in fm.items() if n <= 0 or not any(lo <= a and a + n <= hi for lo, hi in code)]
+    r.check(not bad, "each function has code in an executable section",
+            f"functions without code in an executable section: {listing(bad)}")
+    em, et = export_shapes(mine, fm), export_shapes(theirs, ft)
+    moved = sorted(f"{n} {em.get(n, 'not exported')} / {et.get(n, 'not exported')}"
+                   for n in set(em) | set(et) if em.get(n) != et.get(n))
+    r.check(not moved, f"each of the {len(et)} exports in the engine's section, with its weak flag, and in code at "
+                       f"the start of the function of the same source and name",
+            f"exports other than the engine's (mine / the engine's): {listing(moved)}")
+    # the same functions paired, by the engine's names
+    pm, pt = {nt[k]: fm[nm[k]] for k in set(nm) & set(nt)}, {nt[k]: ft[nt[k]] for k in set(nm) & set(nt)}
+    differ = differing(mine, theirs, pm, pt)
+    line = f"structural, {len(differ)} of {len(ft)} functions differ from the engine's file"
+    print(f"- report: {len(differ)} of the {len(ft)} functions differ in their bytes with the addresses masked, "
+          f"the other compiler's doing and not a check" + (f": {listing(differ)}" if differ else ""))
+    pairs = [(a, theirs.section(a["name"])) for a in mine.sections if theirs.section(a["name"])]
+    sizes = [f"{a['name']} {a['size']:#x} / {b['size']:#x}" for a, b in pairs if a["size"] != b["size"]]
+    print(f"- report: sections of another size (mine / the engine's): {listing(sizes) if sizes else 'none'}")
+    other = [a["name"] for a, b in pairs
+             if not a["flags"] & (S_ATTR_PURE_INSTRUCTIONS | S_ATTR_SOME_INSTRUCTIONS)
+             and a["type"] not in S_ZEROFILL_TYPES and section_bytes(mine, a) != section_bytes(theirs, b)]
+    print(f"- report: other sections whose bytes differ: {listing(other) if other else 'none'}")
+    for d in differ:  # all of them, in the job's log
+        print(f"differs from the engine's: {d}", file=sys.stderr)
+    return line
+
+
+def section_bytes(m, sec):
+    return bytes(m.data[sec["offset"]:sec["offset"] + sec["size"]])
+
+
+def export_shapes(m, funcs):
+    """each export (from the symbol table, as m.exports) -> its section, whether it is a weak
+    definition, and what it is: in code the source and name of the debug map's function that
+    starts there, in data its contents (data_contents)"""
+    starts = {}
+    for key, (addr, _) in funcs.items():
+        starts.setdefault(addr, key)
+    out = {}
+    for n, t, sect, desc, value in m.syms:
+        if not t & (N_STAB | N_PEXT) and t & N_EXT and t & N_TYPE == N_SECT:
+            s = m.sections[sect - 1] if 0 < sect <= len(m.sections) else None
+            in_code = s and s["flags"] & (S_ATTR_PURE_INSTRUCTIONS | S_ATTR_SOME_INSTRUCTIONS)
+            what = starts.get(value) if in_code else data_contents(m, s, value) if s else None
+            out[n[1:]] = (s["name"] if s else f"section {sect}", bool(desc & N_WEAK_DEF), what)
+    return out
+
+
+def data_contents(m, s, addr):
+    """the data at addr up to the next symbol in its section, or the section's end, independent of
+    where the linker put things: each pointer dyld fixes up by what it points to (resolver), each
+    other byte as it is; zero-filled data by its length. A hash, with the length."""
+    labels = m.const_symbols_in(s)
+    end = labels[bisect.bisect_right(labels, addr)]
+    if s["type"] in S_ZEROFILL_TYPES:
+        return f"zero-filled {end - addr}"
+    name, fixups, h, a = m.resolver(), m.fixups, hashlib.sha256(), addr
+    while a < end:
+        f = fixups.get(a)
+        if f and a + 8 <= end:
+            h.update(f"[{f'{name(f[1])} high8 {f[2]}' if f[0] == 'rebase' else f'{f[1]}+{f[2]}'}]".encode())
+            a += 8
+        else:
+            h.update(m.data[s["offset"] + a - s["addr"]:s["offset"] + a - s["addr"] + 1])
+            a += 1
+    return f"{end - addr} bytes {h.hexdigest()[:24]}"
+
+
+def unnumbered(funcs):
+    """the debug map's functions keyed without clang's numbers: a C or Objective-C name has no dot,
+    so a trailing .<n> is clang's own, which it gives the helpers it makes (blocks' byref copy and
+    dispose helpers, a block's invoke) in the order it makes them, and another clang counts
+    otherwise (__Block_byref_object_copy_.468 in the engine's winemac.so, .467 in Xcode 27's). Only
+    the helpers' names lose it: they start with clang's two underscores after the symbol's own one,
+    a function of the source with one. Within a source, the helpers of one name pair in the order of
+    their numbers, an unnumbered one first. That order is clang's, and if another clang made one
+    helper of a name more or fewer, the count per name and source differs and the gate fails; if it
+    made them in another order, the bytes of the wrong bodies are compared, which only the report
+    shows, as for every function under this gate.
+    (source, name without the number, its place in that order) -> the function's key."""
+    groups = {}
+    for key in funcs:
+        m = re.fullmatch(r"(___.*)\.(\d+)", key[1])
+        base, number = (m.group(1), int(m.group(2))) if m else (key[1], -1)
+        groups.setdefault((key[0], base), []).append((number, key))
+    return {(src, base, i): key for (src, base), items in groups.items() for i, (_, key) in enumerate(sorted(items))}
+
+
+def differing(mine, theirs, fm, ft):
+    """the functions both files have whose code differs with the addresses masked, by source and name"""
+    rm, rt = mine.resolver(), theirs.resolver()
+    return [f"{obj}: {name[1:] if name.startswith('_') else name}"
+            for obj, name in sorted(set(fm) & set(ft), key=lambda k: (k[0] or "", k[1]))
+            if masked(mine, rm, *fm[(obj, name)]) != masked(theirs, rt, *ft[(obj, name)])]
 
 
 def diagnose(mine, theirs):
