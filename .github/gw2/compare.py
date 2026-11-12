@@ -750,13 +750,20 @@ def byte_gate(mine, theirs, r):
 
 # objects: the patched build against my build of the engine's commit, per object file
 
+# clang's labels numbered in the order it makes them: string literals (l_.str.12) and a function's
+# jump tables and constant pools (lJTI36_0, lCPI19_0, by the function's index in the object, so a
+# function added before them renumbers them)
+NUMBERED_LABEL = r"l_\.str(\.\d+)?|l(JTI|CPI)\d+_\d+"
+
+
 def literal(m, num, addend=0):
     """symbol <num>, at <addend> from it, as the string literal it labels: its section and every
     byte from the label to the next label in the section, and in a section of C strings on to the
     NUL that ends the string the reference reaches (or the section's end). A literal is any label
     in a section of C strings, and clang's label of a literal anywhere else (l_.str, l_.str.12):
     a wide string (u"…", L"…") is one, in __TEXT,__ustring or __TEXT,__const. None for any other
-    symbol. An addend that leaves the section, or goes before the label, gives a name no other
+    symbol. A jump table or constant pool clang labelled (NUMBERED_LABEL) goes the same way, by its
+    section and bytes. An addend that leaves the section, or goes before the label, gives a name no other
     file's relocation has, so the function counts as changed. The compiler numbers the labels in
     the order it makes the literals, so a string added to one function renames those of every
     function made after it; the section and the bytes are what the code uses."""
@@ -765,7 +772,7 @@ def literal(m, num, addend=0):
         return None
     s = m.sections[sect - 1]
     c_strings = s["type"] == S_CSTRING_LITERALS
-    if not (c_strings or re.fullmatch(r"l_\.str(\.\d+)?", label)) or not s["addr"] <= value < s["addr"] + s["size"]:
+    if not (c_strings or re.fullmatch(NUMBERED_LABEL, label)) or not s["addr"] <= value < s["addr"] + s["size"]:
         return None
     if "_labels" not in m.__dict__:  # each section's label addresses, sorted, once per file
         m._labels = {}
@@ -871,6 +878,26 @@ def object_functions(m):
 CHANGED_HOW = {}  # a changed function's listing -> how it changed, for the report
 
 
+def branch_distances_only(a, b):
+    """two functions' code of one length that differs only in the offsets of branches (B, BL, B.cond,
+    CBZ/CBNZ, TBZ/TBNZ), as a split-off .cold piece's branch back into its function does when that
+    function moves"""
+    if a == b or len(a) != len(b) or len(a) % 4:
+        return False
+    for x, y in zip(struct.unpack(f"<{len(a) // 4}I", a), struct.unpack(f"<{len(b) // 4}I", b)):
+        if x == y:
+            continue
+        for mask, op, keep in ((0x7c000000, 0x14000000, 0xfc000000),   # B, BL: imm26
+                               (0xff000010, 0x54000000, 0xff00001f),   # B.cond: imm19, cond
+                               (0x7e000000, 0x34000000, 0xff00001f),   # CBZ, CBNZ: imm19, Rt
+                               (0x7e000000, 0x36000000, 0xfff8001f)):  # TBZ, TBNZ: imm14, bit, Rt
+            if x & mask == op and x & keep == y & keep:
+                break
+        else:
+            return False
+    return True
+
+
 def function_changes(base, head, label):
     """the functions of a touched object, by bytes and relocations: changed, new and gone. How each
     changed one differs goes into CHANGED_HOW: other code, or the same code with other relocation
@@ -888,7 +915,8 @@ def function_changes(base, head, label):
             (cb, rb), (ch, rh) = fb[name], fh[name]
             tb, th = {r[-1] for r in rb}, {r[-1] for r in rh}
             cut = lambda ts: ", ".join(sorted(t[:60] for t in ts)[:3]) + (" …" if len(ts) > 3 else "") or "none"
-            CHANGED_HOW[short] = (f"other code, {len(cb)} / {len(ch)} bytes" if cb != ch else
+            CHANGED_HOW[short] = ("the same code with other branch distances" if branch_distances_only(cb, ch) else
+                                  f"other code, {len(cb)} / {len(ch)} bytes" if cb != ch else
                                   f"the same code; relocation targets only the base's: {cut(tb - th)}; only mine: {cut(th - tb)}"
                                   if tb != th else "the same code and targets, relocated at other places")
     return changed, new, removed
@@ -1335,6 +1363,24 @@ def selftest(engine_dir):
         return m
     if function_changes(wide(hello + b"x\0\0\0", "l_.str.1"), wide(hello + b"x\0\0\0", "l_.str.2"), "x.c") != ([], [], []):
         failed.append("touched object: a wide string's label renumbered, its bytes the same")
+    jt = lambda text, label: with_literal(text, [(label, 0), ("lJTI99_0", 8)], [(0, 0, None), (4, 0, None)],
+                                          "__TEXT,__const", 0)
+    for base, head in ((jt(bytes(range(8)), "lJTI36_0"), jt(bytes(range(8)), "lJTI37_0")),
+                       (jt(b"\x18-DT\xfb!\t@", "lCPI19_0"), jt(b"\x18-DT\xfb!\t@", "lCPI20_0"))):
+        if function_changes(base, head, "x.c") != ([], [], []):
+            failed.append("touched object: a jump table or constant pool label renumbered, its bytes the same")
+    if function_changes(jt(bytes(range(8)), "lJTI36_0"), jt(bytes(range(1, 9)), "lJTI36_0"), "x.c")[0] != ["x.c: f"]:
+        failed.append("touched object: a jump table's bytes")
+    branch = lambda imm: fake_object(struct.pack("<2I", 0x14000000 | imm, 0xd65f03c0), [], b"")
+    CHANGED_HOW.clear()
+    function_changes(branch(5), branch(9), "x.c")
+    if CHANGED_HOW.get("x.c: f") != "the same code with other branch distances":
+        failed.append(f"touched object: a branch's distance alone, said as {CHANGED_HOW.get('x.c: f')}")
+    CHANGED_HOW.clear()
+    function_changes(branch(5), fake_object(struct.pack("<2I", 0x94000005, 0xd65f03c0), [], b""), "x.c")
+    if CHANGED_HOW.get("x.c: f") == "the same code with other branch distances":
+        failed.append("touched object: a B made a BL, said as other branch distances")
+    CHANGED_HOW.clear()
     for what, base, head in (
             ("a wide string's text", wide(hello, "l_.str.1"), wide("Hellp".encode("utf-16-le") + b"\0\0", "l_.str.1")),
             ("another label of data than clang's string label", wide(hello, "_table"), wide(hello, "_table2")),
