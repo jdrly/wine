@@ -2,8 +2,9 @@
 # gw2 (jdrly/gw2-on-mac#40): the test programs under the engine's ntdll.so and mine, in each
 # WINE_HEAT_WAKE mode, with tests/gw2/run.zsh.
 #
-#   matrix.zsh <engine-wine> <my-wine> <exe-dir> <work-dir>
+#   matrix.zsh <engine-wine> <my-wine> <exe-dir> <work-dir> [<win32u-wine>]
 #
+# <win32u-wine> is the engine with my ntdll.so and my win32u.so, when the build ships one.
 # 1. wakes.exe under mine, as WINE_HEAT_EXE with WINE_HEAT_COUNT=1, in each mode (off, one, skip,
 #    one,skip), three runs each. The modes run side by side, each in a prefix of its own.
 # 1b. evpool.exe under mine, as WINE_HEAT_EXE with WINE_HEAT_COUNT=1, with WINE_HEAT_EVPOOL off, 1
@@ -23,12 +24,18 @@
 #    FEX_PROFILESTATS=1, once, 8 seconds. Block 2 runs it for a second with the sampler unset and set
 #    for another program, where no file of the sampler's may appear either.
 # 6. (jdrly/gw2-on-mac#60) requests three runs under mine with counting.
+# 7. (jdrly/gw2-on-mac#61) with <win32u-wine>: setcursor, then requests and peekyield with
+#    counting, under the engine's win32u.so with WINE_WIN32U_SETCURSOR=shm and
+#    WINE_WIN32U_PEEK_YIELD=off, and under mine with neither, with only the first and with only the
+#    second. Only mine leaves the repeated cursor's requests out (GW2_TEST_SETCURSOR_SKIPS=1) or
+#    the empty peek's yield (GW2_TEST_PEEK_NO_YIELD=1), each with its own switch. Block 2 ran
+#    setcursor and peekyield under the engine's win32u.so with neither set.
 # Prints each run's lines and exits 1 if any failed.
 emulate -L zsh
 setopt err_exit pipe_fail no_unset extended_glob
 
-(( $# == 4 )) || { print -u2 "usage: matrix.zsh <engine-wine> <my-wine> <exe-dir> <work-dir>"; exit 2 }
-engine=${1:A} mine=${2:A} exes=${3:A} work=${4:A}
+(( $# == 4 || $# == 5 )) || { print -u2 "usage: matrix.zsh <engine-wine> <my-wine> <exe-dir> <work-dir> [<win32u-wine>]"; exit 2 }
+engine=${1:A} mine=${2:A} exes=${3:A} work=${4:A} win32u=${5:+${5:A}}
 run=${0:A:h}/run.zsh
 mkdir -p "$work"
 integer failed=0
@@ -77,7 +84,9 @@ quiet() {
   shift 3
   [[ $wine == "$engine" ]] && programs=(${programs:#*/(${(~j:|:)engine_bugs}).exe})
   mkdir -p "$log"
-  env -u WINE_HEAT_COUNT -u WINE_HEAT_WAKE -u WINE_HEAT_EVPOOL -u WINE_HEAT_SPIN -u WINE_HEAT_PROF -u WINE_HEAT_EXE -u WINE_HEAT_LOG "$@" GW2_TEST_PRODUCER_SECONDS=20 GW2_TEST_SECONDS=300 \
+  env -u WINE_HEAT_COUNT -u WINE_HEAT_WAKE -u WINE_HEAT_EVPOOL -u WINE_HEAT_SPIN -u WINE_HEAT_PROF -u WINE_HEAT_EXE -u WINE_HEAT_LOG \
+    -u WINE_WIN32U_SETCURSOR -u WINE_WIN32U_PEEK_YIELD -u GW2_TEST_SETCURSOR_SKIPS -u GW2_TEST_PEEK_NO_YIELD "$@" \
+    GW2_TEST_PRODUCER_SECONDS=20 GW2_TEST_SECONDS=300 \
     "$run" "$wine" "$work/prefix-$name" $programs
   left=("$log"/*(N) /tmp/heat-*(N))
   if (( ${#left} )); then
@@ -192,6 +201,7 @@ requests() {
     log=$work/log-requests-$n
     mkdir -p "$log"
     env -u WINE_HEAT_WAKE -u WINE_HEAT_MSYNC_UNREG -u WINE_HEAT_EVPOOL -u WINE_HEAT_SPIN -u WINE_HEAT_PROF \
+      -u WINE_WIN32U_SETCURSOR -u WINE_WIN32U_PEEK_YIELD -u GW2_TEST_SETCURSOR_SKIPS -u GW2_TEST_PEEK_NO_YIELD \
       WINE_HEAT_EXE=requests.exe WINE_HEAT_COUNT=1 WINE_HEAT_LOG=$log \
       GW2_TEST_SECONDS=300 "$run" "$mine" "$work/prefix-requests" "$exes/requests.exe"
   done
@@ -199,5 +209,33 @@ requests() {
 
 side requests requests
 collect
+
+# 7. jdrly/gw2-on-mac#61
+
+# win32u_run <name> <wine> [<variable>=<value>...]: setcursor once, then requests and peekyield with
+# counting, each with a log folder of its own, under <wine> with the variables
+win32u_run() {
+  local name=$1 wine=$2 exe
+  shift 2
+  for exe in setcursor requests peekyield; do
+    mkdir -p "$work/log-$exe-$name"
+    env -u WINE_HEAT_WAKE -u WINE_HEAT_MSYNC_UNREG -u WINE_HEAT_EVPOOL -u WINE_HEAT_SPIN -u WINE_HEAT_PROF \
+      -u WINE_HEAT_EXE -u WINE_HEAT_COUNT -u WINE_WIN32U_SETCURSOR -u WINE_WIN32U_PEEK_YIELD \
+      -u GW2_TEST_SETCURSOR_SKIPS -u GW2_TEST_PEEK_NO_YIELD "$@" \
+      ${${exe:#setcursor}:+WINE_HEAT_EXE=$exe.exe} ${${exe:#setcursor}:+WINE_HEAT_COUNT=1} \
+      WINE_HEAT_LOG=$work/log-$exe-$name GW2_TEST_SECONDS=300 \
+      "$run" "$wine" "$work/prefix-win32u-$name" "$exes/$exe.exe" || return 1
+  done
+}
+
+if [[ -n $win32u ]]; then
+  side win32u-engine-set win32u_run engine-set "$mine" WINE_WIN32U_SETCURSOR=shm WINE_WIN32U_PEEK_YIELD=off
+  side win32u-mine-unset win32u_run mine-unset "$win32u"
+  side win32u-mine-shm win32u_run mine-shm "$win32u" WINE_WIN32U_SETCURSOR=shm GW2_TEST_SETCURSOR_SKIPS=1
+  side win32u-mine-off win32u_run mine-off "$win32u" WINE_WIN32U_PEEK_YIELD=off GW2_TEST_PEEK_NO_YIELD=1
+  collect
+else
+  print "== win32u: no win32u.so of mine in this build, so block 7 has nothing to run"
+fi
 
 (( failed == 0 ))

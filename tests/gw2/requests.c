@@ -19,7 +19,9 @@
  * block, so the calls fall in one 5 s block, then waits for the next and adds up this thread's
  * blocks in heat-requests-*.log: 1,010 set_cursor requests, all handle requests, 1,000 repeats and
  * none of the other flags; the messages 0x8001 100 times and 0x8002 50 times; at least 150
- * get_message and 100 set_queue_mask requests.
+ * get_message and 100 set_queue_mask requests. With GW2_TEST_SETCURSOR_SKIPS=1, for my win32u.so
+ * with WINE_WIN32U_SETCURSOR=shm (jdrly/gw2-on-mac#61), the repeats make no request: 10 set_cursor
+ * requests, each run's first call, and 0 repeats.
  *
  * Prints "gw2 test requests: passed" and exits 0, or names what failed and exits 1. */
 #include <stdio.h>
@@ -103,7 +105,8 @@ static void check_log(void)
     long long blocks = 0, req_cursor = 0, req_message = 0, req_mask = 0, handle = 0, repeat = 0, others = 0;
     long long app1 = 0, app2 = 0, other = 0, internal = 0, poll = 0, nopoll = 0;
     double cursor_ms = 0;
-    BOOL mine = FALSE;
+    BOOL mine = FALSE, skips = env_is( "GW2_TEST_SETCURSOR_SKIPS", "1" );
+    long long want_cursor = skips ? ROUNDS * 2 : ROUNDS * (2 + A_RUN), want_repeat = skips ? 0 : ROUNDS * A_RUN;
     FILE *f;
 
     if (!find_log( path, sizeof(path) )) FAIL( "no heat-requests-*.log" );
@@ -151,11 +154,13 @@ static void check_log(void)
             blocks, req_cursor, cursor_ms, req_message, req_mask, handle, repeat, others, internal, other,
             app1, app2, poll, nopoll );
     if (!blocks) FAIL( "no block of this thread: it isn't the game thread" );
-    if (req_cursor != ROUNDS * (2 + A_RUN)) FAIL( "%lld set_cursor requests, not %d", req_cursor, ROUNDS * (2 + A_RUN) );
-    if (cursor_ms <= 0) FAIL( "no time for set_cursor" );
-    /* the splits count every request of a block, the req lines only a block's twelve most frequent */
-    if (handle != ROUNDS * (2 + A_RUN) || others) FAIL( "set_cursor: %lld handle requests, %lld with other flags", handle, others );
-    if (repeat != ROUNDS * A_RUN) FAIL( "%lld repeats, not %d", repeat, ROUNDS * A_RUN );
+    /* the splits count every request of a block, the req lines only a block's twelve most frequent,
+       where the 10 requests with skips may not be */
+    if (req_cursor != want_cursor && !(skips && !req_cursor))
+        FAIL( "%lld set_cursor requests, not %lld", req_cursor, want_cursor );
+    if (req_cursor && cursor_ms <= 0) FAIL( "no time for set_cursor" );
+    if (handle != want_cursor || others) FAIL( "set_cursor: %lld handle requests, %lld with other flags", handle, others );
+    if (repeat != want_repeat) FAIL( "%lld repeats, not %lld", repeat, want_repeat );
     if (app1 != POSTS / 3 * 2 || app2 != POSTS / 3) FAIL( "messages 0x8001 %lld and 0x8002 %lld, not %d and %d",
                                                          app1, app2, POSTS / 3 * 2, POSTS / 3 );
     if (req_message < POSTS || other < POSTS) FAIL( "%lld get_message requests, %lld not internal", req_message, other );
