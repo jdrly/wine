@@ -31,6 +31,7 @@
 #    second. Only mine leaves the repeated cursor's requests out (GW2_TEST_SETCURSOR_SKIPS=1) or
 #    the empty peek's yield (GW2_TEST_PEEK_NO_YIELD=1), each with its own switch. Block 2 ran
 #    setcursor and peekyield under the engine's win32u.so with neither set.
+# 8. (jdrly/gw2-on-mac#101) timeout three runs under the engine's ntdll.so and three under mine.
 # Prints each run's lines and exits 1 if any failed.
 emulate -L zsh
 setopt err_exit pipe_fail no_unset extended_glob
@@ -253,5 +254,14 @@ if [[ -n $win32u ]]; then
 else
   print "== win32u: no win32u.so of mine in this build, so block 7 has nothing to run"
 fi
+
+# 8. jdrly/gw2-on-mac#101: timeout three runs under the engine's ntdll.so and three under mine, with
+# no WINE_HEAT_* variable. The two side by side only: its waits have to end no earlier than 45 ms
+# into 50, and the shortest of each 20 before 150.
+side timeout-engine env -u WINE_HEAT_COUNT -u WINE_HEAT_EXE -u WINE_HEAT_LOG GW2_TEST_SECONDS=300 \
+  "$run" "$engine" "$work/prefix-timeout-engine" "$exes/timeout.exe" "$exes/timeout.exe" "$exes/timeout.exe"
+side timeout-mine env -u WINE_HEAT_COUNT -u WINE_HEAT_EXE -u WINE_HEAT_LOG GW2_TEST_SECONDS=300 \
+  "$run" "$mine" "$work/prefix-timeout-mine" "$exes/timeout.exe" "$exes/timeout.exe" "$exes/timeout.exe"
+collect
 
 (( failed == 0 ))
