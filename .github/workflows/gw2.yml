@@ -23,12 +23,14 @@
 #   Artifacts ntdll-mach9-<commit> and macdrv-mach9-<commit>: ntdll.so or winemac.so, VERSION,
 #   COPYING.LIB, LICENSE, kept 7 days.
 # tests: tests/gw2/*.c built for Win64 x86_64 with llvm-mingw. On a pull request, window.exe under
-#   the engine with my winemac.so says whether the Mac driver starts on the runner, and
-#   tests/gw2/matrix.zsh runs them all under the engine from the release tarball: with its own
-#   ntdll.so, and with mine in each WINE_HEAT_WAKE mode, with no WINE_HEAT_* variable and with them
-#   set for another program. A push to gw2-on-mac runs only the prefix boot and smoke.exe, under
-#   the engine's ntdll.so and under mine: its tree is a merged pull request's head, which went
-#   through the matrix in that pull request's run, and Publish names that run.
+#   the engine with my winemac.so says whether the Mac driver starts on the runner;
+#   tests/gw2/native/frames.c, built natively, tests the driver's frame decision; layered.exe under
+#   the engine with my winemac.so counts the frames WINE_MACDRV_SURFACE skips, where the driver
+#   starts; and tests/gw2/matrix.zsh runs them all under the engine from the release tarball: with
+#   its own ntdll.so, and with mine in each WINE_HEAT_WAKE mode, with no WINE_HEAT_* variable and
+#   with them set for another program. A push to gw2-on-mac runs only the prefix boot and
+#   smoke.exe, under the engine's ntdll.so and under mine: its tree is a merged pull request's head,
+#   which went through all of that in that pull request's run, and Publish names that run.
 # lint: actionlint, and the Python script compiles.
 # publish: after the others are green, packs ntdll-mach9-<commit>.tar.xz and
 #   macdrv-mach9-<commit>.tar.xz and prints their sha256. For a push to gw2-on-mac it adds both to
@@ -361,13 +363,15 @@ jobs:
     runs-on: macos-26
     timeout-minutes: 30
     steps:
-      # only the scripts and the test programs, not the whole Wine tree
+      # only the scripts and the test programs, not the whole Wine tree; the Mac driver's sources for
+      # the header tests/gw2/native/frames.c builds
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ env.COMMIT }}
           sparse-checkout: |
             .github/gw2
             tests/gw2
+            dlls/winemac.drv
           persist-credentials: false
       - name: zsh syntax
         run: for f in .github/gw2/*.zsh tests/gw2/*.zsh; do zsh -n "$f"; echo "ok $f"; done
@@ -437,6 +441,33 @@ jobs:
           tests/gw2/run.zsh "$RUNNER_TEMP/macdrv/wine" "$RUNNER_TEMP/macdrv-prefix" "$RUNNER_TEMP/tests/window.exe" |
             tee "$RUNNER_TEMP/window.txt"
           { echo "### The Mac driver on the runner"; echo '```'; cat "$RUNNER_TEMP/window.txt"; echo '```'; } >>"$GITHUB_STEP_SUMMARY"
+      # test 11 of jdrly/gw2-on-mac#57: the driver's "is this frame the one Cocoa has", built
+      # natively from dlls/winemac.drv/surface_frame.h and run without Wine
+      - name: The frame decision, natively
+        if: github.event_name == 'pull_request'
+        run: |
+          clang -std=gnu23 -O2 -Wall -Werror -o "$RUNNER_TEMP/frames" tests/gw2/native/frames.c
+          "$RUNNER_TEMP/frames"
+      # test 12: layered.exe's 600 frames, every third new, under the engine with my winemac.so and
+      # the macsurface channel on. The driver's line at the 600th flush has to say 400 skipped with
+      # WINE_MACDRV_SURFACE=copy,skip, and 0 with copy and unset.
+      - name: The launcher's frames
+        if: github.event_name == 'pull_request'
+        run: |
+          for mode in copy,skip copy unset; do
+            want="600 flushes, 0 skipped,"
+            if [[ $mode == unset ]]; then
+              unset WINE_MACDRV_SURFACE
+            else
+              export WINE_MACDRV_SURFACE=$mode
+              [[ $mode == copy,skip ]] && want="600 flushes, 400 skipped,"
+            fi
+            prefix=$RUNNER_TEMP/layered-${mode/,/-}
+            GW2_TEST_WINEDEBUG=-all,+macsurface tests/gw2/run.zsh "$RUNNER_TEMP/macdrv/wine" "$prefix" "$RUNNER_TEMP/tests/layered.exe"
+            line=$(tr -d '\r' <"$prefix/layered.log" | grep -E 'macsurface:.*: 600 flushes' || true)
+            echo "WINE_MACDRV_SURFACE=$mode: ${line:-no macsurface line at the 600th flush}" | tee -a "$GITHUB_STEP_SUMMARY"
+            [[ $line == *"$want"* ]] || { echo "::error::WINE_MACDRV_SURFACE=$mode: expected \"$want\""; exit 1; }
+          done
       - name: Run them
         if: github.event_name == 'pull_request'
         run: tests/gw2/matrix.zsh "$RUNNER_TEMP/engine/wine" "$RUNNER_TEMP/mine/wine" "$RUNNER_TEMP/tests" "$RUNNER_TEMP/matrix"

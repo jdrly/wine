@@ -5,7 +5,8 @@
 #
 #   run.zsh <wine> <prefix> <exe>...
 #
-# <wine> is an unpacked engine (the release tarball's wine/). Each program has to print
+# <wine> is an unpacked engine (the release tarball's wine/). WINEDEBUG is -all, or
+# $GW2_TEST_WINEDEBUG when set; each program's log stays in <prefix>/<name>.log. Each program has to print
 # "gw2 test <name>: passed" and exit 0 within the time limit, $GW2_TEST_SECONDS (default 120). Afterwards the prefix's wineserver
 # is stopped, and no process this script started may be left. Wine rewrites a process's
 # arguments, so the processes are found by a variable in their environment, which every child
@@ -18,7 +19,7 @@ setopt err_exit pipe_fail no_unset extended_glob
 wine=${1:A} prefix=${2:A}
 shift 2
 integer failed=0
-export WINEPREFIX=$prefix WINEDEBUG=-all WINEDLLOVERRIDES="mscoree,mshtml=;winemenubuilder.exe=d"
+export WINEPREFIX=$prefix WINEDEBUG=${GW2_TEST_WINEDEBUG:--all} WINEDLLOVERRIDES="mscoree,mshtml=;winemenubuilder.exe=d"
 unset WINEARCH
 # only in the environment of what run_limited starts, so ps, grep and this script don't carry it
 mark=GW2_TEST_RUN=$$-${wine//[^A-Za-z0-9]/_}

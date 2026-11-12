@@ -26,8 +26,10 @@
 
 #include "config.h"
 #include "macdrv.h"
+#include "surface_frame.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(bitblt);
+WINE_DECLARE_DEBUG_CHANNEL(macsurface);
 
 static inline int get_dib_stride(int width, int bpp)
 {
@@ -46,6 +48,14 @@ struct macdrv_window_surface
     struct window_surface   header;
     WineWindow             *window;
     CGDataProviderRef       provider;
+    /* GW2 on Mac, WINE_MACDRV_SURFACE=copy,skip: the copy Cocoa was last given and what came
+       with it. Only the flush and the destroy touch these, under win32u's surface lock. win32u
+       allocates the struct zeroed, so a new surface has shown nothing. */
+    CFDataRef               shown_bits;
+    struct surface_frame    shown;
+    /* the macsurface channel's counts */
+    UINT                    flushes, skipped;
+    DWORD                   counted;    /* when the last 600 flushes started, NtGetTickCount */
 };
 
 static struct macdrv_window_surface *get_mac_surface(struct window_surface *surface);
@@ -116,6 +126,9 @@ static BOOL macdrv_surface_flush(struct window_surface *window_surface, const RE
     struct macdrv_win_data *data = get_win_data(window_surface->hwnd);
     RECT surface_rect = *rect, dirty_rect = *dirty, view_rect = {0};
     BOOL have_view_rect = FALSE;
+    struct surface_frame frame;
+    CGDataProviderRef provider;
+    CFDataRef copy = NULL;
 
     if (data)
     {
@@ -133,14 +146,62 @@ static BOOL macdrv_surface_flush(struct window_surface *window_surface, const RE
     }
     OffsetRect(&dirty_rect, surface_rect.left, surface_rect.top);
 
-    colorspace = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
-    image = CGImageCreate(color_info->bmiHeader.biWidth, abs(color_info->bmiHeader.biHeight), 8, 32,
-                          color_info->bmiHeader.biSizeImage / abs(color_info->bmiHeader.biHeight), colorspace,
-                          alpha_info | kCGBitmapByteOrder32Little, surface->provider, NULL, retina_on, kCGRenderingIntentDefault);
-    CGColorSpaceRelease(colorspace);
+    /* GW2 on Mac (WINE_MACDRV_SURFACE): Cocoa draws the image later, on the main thread, without
+       the surface lock, while the caller may already draw the next frame into the surface:
+       NtUserUpdateLayeredWindow clears the dirty rect and blends the new frame in, so a layered
+       window (the GW2 launcher) could show a torn frame. With copy, Cocoa gets a copy made here,
+       under the lock the caller holds. With copy,skip a frame equal to the copy Cocoa has is not
+       handed over again; the main thread would rebuild the window's image and shadow for it.
+       Everything after the hand-over runs either way. */
+    frame = (struct surface_frame){ .bits = color_bits, .size = color_info->bmiHeader.biSizeImage,
+                                    .alpha = alpha_info, .left = surface_rect.left, .top = surface_rect.top,
+                                    .right = surface_rect.right, .bottom = surface_rect.bottom };
+    if (surface_skip && surface_frame_is_shown(&surface->shown, &frame, shape_changed))
+        surface->skipped++;
+    else
+    {
+        provider = surface->provider;
+        /* without a copy, his image over the surface's memory, and nothing to compare with */
+        if (surface_copy && (copy = CFDataCreate(kCFAllocatorDefault, color_bits, frame.size)) &&
+            !(provider = CGDataProviderCreateWithCFData(copy)))
+        {
+            CFRelease(copy);
+            copy = NULL;
+            provider = surface->provider;
+        }
 
-    macdrv_window_set_color_image(surface->window, image, cgrect_from_rect(surface_rect), cgrect_from_rect(dirty_rect));
-    CGImageRelease(image);
+        colorspace = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+        image = CGImageCreate(color_info->bmiHeader.biWidth, abs(color_info->bmiHeader.biHeight), 8, 32,
+                              color_info->bmiHeader.biSizeImage / abs(color_info->bmiHeader.biHeight), colorspace,
+                              alpha_info | kCGBitmapByteOrder32Little, provider, NULL, retina_on, kCGRenderingIntentDefault);
+        CGColorSpaceRelease(colorspace);
+        if (copy) CGDataProviderRelease(provider);
+
+        macdrv_window_set_color_image(surface->window, image, cgrect_from_rect(surface_rect), cgrect_from_rect(dirty_rect));
+        CGImageRelease(image);
+
+        /* the image holds the copy as long as Cocoa does; skip keeps it to compare with */
+        if (surface->shown_bits) CFRelease(surface->shown_bits);
+        surface->shown_bits = surface_skip ? copy : NULL;
+        if (copy && !surface_skip) CFRelease(copy);
+        surface->shown = frame;
+        surface->shown.bits = surface->shown_bits ? CFDataGetBytePtr(surface->shown_bits) : NULL;
+    }
+
+    if (TRACE_ON(macsurface))
+    {
+        DWORD now = NtGetTickCount();
+
+        if (!surface->flushes) surface->counted = now;
+        if (!(++surface->flushes % 600))
+        {
+            TRACE_(macsurface)("hwnd %p %dx%d: %u flushes, %u skipped, the last 600 in %u.%03u s\n",
+                               window_surface->hwnd, (int)color_info->bmiHeader.biWidth,
+                               abs(color_info->bmiHeader.biHeight), surface->flushes, surface->skipped,
+                               (now - surface->counted) / 1000, (now - surface->counted) % 1000);
+            surface->counted = now;
+        }
+    }
 
     if (data)
     {
@@ -211,6 +272,7 @@ static void macdrv_surface_destroy(struct window_surface *window_surface)
 
     TRACE("freeing %p\n", surface);
     CGDataProviderRelease(surface->provider);
+    if (surface->shown_bits) CFRelease(surface->shown_bits);
 }
 
 static const struct window_surface_funcs macdrv_surface_funcs =
