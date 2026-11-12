@@ -752,11 +752,12 @@ def byte_gate(mine, theirs, r):
 
 def literal(m, num, addend=0):
     """symbol <num>, at <addend> from it, as the string literal it labels: its section and every
-    byte from the label to the next label in the section, or on to the first NUL after it where the
-    bytes up to that label don't end in one, or to the section's end. None for any other symbol,
-    and for an addend outside those bytes, which then go by the label. The compiler numbers the
-    labels (l_.str.12) in the order it makes the literals, so a string added to one function renames
-    those of every function made after it; the section and the bytes are what the code uses."""
+    byte from the label to the next label in the section, and on to the NUL that ends the string
+    the reference reaches (or the section's end). None for any other symbol. An addend that leaves
+    the section, or goes before the label, gives a name no other file's relocation has, so the
+    function counts as changed. The compiler numbers the labels (l_.str.12) in the order it makes
+    the literals, so a string added to one function renames those of every function made after
+    it; the section and the bytes are what the code uses."""
     _, t, sect, _, value = m.syms[num]
     if t & (N_STAB | N_EXT) or not 0 < sect <= len(m.sections):
         return None
@@ -774,13 +775,13 @@ def literal(m, num, addend=0):
     i = bisect.bisect_right(labels, value)
     start, stop = s["offset"] + value - s["addr"], s["offset"] + s["size"]
     end = s["offset"] + labels[i] - s["addr"] if i < len(labels) else stop
-    if not m.data[start:end].endswith(b"\0"):  # a read runs on to the first NUL, past the next label
-        nul = m.data.find(b"\0", end, stop)
-        end = nul + 1 if nul >= 0 else stop
-    text = bytes(m.data[start:end])
-    if not 0 <= addend < len(text):
-        return None
-    return f"literal {s['name']} {text!r}"
+    reach = start + addend
+    if not start <= reach < stop:  # fails closed: unequal to every other file's
+        return f"literal {s['name']} {addend} from {m.syms[num][0]}, outside the literals, in file {id(m):x}"
+    # a read runs on to the first NUL, past the next label if it must
+    nul = m.data.find(b"\0", max(end - 1, reach), stop)
+    end = nul + 1 if nul >= 0 else stop
+    return f"literal {s['name']} {bytes(m.data[start:end])!r}"
 
 
 def relocations(m, sec):
@@ -1263,10 +1264,11 @@ def selftest(engine_dir):
         failed.append(f"touched object: __text at another address with the same functions, not {got}")
 
     # a string literal by its section and bytes: a string added before it renames its label (l_.str.1
-    # to l_.str.2), which leaves the function as it is. Other text, another section with the same
-    # text, a literal without its NUL (other bytes up to the next NUL), other bytes past the first
-    # NUL that an addend reaches, an addend outside the literal (compared by label then) and an
-    # addend that would carry over to the next relocation are changes.
+    # to l_.str.2), which leaves the function as it is, with an addend or without. Other text,
+    # another section with the same text, a literal without its NUL (other bytes up to the next NUL),
+    # other bytes past the first NUL or past the next label that an addend reaches, an addend that
+    # leaves the section (even with the same label) and an addend that would carry over to the next
+    # relocation are changes.
     def with_literal(text, labels, relocs, name="__TEXT,__cstring"):
         """__text's two words relocated by <relocs> [(address, label index, addend or None)] to
         <labels> [(name, offset)] in a cstring section of <text>"""
@@ -1288,6 +1290,14 @@ def selftest(engine_dir):
         failed.append("touched object: a string literal's label renumbered, its bytes the same")
     if function_changes(one(b"ab\0cd\0", addend=3), one(b"ab\0cd\0", "l_.str.2", addend=3), "x.c") != ([], [], []):
         failed.append("touched object: a renumbered label with an addend inside the literal")
+    across = lambda b, text: with_literal(text, [(f"l_.str.{b}", 0), (f"l_.str.{b + 1}", 3)], [(0, 0, 3), (4, 0, 3)])
+    if function_changes(across(1, b"ab\0cd\0"), across(2, b"ab\0cd\0"), "x.c") != ([], [], []):
+        failed.append("touched object: renumbered labels, an addend past the next label, the same bytes")
+    # an addend on a relocation to _a (index -3 from the labels) must not reach the next one's
+    # literal, so bytes of l_.str.2 that nothing reaches don't count
+    reach_none = lambda tail: with_literal(b"a\0" + tail, [("l_.str.1", 0), ("l_.str.2", 2)], [(0, -3, 3), (4, 0, None)])
+    if function_changes(reach_none(b"bcdef\0"), reach_none(b"bcdeX\0"), "x.c") != ([], [], []):
+        failed.append("touched object: an addend carried over to the next relocation's literal")
     carry = lambda b: with_literal(b"ab\0" + b"cdefgh\0", [(f"l_.str.{b}", 0), (f"l_.str.{b + 1}", 3)],
                                    [(0, 1, 5), (4, 0, None)])
     if function_changes(carry(1), carry(2), "x.c") != ([], [], []):
@@ -1300,7 +1310,9 @@ def selftest(engine_dir):
                                                                  [(0, 0, None), (4, 0, None)]),
              with_literal(b"text" + b"CD\0", [("l_.str.1", 0), ("l_.str.2", 4)], [(0, 0, None), (4, 0, None)])),
             ("bytes an addend reaches past the first NUL", one(b"ab\0cd\0", addend=3), one(b"ab\0ce\0", addend=3)),
-            ("a renumbered label with an addend outside the literal", one(b"ab\0", addend=5),
+            ("bytes an addend reaches past the next label", across(1, b"ab\0cd\0"), across(1, b"ab\0ce\0")),
+            ("an addend that leaves the section", one(b"ab\0", addend=5), one(b"ab\0", addend=5)),
+            ("a renumbered label with an addend that leaves the section", one(b"ab\0", addend=5),
              one(b"ab\0", "l_.str.2", addend=5)),
             ("an addend carried over to the next relocation", carry(1),
              with_literal(b"ab\0" + b"cdefgh\0", [("l_.str.1", 0), ("l_.str.2", 3)], [(0, 1, 5), (4, 0, 5)]))):
