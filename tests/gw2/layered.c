@@ -3,6 +3,8 @@
  * after it equal to it. Each call flushes the window surface once, so with WINEDEBUG=+macsurface
  * the Mac driver prints its line at the 600th: "600 flushes, 400 skipped" under
  * WINE_MACDRV_SURFACE=copy,skip, "0 skipped" without it. The workflow reads that line in the log.
+ * Without the Mac driver, win32u's null driver refuses the window (window.c says why): then it
+ * says so and passes, as the matrix runs every program under the engine's driver too.
  *
  * Prints "gw2 test layered: passed" and exits 0 when every call succeeded, or names what failed
  * and exits 1. */
@@ -47,9 +49,16 @@ int main( void )
 
     cls.hInstance = GetModuleHandleW( NULL );
     if (!RegisterClassW( &cls )) return fail( "RegisterClass" );
-    if (!(hwnd = CreateWindowExW( WS_EX_LAYERED | WS_EX_TOOLWINDOW, cls.lpszClassName, L"gw2 test", WS_POPUP,
-                                  pos.x, pos.y, WIDTH, HEIGHT, NULL, NULL, cls.hInstance, NULL )))
-        return fail( "CreateWindowEx" );
+    hwnd = CreateWindowExW( WS_EX_LAYERED | WS_EX_TOOLWINDOW, cls.lpszClassName, L"gw2 test", WS_POPUP,
+                            pos.x, pos.y, WIDTH, HEIGHT, NULL, NULL, cls.hInstance, NULL );
+    if (!GetModuleHandleW( L"winemac.drv" ))
+    {
+        printf( "gw2 test layered: no Mac driver, nothing to count\n" );
+        if (hwnd) DestroyWindow( hwnd );
+        printf( "gw2 test layered: passed\n" );
+        return 0;
+    }
+    if (!hwnd) return fail( "CreateWindowEx" );
     if (!(mem = CreateCompatibleDC( NULL ))) return fail( "CreateCompatibleDC" );
     if (!(dib = CreateDIBSection( mem, &info, DIB_RGB_COLORS, (void **)&bits, NULL, 0 ))) return fail( "CreateDIBSection" );
     SelectObject( mem, dib );

@@ -178,12 +178,13 @@ static BOOL macdrv_surface_flush(struct window_surface *window_surface, const RE
         if (copy) CGDataProviderRelease(provider);
 
         macdrv_window_set_color_image(surface->window, image, cgrect_from_rect(surface_rect), cgrect_from_rect(dirty_rect));
-        CGImageRelease(image);
 
-        /* the image holds the copy as long as Cocoa does; skip keeps it to compare with */
+        /* the image holds the copy as long as Cocoa does; skip keeps it to compare with, unless
+           Cocoa got no image, so the next flush hands the frame over again */
         if (surface->shown_bits) CFRelease(surface->shown_bits);
-        surface->shown_bits = surface_skip ? copy : NULL;
-        if (copy && !surface_skip) CFRelease(copy);
+        surface->shown_bits = surface_skip && image ? copy : NULL;
+        if (copy && !surface->shown_bits) CFRelease(copy);
+        CGImageRelease(image);
         surface->shown = frame;
         surface->shown.bits = surface->shown_bits ? CFDataGetBytePtr(surface->shown_bits) : NULL;
     }

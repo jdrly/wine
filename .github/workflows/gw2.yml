@@ -450,10 +450,17 @@ jobs:
           "$RUNNER_TEMP/frames"
       # test 12: layered.exe's 600 frames, every third new, under the engine with my winemac.so and
       # the macsurface channel on. The driver's line at the 600th flush has to say 400 skipped with
-      # WINE_MACDRV_SURFACE=copy,skip, and 0 with copy and unset.
+      # WINE_MACDRV_SURFACE=copy,skip, and 0 with copy and unset. Only where the Mac driver starts,
+      # as window.exe found in the step before; otherwise it is the Mac run's (the pull request's
+      # description has the command).
       - name: The launcher's frames
         if: github.event_name == 'pull_request'
         run: |
+          if ! grep -qF 'gw2 test window: the Mac driver started' "$RUNNER_TEMP/window.txt"; then
+            echo "::warning::the Mac driver doesn't start on this runner, so test 12 needs the Mac run" |
+              tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           for mode in copy,skip copy unset; do
             want="600 flushes, 0 skipped,"
             if [[ $mode == unset ]]; then
