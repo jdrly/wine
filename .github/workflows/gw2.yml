@@ -37,8 +37,8 @@
 #     changed inputs that touched them
 #   The per-function listing with masked addresses that follows a failed byte gate only names
 #   what differs; it is not the gate and never passes or fails a build.
-#   Artifacts ntdll-mach9-<commit> and macdrv-mach9-<commit>: ntdll.so or winemac.so, VERSION,
-#   COPYING.LIB, LICENSE, kept 7 days. macdrv-mach9-<commit> also has win32u.so when the compare
+#   Artifacts ntdll-arm64-<commit> and macdrv-arm64-<commit>: ntdll.so or winemac.so, VERSION,
+#   COPYING.LIB, LICENSE, kept 7 days. macdrv-arm64-<commit> also has win32u.so when the compare
 #   lists a changed, new or removed function of it, and its VERSION then names both files. VERSION's
 #   lines "baseline: <file> <gate>", one for each file, say which gate held, and its toolchain line
 #   names the runner. Its line "switches: …" names every WINE_HEAT_* (ntdll.so), WINE_MACDRV_*
@@ -57,11 +57,12 @@
 #   smoke.exe, under the engine's ntdll.so and under mine: its tree is a merged pull request's head,
 #   which went through all of that in that pull request's run, and Publish names that run.
 # lint: actionlint (.github/actionlint.yaml names the xcode-27 label), and the Python script compiles.
-# publish: after the others are green, packs ntdll-mach9-<commit>.tar.xz and
-#   macdrv-mach9-<commit>.tar.xz and prints their sha256. For a push to gw2-on-mac it adds both to
-#   the pre-release mach9-builds, the one release this workflow makes, never marked latest, keeps
+# publish: after the others are green, packs ntdll-arm64-<commit>.tar.xz and
+#   macdrv-arm64-<commit>.tar.xz and prints their sha256. For a push to gw2-on-mac it adds both to
+#   the pre-release arm64-builds, the one release this workflow makes, never marked latest, keeps
 #   the 30 newest of each kind, and says which pull request's green run tested the same tree, or
-#   that none did.
+#   that none did. The pre-release this workflow filled before jdrly/gw2-on-mac#121 keeps the
+#   archives of earlier commits under the names they had, and gets nothing more.
 name: GW2
 
 on:
@@ -441,13 +442,13 @@ jobs:
           done
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: ntdll-mach9-${{ env.COMMIT }}
+          name: ntdll-arm64-${{ env.COMMIT }}
           path: dist/ntdll
           retention-days: 7
           if-no-files-found: error
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: macdrv-mach9-${{ env.COMMIT }}
+          name: macdrv-arm64-${{ env.COMMIT }}
           path: dist/macdrv
           retention-days: 7
           if-no-files-found: error
@@ -514,11 +515,11 @@ jobs:
           tar -xf "$RUNNER_TEMP/$f" -C toolchains/llvm-mingw --strip-components 1
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: ntdll-mach9-${{ env.COMMIT }}
+          name: ntdll-arm64-${{ env.COMMIT }}
           path: ${{ runner.temp }}/dist
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: macdrv-mach9-${{ env.COMMIT }}
+          name: macdrv-arm64-${{ env.COMMIT }}
           path: ${{ runner.temp }}/macdrv-dist
 
       # Three copies of the engine: its own, one with my ntdll.so, one with my winemac.so; a fourth
@@ -662,15 +663,15 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
-      RELEASE: mach9-builds
+      RELEASE: arm64-builds
     steps:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: ntdll-mach9-${{ env.COMMIT }}
+          name: ntdll-arm64-${{ env.COMMIT }}
           path: dist/ntdll
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: macdrv-mach9-${{ env.COMMIT }}
+          name: macdrv-arm64-${{ env.COMMIT }}
           path: dist/macdrv
       - name: Pack
         run: |
@@ -679,7 +680,7 @@ jobs:
             [[ $kind == ntdll ]] || files=(winemac.so)
             # win32u.so, when Build staged it beside winemac.so
             [[ ! -f dist/$kind/win32u.so ]] || files+=(win32u.so)
-            name="$kind-mach9-$COMMIT.tar.xz"
+            name="$kind-arm64-$COMMIT.tar.xz"
             (cd "dist/$kind" && chmod 755 "${files[@]}")
             chmod 644 "dist/$kind/VERSION" "dist/$kind/COPYING.LIB" "dist/$kind/LICENSE"
             tar --sort=name --owner=0 --group=0 --numeric-owner -C "dist/$kind" -cJf "$name" "${files[@]}" VERSION COPYING.LIB LICENSE
@@ -690,12 +691,12 @@ jobs:
         if: github.event_name == 'push' && github.ref == 'refs/heads/gw2-on-mac'
         run: |
           if ! gh release view "$RELEASE" >/dev/null 2>&1; then
-            gh release create "$RELEASE" --prerelease --latest=false --target "$COMMIT" --title "Mach9 builds of my ntdll.so and winemac.so" \
-              --notes "CI output for GW2 on Mac's arm64 line, not a release of Wine: my ntdll.so and winemac.so for Mach9 $MACH9_VERSION's engine, built and checked by .github/workflows/gw2.yml for each push to gw2-on-mac. One asset of each per commit, ntdll-mach9-<full sha>.tar.xz and macdrv-mach9-<full sha>.tar.xz; the 30 newest of each stay."
+            gh release create "$RELEASE" --prerelease --latest=false --target "$COMMIT" --title "arm64 builds of my ntdll.so, winemac.so and win32u.so" \
+              --notes "CI output for GW2 on Mac's arm64 line, not a release of Wine: my ntdll.so, winemac.so and win32u.so for Mach9 $MACH9_VERSION's engine, built and checked by .github/workflows/gw2.yml for each push to gw2-on-mac. One asset of each kind per commit, ntdll-arm64-<full sha>.tar.xz and macdrv-arm64-<full sha>.tar.xz (with win32u.so when the commit changed it); the 30 newest of each kind stay."
           fi
           id=$(gh api "repos/$GH_REPO/releases/tags/$RELEASE" -q .id)
           for kind in ntdll macdrv; do
-            name="$kind-mach9-$COMMIT.tar.xz"
+            name="$kind-arm64-$COMMIT.tar.xz"
             uploaded=0
             # grep without -q, which would end the pipe early and fail it under pipefail
             if gh release view "$RELEASE" --json assets -q '.assets[].name' | grep -xF "$name" >/dev/null; then
@@ -706,7 +707,7 @@ jobs:
             fi
             # the 30 newest assets of this kind stay
             gh api --paginate "repos/$GH_REPO/releases/$id/assets?per_page=100" -q '.[] | [.created_at, .id, .name] | @tsv' |
-              grep -P "\t$kind-mach9-[0-9a-f]{40}\\.tar\\.xz\$" | sort -r | tail -n +31 | while IFS=$'\t' read -r _ asset old; do
+              grep -P "\t$kind-arm64-[0-9a-f]{40}\\.tar\\.xz\$" | sort -r | tail -n +31 | while IFS=$'\t' read -r _ asset old; do
                 echo "deleting $old"
                 gh api -X DELETE "repos/$GH_REPO/releases/assets/$asset"
               done

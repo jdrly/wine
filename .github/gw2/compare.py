@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-# gw2 (jdrly/gw2-on-mac#40, #57): compare my ntdll.so or winemac.so with the one in Mach9's
-# engine. It reads files and runs nothing.
+# gw2 (jdrly/gw2-on-mac#40, #57, #61): compare my ntdll.so, winemac.so or win32u.so with the one in
+# Mach9's engine. It reads files and runs nothing.
 #
 #   compare.py baseline <library> <mine> <engine-unix-dir> [strict | structural]
 #   compare.py patched <library> <mine> <engine-unix-dir> <source dir> <build dir> <base file>
@@ -8,7 +8,7 @@
 #                      <checkout time> [<changed file>...]
 #   compare.py selftest <engine-unix-dir>
 #
-# <library> is ntdll.so or winemac.so (LIBRARIES), <engine-unix-dir> the engine's
+# <library> is ntdll.so, winemac.so or win32u.so (LIBRARIES), <engine-unix-dir> the engine's
 # lib/wine/aarch64-unix. Prints a Markdown report and exits 1 when a check fails. Both modes check
 # the linked file's install name, rpaths, libraries, minos and pipe2, and that it imports nothing
 # from an @rpath library that the engine's file doesn't; for ntdll.so also the seven names
