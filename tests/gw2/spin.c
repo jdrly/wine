@@ -23,16 +23,22 @@
  *   - lock on: the HIGHEST alerts thread has hits; the ABOVE_NORMAL one has hits when the lock's
  *     scope keeps priority 1, and otherwise only spin_scoped (no hit, no miss); the cs threads spun
  *   - event on: the game thread spun on its jobs' event, or is scoped out; the pulse waiter has hits
- *   - sem on: the workers spun on the semaphore, or are scoped out
+ *   - sem on: the workers spun on the semaphore, or are scoped out. With WINE_HEAT_WAKE=one,skip
+ *     too (matrix.zsh), a release during a worker's spin makes no wake call, and the worker joins
+ *     the sleeper count only after its spin: a wake lost there would leave a round's jobs undone,
+ *     and the game thread's wait for them fails after 5 s
  * A "spun" check needs one spin in a whole case, and a "hits" check one hit in thousands of
  * rounds, each of which begins with both threads running: neither depends on a thread being on a
  * core at a given moment.
  *
  * A pulse releases only a thread that is waiting when it comes (PulseEvent), and the waiter can't
  * show when its wait began, so a pulse that comes before the wait is dropped by the rules, here as
- * on Windows. The case allows that in 1% of its rounds and prints how many. The 3 ms rounds and
- * the waiter's hits under event spin show the pulses that come during a sleep and during a spin
- * being taken.
+ * on Windows. A round that times out is either that or a lost pulse, and the case can't tell
+ * which: it allows them in 1% of its rounds and prints how many, for the sweep and the 3 ms rounds
+ * apart. It is stress coverage, not proof; the proof that a pulse during a spin is kept is the
+ * argument in heat.c. The sweep runs from a quarter of the spin's time to past its end, so pulses
+ * land in the spin, at its end and in the sleep after it. The waiter's hits under event spin show
+ * pulses taken during a spin.
  *
  * Prints "gw2 test spin: passed" and exits 0, or names what failed and exits 1. */
 #include <stdio.h>
@@ -557,7 +563,7 @@ static void test_alerts(void)
 
 static HANDLE pulse_event;
 static volatile LONG pulse_armed, pulse_taken, pulse_stop;
-static LONG pulse_missed, pulse_slept_missed;
+static LONG pulse_missed, pulse_slept_missed;  /* rounds that timed out, all and of the 3 ms ones */
 static DWORD pulse_tid;
 
 static DWORD WINAPI pulse_waiter( void *arg )
@@ -602,9 +608,10 @@ static void test_pulse(void)
     pulse_stop = 1;
     join( w, 10000 );
     i--;
-    printf( "gw2 test spin: %ld pulses, %ld came before the wait, %ld of them after 3 ms\n", i, pulse_missed,
+    printf( "gw2 test spin: %ld pulses, %ld waits timed out (a pulse before the wait, or a lost one): "
+            "%ld in the sweep, %ld of the 3 ms rounds\n", i, pulse_missed, pulse_missed - pulse_slept_missed,
             pulse_slept_missed );
-    if (pulse_missed * 100 > i) FAIL( "%ld of %ld pulses missed, more than 1%%", pulse_missed, i );
+    if (pulse_missed * 100 > i) FAIL( "%ld of %ld waits timed out, more than 1%%", pulse_missed, i );
     if (i < 500) FAIL( "only %ld pulses in 3 s", i );
     CloseHandle( pulse_event );
 }
@@ -626,6 +633,9 @@ static void check_counters(void)
     show( "the game thread", game_tid, EVENT );
     show( "the pulse waiter", pulse_tid, EVENT );
     for (i = 0; i < WORKERS; i++) show( "a worker", worker_tid[i], SEM );
+    printf( "gw2 test spin: the game thread: release %lld wake_skipped %lld wake_one %lld wake_none %lld\n",
+            counter( game_tid, "release" ), counter( game_tid, "wake_skipped" ), counter( game_tid, "wake_one" ),
+            counter( game_tid, "wake_none" ) );
 
     if (spins( LOCK, THREAD_PRIORITY_HIGHEST ) && !counter( high.tid, "lspin_hit" ))
         FAIL( "the HIGHEST thread never took an alert while it spun" );

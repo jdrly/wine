@@ -17,8 +17,8 @@
 #    counting, WINE_HEAT_MSYNC_UNREG unset and set.
 # 4. (jdrly/gw2-on-mac#45) spin.exe under mine, as WINE_HEAT_EXE with WINE_HEAT_COUNT=1, with
 #    WINE_HEAT_SPIN unset and in three settings, three runs each, side by side: the app's string
-#    (lock and event at :game), sem alone at its default scope, and every kind on with a scope of
-#    its own.
+#    (lock and event at :game), sem alone at its default scope with WINE_HEAT_WAKE=one,skip (the
+#    spin against the wake skip's sleeper count), and every kind on with a scope of its own.
 # Prints each run's lines and exits 1 if any failed.
 emulate -L zsh
 setopt err_exit pipe_fail no_unset extended_glob
@@ -146,22 +146,22 @@ collect
 
 # 4. jdrly/gw2-on-mac#45
 
-# spin <name> <setting>: three runs of spin.exe with counting and WINE_HEAT_SPIN=<setting>, unset
-# if empty
+# spin <name> <setting> [<wake>]: three runs of spin.exe with counting, WINE_HEAT_SPIN=<setting>
+# (unset if empty) and WINE_HEAT_WAKE=<wake> (unset if not given)
 spin() {
-  local name=$1 v=$2 n
+  local name=$1 v=$2 w=${3:-} n
   for n in 1 2 3; do
     print -r -- "run $n"
     mkdir -p "$work/log-spin-$name-$n"
     env -u WINE_HEAT_WAKE -u WINE_HEAT_SPIN WINE_HEAT_EXE=spin.exe WINE_HEAT_COUNT=1 \
-      WINE_HEAT_LOG=$work/log-spin-$name-$n ${v:+WINE_HEAT_SPIN=$v} GW2_TEST_SECONDS=300 \
+      WINE_HEAT_LOG=$work/log-spin-$name-$n ${v:+WINE_HEAT_SPIN=$v} ${w:+WINE_HEAT_WAKE=$w} GW2_TEST_SECONDS=300 \
       "$run" "$mine" "$work/prefix-spin-$name" "$exes/spin.exe"
   done
 }
 
 side spin-off spin off ""
 side spin-app spin app "lock=20:game,event=30:game"
-side spin-sem spin sem "sem=5"
+side spin-sem spin sem "sem=5" one,skip
 side spin-scopes spin scopes "lock=20:all,event=30:not=2,sem=20:game"
 collect
 

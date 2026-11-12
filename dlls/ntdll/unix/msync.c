@@ -935,11 +935,13 @@ NTSTATUS msync_pulse_event_obj( int obj, LONG *prev_state )
     unsigned int pulse, new;
     BOOL untaken;
     LONG current;
+    unsigned long long spinners;  /* WINE_HEAT_SPIN=event, jdrly/gw2-on-mac#45 */
 
     /* if the event is signaled, nothing waits on it, and the pulse only
      * resets it */
     if (!(current = __atomic_exchange_n( &event->signaled, 0, __ATOMIC_SEQ_CST )))
     {
+        spinners = heat_pulse_begin( obj );
         pulse = __atomic_load_n( &event->pulse, __ATOMIC_SEQ_CST );
         do
         {
@@ -948,8 +950,8 @@ NTSTATUS msync_pulse_event_obj( int obj, LONG *prev_state )
             if (untaken) new++;
         } while (!__atomic_compare_exchange_n( &event->pulse, &pulse, new, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST ));
 
-        /* WINE_HEAT_SPIN=event (jdrly/gw2-on-mac#45): a spinner takes it too */
-        if (!signal_all( (void *)event, obj, 0 ) && untaken && !heat_pulse_spinners( obj ))
+        /* WINE_HEAT_SPIN=event: a spinner takes it too */
+        if (!signal_all( (void *)event, obj, 0 ) && untaken && !heat_pulse_spinners( obj, spinners ))
         {
             pulse = __atomic_load_n( &event->pulse, __ATOMIC_SEQ_CST );
             while ((pulse & PULSE_UNTAKEN) &&
@@ -1054,7 +1056,7 @@ static int heat_spin_objs( const int *objs, void **objs_shm, unsigned int *pulse
         if (!left) return -1;
         if (left < budget / 100) budget = left * 100;
     }
-    if (kind == HEAT_SPIN_KIND_EVENT && !heat_spin_register( objs, count, 1 )) return -1;
+    if (kind == HEAT_SPIN_KIND_EVENT && !heat_spin_register( objs, count, TRUE )) return -1;
 
     start = heat_now();
     for (turn = 1; ret == -1; turn++)
@@ -1079,7 +1081,7 @@ static int heat_spin_objs( const int *objs, void **objs_shm, unsigned int *pulse
         heat_pause();
         if (!(turn & 15) && heat_now() - start >= budget) break;
     }
-    if (kind == HEAT_SPIN_KIND_EVENT) heat_spin_register( objs, count, -1 );
+    if (kind == HEAT_SPIN_KIND_EVENT) heat_spin_register( objs, count, FALSE );
     heat_spin_done( kind, ret != -1, start );
     return ret;
 }

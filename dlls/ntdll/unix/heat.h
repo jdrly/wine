@@ -221,14 +221,21 @@ extern __thread LONG heat_priority;
 extern unsigned long long heat_spin_budget( enum heat_spin_kind kind );
 extern void heat_spin_done( enum heat_spin_kind kind, BOOL hit, unsigned long long start );
 extern BOOL heat_spin_lock_slow( LONG *futex, const ULONGLONG *end );
-extern BOOL heat_spin_register( const int *objs, int count, int by );
-extern BOOL heat_pulse_spinners_slow( unsigned int obj );
+extern BOOL heat_spin_register( const int *objs, int count, BOOL begin );
+extern unsigned long long heat_pulse_begin_slow( unsigned int obj );
+extern BOOL heat_pulse_spinners_slow( unsigned int obj, unsigned long long before );
+
+/* msync_pulse_event_obj, before it changes the pulse word */
+static inline unsigned long long heat_pulse_begin( unsigned int obj )
+{
+    return (heat_mode & HEAT_SPIN_EVENT) ? heat_pulse_begin_slow( obj ) : 0;
+}
 
 /* msync_pulse_event_obj, after the wake call found no sleeper: TRUE to keep the pulse for a
- * thread that may be spinning on the event */
-static inline BOOL heat_pulse_spinners( unsigned int obj )
+ * thread that was spinning on the event while it pulsed. <before> is heat_pulse_begin()'s. */
+static inline BOOL heat_pulse_spinners( unsigned int obj, unsigned long long before )
 {
-    return (heat_mode & HEAT_SPIN_EVENT) && heat_pulse_spinners_slow( obj );
+    return (heat_mode & HEAT_SPIN_EVENT) && heat_pulse_spinners_slow( obj, before );
 }
 
 /* NtSetInformationThread: the base priority this thread just set for itself */

@@ -623,19 +623,28 @@ void heat_evpool_forget_slow( HANDLE handle )
  *
  * A pulse during an event spin. msync takes back an auto-reset event's pulse when its wake call
  * found no thread asleep (msync_pulse_event_obj), so a spinner that saw the pulse could find it
- * gone when it tries to take it, and sleep: a lost pulse. So a spinner counts itself on each of
- * its events' slots in heat_spinners for the length of the spin, and the pulse keeps its pulse
- * when the count isn't 0; the spinner takes it once it sees the pulse word change, or in its
- * sleep's own check of the pulse word if the spin ended first. The same pattern as the wake skip:
+ * gone when it tries to take it, and sleep: a lost pulse. So a spinner registers on each of its
+ * events' slots in heat_spinners for the length of the spin, and a pulse made while a spinner was
+ * registered keeps its pulse. The spinner takes it inside the spin when it sees the pulse word
+ * change, or after the spin in its sleep's own check of the pulse word.
  *
- *   spinner (heat_spin_register)              pulser (msync_pulse_event_obj)
- *   add 1 to heat_spinners[obj]               change the pulse word (CAS), then the wake call
- *   full barrier                              full barrier (heat_pulse_spinners)
- *   read the pulse word, spinning             read heat_spinners[obj]
+ * A slot's word holds the number of spinners in its low half and, in its high half, how many
+ * spins ever registered there. The pulser reads the word before its CAS on the pulse word and
+ * again after its wake call, and keeps the pulse when a spinner was registered at the first read
+ * or the second read differs from the first. Every access on both sides is seq_cst, so they fall
+ * in one order. If the pulse's CAS comes between a spinner's registration and its end: either the
+ * registration came before the first read, which then sees the spinner, since its end comes after
+ * the CAS and so after that read; or it came after the first read, and the second read, after the
+ * CAS, sees the new count of registrations. A spin that ends by its budget therefore can't let a
+ * pulse made during it be taken back, whether its end or the pulser's second read comes first.
+ * The spinner puts a full barrier after it registers, before it reads a pulse word, and after it
+ * ends, before its sleep reads one, so that it sees every pulse that came before those points.
  *
- * If the pulser reads 0, the spinner's first read of the word comes after the pulse, so the
- * pulse came before the spin began: between the wait reading the pulse word and its sleep, where
- * msync's own waiter misses a pulse in the same way.
+ * What stays open is msync's own: a pulse made after the wait read its pulse word but before the
+ * spin registered, or after the spin ended but before the thread sleeps, is taken back as it is
+ * from msync's waiter in the same place. A pulse kept for a spinner that then returns through
+ * another object, or for one registered after the pulse, stays untaken, as when a woken waiter
+ * of a wait-any takes another object.
  */
 #define HEAT_ALERT_SPIN 4
 #define HEAT_SPIN_MISSES 4
@@ -646,7 +655,10 @@ static unsigned int heat_spin_not[HEAT_SPIN_KINDS];       /* priorities left out
 static unsigned int heat_spin_pause = 32;
 static const char * const heat_spin_names[HEAT_SPIN_KINDS] = { "lock", "event", "sem" };
 __thread LONG heat_priority;
-static int *heat_spinners;  /* per msync slot, the threads of this process in an event spin on it */
+/* per msync slot: the spinners of this process on it, and in the high half its registrations */
+static unsigned long long *heat_spinners;
+#define HEAT_SPINNERS_ONE  0x100000001ull  /* one more spinner, one more registration */
+#define HEAT_SPINNERS_MASK 0xffffffffull
 static __thread unsigned int heat_spin_misses[HEAT_SPIN_KINDS];  /* this thread's misses in a row */
 static __thread unsigned int heat_spin_skip[HEAT_SPIN_KINDS];    /* its waits left without a spin */
 
@@ -750,23 +762,36 @@ void heat_spin_done( enum heat_spin_kind kind, BOOL hit, unsigned long long star
     }
 }
 
-/* an event spin on <objs> begins (by 1) or ends (by -1); FALSE when it may not begin */
-BOOL heat_spin_register( const int *objs, int count, int by )
+/* an event spin on <objs> begins (TRUE) or ends (FALSE); FALSE when it may not begin */
+BOOL heat_spin_register( const int *objs, int count, BOOL begin )
 {
     int i;
 
     for (i = 0; i < count; i++) if ((unsigned int)objs[i] >= HEAT_SLOTS) return FALSE;
-    for (i = 0; i < count; i++) __atomic_fetch_add( &heat_spinners[objs[i]], by, __ATOMIC_RELAXED );
-    if (by > 0) __atomic_thread_fence( __ATOMIC_SEQ_CST );  /* before the spin reads a pulse word */
+    for (i = 0; i < count; i++)
+    {
+        if (begin) __atomic_fetch_add( &heat_spinners[objs[i]], HEAT_SPINNERS_ONE, __ATOMIC_SEQ_CST );
+        else __atomic_fetch_sub( &heat_spinners[objs[i]], 1, __ATOMIC_SEQ_CST );
+    }
+    /* after registering, before reading a pulse word; after ending, before the sleep reads one */
+    __atomic_thread_fence( __ATOMIC_SEQ_CST );
     return TRUE;
 }
 
-/* the pulse changed the pulse word: TRUE when a thread of this process may be spinning on <obj> */
-BOOL heat_pulse_spinners_slow( unsigned int obj )
+/* msync_pulse_event_obj, before it changes the pulse word: the slot's word to hand to
+ * heat_pulse_spinners_slow() */
+unsigned long long heat_pulse_begin_slow( unsigned int obj )
+{
+    return obj < HEAT_SLOTS ? __atomic_load_n( &heat_spinners[obj], __ATOMIC_SEQ_CST ) : 0;
+}
+
+/* after the pulse and its wake call: TRUE when a spinner was registered on <obj> at <before>, or
+ * one registered since */
+BOOL heat_pulse_spinners_slow( unsigned int obj, unsigned long long before )
 {
     if (obj >= HEAT_SLOTS) return FALSE;
     __atomic_thread_fence( __ATOMIC_SEQ_CST );
-    return __atomic_load_n( &heat_spinners[obj], __ATOMIC_RELAXED ) != 0;
+    return (before & HEAT_SPINNERS_MASK) || __atomic_load_n( &heat_spinners[obj], __ATOMIC_SEQ_CST ) != before;
 }
 
 BOOL heat_spin_lock_slow( LONG *futex, const ULONGLONG *end )
@@ -864,7 +889,7 @@ void heat_init(void)
         mode &= ~(HEAT_EVPOOL | HEAT_EVPOOL_MASK);
     if (mode & HEAT_EVPOOL) mach_timebase_info( &heat_timebase );  /* heat_now() */
     /* jdrly/gw2-on-mac#45 */
-    if ((mode & HEAT_SPIN_EVENT) && !(heat_spinners = heat_map( HEAT_SLOTS * sizeof(int) )))
+    if ((mode & HEAT_SPIN_EVENT) && !(heat_spinners = heat_map( HEAT_SLOTS * sizeof(*heat_spinners) )))
         mode &= ~HEAT_SPIN_EVENT;
     if (mode & HEAT_COUNT)
     {
