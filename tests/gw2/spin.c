@@ -227,10 +227,20 @@ static void read_log(void)
     DWORD t0 = GetTickCount();
 
     if (!GetEnvironmentVariableA( "WINE_HEAT_LOG", dir, sizeof(dir) )) FAIL( "WINE_HEAT_LOG isn't set" );
-    before = load_log( dir );
+    /* A complete dump read now was written before this read, so the next one starts after it,
+     * which is after the cases. Without one (none yet, or a read during the write), the dump
+     * that completes next may have begun before the cases ended: take the one after that. */
+    if ((before = load_log( dir )) < 0)
+    {
+        while ((before = load_log( dir )) < 0)
+        {
+            if (GetTickCount() - t0 > 12000) FAIL( "no counters in %s after 12 s", dir );
+            Sleep( 100 );
+        }
+    }
     while ((seconds = load_log( dir )) <= before)
     {
-        if (GetTickCount() - t0 > 12000) FAIL( "no new counters in %s after 12 s", dir );
+        if (GetTickCount() - t0 > 17000) FAIL( "no new counters in %s", dir );
         Sleep( 100 );
     }
     printf( "gw2 test spin: the counters of %.1f s, after the cases' end at %.1f s or later\n", seconds, before );
