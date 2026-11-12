@@ -22,6 +22,7 @@
 # 5. (jdrly/gw2-on-mac#43) prof.exe under mine as WINE_HEAT_EXE with WINE_HEAT_PROF=1 and
 #    FEX_PROFILESTATS=1, once, 8 seconds. Block 2 runs it for a second with the sampler unset and set
 #    for another program, where no file of the sampler's may appear either.
+# 6. (jdrly/gw2-on-mac#60) requests three runs under mine with counting, beside block 5.
 # Prints each run's lines and exits 1 if any failed.
 emulate -L zsh
 setopt err_exit pipe_fail no_unset extended_glob
@@ -179,6 +180,23 @@ mkdir -p "$work/log-prof"
 side prof env -u WINE_HEAT_COUNT -u WINE_HEAT_WAKE -u WINE_HEAT_EVPOOL -u WINE_HEAT_SPIN WINE_HEAT_EXE=prof.exe \
   WINE_HEAT_PROF=1 FEX_PROFILESTATS=1 WINE_HEAT_LOG=$work/log-prof GW2_TEST_SECONDS=300 \
   "$run" "$mine" "$work/prefix-prof" "$exes/prof.exe"
+
+# 6. jdrly/gw2-on-mac#60: requests three runs under mine with counting, each with a log folder of
+# its own, so each finds its own heat-requests-<pid>.log, beside block 5. Block 2 ran it without
+# counting.
+requests() {
+  local n log
+  for n in 1 2 3; do
+    print -r -- "run $n"
+    log=$work/log-requests-$n
+    mkdir -p "$log"
+    env -u WINE_HEAT_WAKE -u WINE_HEAT_MSYNC_UNREG -u WINE_HEAT_EVPOOL -u WINE_HEAT_SPIN -u WINE_HEAT_PROF \
+      WINE_HEAT_EXE=requests.exe WINE_HEAT_COUNT=1 WINE_HEAT_LOG=$log \
+      GW2_TEST_SECONDS=300 "$run" "$mine" "$work/prefix-requests" "$exes/requests.exe"
+  done
+}
+
+side requests requests
 collect
 
 (( failed == 0 ))
