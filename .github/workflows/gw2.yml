@@ -1,6 +1,6 @@
-# gw2 (jdrly/gw2-on-mac#40, #57, #124): my ntdll.so and winemac.so for Mach9 $MACH9_VERSION's
-# engine, built on GitHub's runner the way Mach9's CI built the engine's, and checked against the
-# engine's files. Nothing here runs on my Mac.
+# gw2 (jdrly/gw2-on-mac#40, #57, #61, #124): my ntdll.so, winemac.so and win32u.so for Mach9
+# $MACH9_VERSION's engine, built on GitHub's runner the way Mach9's CI built the engine's, and
+# checked against the engine's files. Nothing here runs on my Mac.
 #
 # The toolchain and the gate (jdrly/gw2-on-mac#124). The build and test jobs run on $RUNNER with
 # Xcode $XCODE_VERSION. With the engine's own, $ENGINE_RUNNER and Xcode $ENGINE_XCODE_VERSION, my
@@ -19,10 +19,9 @@
 # The flags stay the engine's: its unix side is built at -O0.
 #
 # build: one Wine tree configured as Mach9 configures its own (.github/gw2/wine.zsh), in the
-#   engine's paths, with Xcode $XCODE_VERSION, macOS $MACOSX_DEPLOYMENT_TARGET and llvm-mingw
-#   $LLVM_MINGW_VERSION. Each build makes dlls/ntdll/ntdll.so and dlls/winemac.drv/winemac.so
-#   (and win32u.so on the way, which winemac.so links with and nothing checks or ships). In the
-#   tree, one after the other:
+#   engine's paths, with Xcode $XCODE_VERSION, macOS $MACOSX_DEPLOYMENT_TARGET, llvm-mingw
+#   $LLVM_MINGW_VERSION and Homebrew's FreeType headers. Each build makes dlls/ntdll/ntdll.so,
+#   dlls/winemac.drv/winemac.so and dlls/win32u/win32u.so. In the tree, one after the other:
 #   - $BASE_COMMIT, the commit the engine was built from, each file compared with the engine's by
 #     .github/gw2/compare.py baseline with the gate above. The strict one wants the same exports
 #     and imports, and the header, every section, the load commands and the link edit data byte
@@ -31,34 +30,39 @@
 #     Objective-C method of the Mac driver changed: the strict gate has to fail on the file and name
 #     the function. It holds the broken file to the engine's with the strict gate, and to my base
 #     build of the engine's commit with the structural one, so it runs whatever the toolchain.
-#   - this commit, every object of both files compiled again, compared by compare.py patched: each
+#   - this commit, every object of the three files compiled again, compared by compare.py patched: each
 #     object none of whose inputs (makedep's rule for it: its .c or .m and every header it
 #     includes) the commit changes is the base build's, by its compile command, code, data,
 #     relocations and symbols, and the summary lists the other objects' changed functions and the
 #     changed inputs that touched them
 #   The per-function listing with masked addresses that follows a failed byte gate only names
 #   what differs; it is not the gate and never passes or fails a build.
-#   Artifacts ntdll-mach9-<commit> and macdrv-mach9-<commit>: ntdll.so or winemac.so, VERSION,
-#   COPYING.LIB, LICENSE, kept 7 days. VERSION's line "baseline: <file> <gate>" says which gate
-#   held, and its toolchain line names the runner. Its line "switches: …" names every WINE_HEAT_*
-#   (ntdll.so) or WINE_MACDRV_* (winemac.so) variable the file reads, from the sources, and the
-#   step fails unless those are exactly that kind of string in the file (.github/gw2/switches.zsh).
+#   Artifacts ntdll-arm64-<commit> and macdrv-arm64-<commit>: ntdll.so or winemac.so, VERSION,
+#   COPYING.LIB, LICENSE, kept 7 days. macdrv-arm64-<commit> also has win32u.so when the compare
+#   lists a changed, new or removed function of it, and its VERSION then names both files. VERSION's
+#   lines "baseline: <file> <gate>", one for each file, say which gate held, and its toolchain line
+#   names the runner. Its line "switches: …" names every WINE_HEAT_* (ntdll.so), WINE_MACDRV_*
+#   (winemac.so) and WINE_WIN32U_* (win32u.so) variable the files read, from the sources, and the
+#   step fails unless those are exactly that kind of string in each file (.github/gw2/switches.zsh).
 # tests: tests/gw2/*.c built for Win64 x86_64 with llvm-mingw. On a pull request, window.exe under
 #   the engine with my winemac.so says whether the Mac driver starts on the runner;
 #   tests/gw2/native/frames.c and mouse_scale.c, built natively, test the driver's frame decision
 #   and its mouse speed factor (WINE_MACDRV_MOUSE_SCALE); layered.exe under the engine with my
 #   winemac.so counts the frames WINE_MACDRV_SURFACE skips, where the driver starts; and
 #   tests/gw2/matrix.zsh runs them all under the engine from the release tarball: with its own
-#   ntdll.so, and with mine in each WINE_HEAT_WAKE mode, with no WINE_HEAT_* variable and
-#   with them set for another program. A push to gw2-on-mac runs only the prefix boot and
+#   ntdll.so, and with mine in each WINE_HEAT_WAKE mode, with no WINE_HEAT_* variable and with
+#   them set for another program, and, when the build ships my win32u.so, SetCursor and the empty
+#   PeekMessage's yield under the engine's win32u.so and mine, with WINE_WIN32U_SETCURSOR and
+#   WINE_WIN32U_PEEK_YIELD unset and set. A push to gw2-on-mac runs only the prefix boot and
 #   smoke.exe, under the engine's ntdll.so and under mine: its tree is a merged pull request's head,
 #   which went through all of that in that pull request's run, and Publish names that run.
 # lint: actionlint (.github/actionlint.yaml names the xcode-27 label), and the Python script compiles.
-# publish: after the others are green, packs ntdll-mach9-<commit>.tar.xz and
-#   macdrv-mach9-<commit>.tar.xz and prints their sha256. For a push to gw2-on-mac it adds both to
-#   the pre-release mach9-builds, the one release this workflow makes, never marked latest, keeps
+# publish: after the others are green, packs ntdll-arm64-<commit>.tar.xz and
+#   macdrv-arm64-<commit>.tar.xz and prints their sha256. For a push to gw2-on-mac it adds both to
+#   the pre-release arm64-builds, the one release this workflow makes, never marked latest, keeps
 #   the 30 newest of each kind, and says which pull request's green run tested the same tree, or
-#   that none did.
+#   that none did. The pre-release this workflow filled before jdrly/gw2-on-mac#121 keeps the
+#   archives of earlier commits under the names they had, and gets nothing more.
 name: GW2
 
 on:
@@ -106,7 +110,7 @@ defaults:
 
 jobs:
   build:
-    name: Build ntdll.so and winemac.so
+    name: Build ntdll.so, winemac.so and win32u.so
     runs-on: *runner
     timeout-minutes: 60
     env:
@@ -218,7 +222,12 @@ jobs:
 
       # Mach9's pins/brew-formulae, as far as Wine's configure looks for them
       - name: Install Homebrew's bison, freetype, gnutls and SDL
-        run: brew install bison freetype gnutls sdl2-compat pkgconf
+        run: |
+          brew install bison freetype gnutls sdl2-compat pkgconf
+          # win32u.so's freetype.c is compiled against these headers; Mach9's release run had 2.15.0
+          FREETYPE_VERSION=$(brew list --versions freetype | cut -d' ' -f2)
+          echo "FREETYPE_VERSION=$FREETYPE_VERSION" >>"$GITHUB_ENV"
+          echo "Homebrew's FreeType: $FREETYPE_VERSION" | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Configure
         run: |
@@ -233,11 +242,15 @@ jobs:
           "$GW2/wine.zsh" build | tee "$RUNNER_TEMP/base-build.log"
           cp -p "$BUILD/dlls/ntdll/ntdll.so" "$RUNNER_TEMP/baseline-ntdll.so"
           cp -p "$BUILD/dlls/winemac.drv/winemac.so" "$RUNNER_TEMP/baseline-winemac.so"
+          cp -p "$BUILD/dlls/win32u/win32u.so" "$RUNNER_TEMP/baseline-win32u.so"
           # what the patched build's objects are compared with, with the times its link saw. A PE
-          # object of the Mac driver is in a subdirectory, so the glob takes the unix ones only.
-          mkdir -p "$RUNNER_TEMP/base-objects/ntdll" "$RUNNER_TEMP/base-objects/winemac"
+          # object of the Mac driver or win32u is in a subdirectory of its own (aarch64-windows/), so
+          # the globs take the unix ones only; win32u's dibdrv/ holds unix objects.
+          mkdir -p "$RUNNER_TEMP/base-objects/ntdll" "$RUNNER_TEMP/base-objects/winemac" "$RUNNER_TEMP/base-objects/win32u/dibdrv"
           cp -p "$BUILD"/dlls/ntdll/unix/*.o "$RUNNER_TEMP/base-objects/ntdll/"
           cp -p "$BUILD"/dlls/winemac.drv/*.o "$RUNNER_TEMP/base-objects/winemac/"
+          cp -p "$BUILD"/dlls/win32u/*.o "$RUNNER_TEMP/base-objects/win32u/"
+          cp -p "$BUILD"/dlls/win32u/dibdrv/*.o "$RUNNER_TEMP/base-objects/win32u/dibdrv/"
           # makedep's rules: each object's inputs, which decide whether a commit touched it
           cp "$BUILD/Makefile" "$RUNNER_TEMP/base-Makefile"
           # config.h and the generated headers, which reach an object besides its source
@@ -257,7 +270,7 @@ jobs:
         id: baseline
         run: |
           status=0
-          for lib in ntdll winemac; do
+          for lib in ntdll winemac win32u; do
             python3 -I "$GW2/compare.py" baseline "$lib.so" "$RUNNER_TEMP/baseline-$lib.so" toolchains/engine/lib/wine/aarch64-unix \
               "$GATE" >"$RUNNER_TEMP/baseline-$lib.md" || status=1
             tee -a "$GITHUB_STEP_SUMMARY" <"$RUNNER_TEMP/baseline-$lib.md"
@@ -267,10 +280,11 @@ jobs:
       - name: Disassemble what differs
         if: failure() && steps.baseline.outcome == 'failure'
         run: |
-          for lib in ntdll winemac; do
+          for lib in ntdll winemac win32u; do
             engine=toolchains/engine/lib/wine/aarch64-unix/$lib.so
+            # (a source in a subdirectory is named with it: dibdrv/bitblt.c)
             # shellcheck disable=SC2016 # the backticks are the report's
-            sed -n 's/^  - `[A-Za-z0-9_]*\.[cm]: \(.*\)`$/\1/p' "$RUNNER_TEMP/baseline-$lib.md" | sed -n 1,5p | while IFS= read -r f; do
+            sed -n 's/^  - `[A-Za-z0-9_/]*\.[cm]: \(.*\)`$/\1/p' "$RUNNER_TEMP/baseline-$lib.md" | sed -n 1,5p | while IFS= read -r f; do
               f=${f% (only in one)}
               # a C function's symbol has an underscore before its name, an Objective-C method's doesn't
               case $f in [-+]\[*) sym=$f ;; *) sym=_$f ;; esac
@@ -286,6 +300,7 @@ jobs:
           path: |
             ${{ runner.temp }}/baseline-ntdll.so
             ${{ runner.temp }}/baseline-winemac.so
+            ${{ runner.temp }}/baseline-win32u.so
           retention-days: 7
 
       # One line of NtYieldExecution changed: a second sched_yield call, which also moves every
@@ -335,7 +350,7 @@ jobs:
           "$GW2/wine.zsh" checkout "$COMMIT"
           # every object compiled again, so none compared is one the base build left behind
           date +%s >"$RUNNER_TEMP/checkout-time"
-          rm -f "$BUILD"/dlls/ntdll/unix/*.o "$BUILD"/dlls/winemac.drv/*.o
+          rm -f "$BUILD"/dlls/ntdll/unix/*.o "$BUILD"/dlls/winemac.drv/*.o "$BUILD"/dlls/win32u/*.o "$BUILD"/dlls/win32u/dibdrv/*.o
           "$GW2/wine.zsh" build | tee "$RUNNER_TEMP/head-build.log"
           (cd "$BUILD" && find include -type f -print0 | sort -z | xargs -0 shasum -a 256) >"$RUNNER_TEMP/head-headers.txt"
           diff "$RUNNER_TEMP/base-headers.txt" "$RUNNER_TEMP/head-headers.txt" ||
@@ -347,9 +362,12 @@ jobs:
           touched=()
           while IFS= read -r f; do touched+=("$f"); done < <(git -C "$SRC" diff --name-only "$BASE_COMMIT" "$COMMIT")
           status=0
-          for lib in ntdll winemac; do
-            file=$BUILD/dlls/ntdll/ntdll.so
-            [[ $lib == ntdll ]] || file=$BUILD/dlls/winemac.drv/winemac.so
+          for lib in ntdll winemac win32u; do
+            case $lib in
+              ntdll) file=$BUILD/dlls/ntdll/ntdll.so ;;
+              winemac) file=$BUILD/dlls/winemac.drv/winemac.so ;;
+              win32u) file=$BUILD/dlls/win32u/win32u.so ;;
+            esac
             python3 -I "$GW2/compare.py" patched "$lib.so" "$file" toolchains/engine/lib/wine/aarch64-unix \
               "$SRC" "$BUILD" "$RUNNER_TEMP/baseline-$lib.so" "$RUNNER_TEMP/base-objects/$lib" \
               "$RUNNER_TEMP/base-build.log" "$RUNNER_TEMP/head-build.log" "$RUNNER_TEMP/base-Makefile" "$BUILD/Makefile" \
@@ -365,52 +383,72 @@ jobs:
           path: |
             ${{ env.BUILD }}/dlls/ntdll/ntdll.so
             ${{ env.BUILD }}/dlls/winemac.drv/winemac.so
+            ${{ env.BUILD }}/dlls/win32u/win32u.so
           retention-days: 7
 
-      # dist/ntdll and dist/macdrv: each file with its own VERSION and the licences
+      # dist/ntdll and dist/macdrv: each kind's files with one VERSION and the licences. win32u.so
+      # goes with winemac.so (the app's macdrv) when the compare lists a function of it this commit
+      # changed, added or removed; otherwise the engine's own stays in place.
       - name: Stage
         run: |
           mkdir -p dist/ntdll dist/macdrv
           cp "$BUILD/dlls/ntdll/ntdll.so" "$SRC/COPYING.LIB" "$SRC/LICENSE" dist/ntdll/
           cp "$BUILD/dlls/winemac.drv/winemac.so" "$SRC/COPYING.LIB" "$SRC/LICENSE" dist/macdrv/
-          for lib in ntdll winemac; do
-            dir=dist/ntdll
-            prefix=WINE_HEAT
-            sources=("$SRC"/dlls/ntdll/unix/*.[ch])
-            if [[ $lib != ntdll ]]; then
-              dir=dist/macdrv
-              prefix=WINE_MACDRV
-              sources=("$SRC"/dlls/winemac.drv/*.[chm])
-            fi
-            # "switches: …": the variables with the prefix that this commit's sources read, which
-            # have to be the file's strings with it (the app reads ntdll.so's line, jdrly/gw2-on-mac#80)
-            switches=$("$GW2/switches.zsh" "$prefix" "$dir/$lib.so" "${sources[@]}") || exit 1
+          macdrv=(winemac)
+          if grep -qE '^- (changed|new|removed): [1-9]' "$RUNNER_TEMP/compare-win32u.md"; then
+            cp "$BUILD/dlls/win32u/win32u.so" dist/macdrv/
+            macdrv+=(win32u)
+          fi
+          for kind in ntdll macdrv; do
+            dir=dist/$kind
+            libs=(ntdll)
+            [[ $kind == ntdll ]] || libs=("${macdrv[@]}")
+            # "switches: …": the variables of each file's prefix that this commit's sources read,
+            # which have to be the file's strings with it (the app reads ntdll.so's line,
+            # jdrly/gw2-on-mac#80)
+            switches=()
+            for lib in "${libs[@]}"; do
+              case $lib in
+                ntdll) prefix=WINE_HEAT; sources=("$SRC"/dlls/ntdll/unix/*.[ch]) ;;
+                winemac) prefix=WINE_MACDRV; sources=("$SRC"/dlls/winemac.drv/*.[chm]) ;;
+                win32u) prefix=WINE_WIN32U; sources=("$SRC"/dlls/win32u/*.[ch] "$SRC"/dlls/win32u/dibdrv/*.[ch]) ;;
+              esac
+              line=$("$GW2/switches.zsh" "$prefix" "$dir/$lib.so" "${sources[@]}") || exit 1
+              # shellcheck disable=SC2206 # the names have no spaces, and the line is split on purpose
+              switches+=(${line#switches: })
+            done
             {
               strings -a dist/ntdll/ntdll.so | grep -oE 'wine-[0-9]+\.[0-9]+-[0-9]+-g[0-9a-f]+'
               echo "commit: $COMMIT"
-              echo "$switches"
-              grep '^baseline: ' "$RUNNER_TEMP/baseline-$lib.md"
+              echo "switches: ${switches[*]}"
+              for lib in "${libs[@]}"; do
+                grep '^baseline: ' "$RUNNER_TEMP/baseline-$lib.md"
+              done
               echo "base: $BASE_COMMIT ($(git -C "$SRC" describe "$BASE_COMMIT"))"
               echo "engine: Mach9 $MACH9_VERSION (wine-$MACH9_VERSION-macos-arm64.tar.xz, sha256 $MACH9_SHA256)"
-              echo "toolchain: $RUNNER ($ImageOS $ImageVersion), Xcode $(xcodebuild -version | sed -n 's/^Xcode //p') (macOS SDK $(xcrun -sdk macosx --show-sdk-version)), $(clang --version | sed -n 1p), llvm-mingw $LLVM_MINGW_VERSION, macOS $MACOSX_DEPLOYMENT_TARGET"
-              echo "$lib.so: sha256 $(shasum -a 256 "$dir/$lib.so" | cut -d' ' -f1)"
-              echo
-              cat "$RUNNER_TEMP/baseline-$lib.md"
-              echo
-              cat "$RUNNER_TEMP/compare-$lib.md"
+              echo "toolchain: $RUNNER ($ImageOS $ImageVersion), Xcode $(xcodebuild -version | sed -n 's/^Xcode //p') (macOS SDK $(xcrun -sdk macosx --show-sdk-version)), $(clang --version | sed -n 1p), llvm-mingw $LLVM_MINGW_VERSION, macOS $MACOSX_DEPLOYMENT_TARGET, Homebrew's FreeType $FREETYPE_VERSION"
+              for lib in "${libs[@]}"; do
+                echo "$lib.so: sha256 $(shasum -a 256 "$dir/$lib.so" | cut -d' ' -f1)"
+              done
+              for lib in "${libs[@]}"; do
+                echo
+                cat "$RUNNER_TEMP/baseline-$lib.md"
+                echo
+                cat "$RUNNER_TEMP/compare-$lib.md"
+              done
             } >"$dir/VERSION"
             cat "$dir/VERSION"
             ls -l "$dir"
           done
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: ntdll-mach9-${{ env.COMMIT }}
+          name: ntdll-arm64-${{ env.COMMIT }}
           path: dist/ntdll
           retention-days: 7
           if-no-files-found: error
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: macdrv-mach9-${{ env.COMMIT }}
+          name: macdrv-arm64-${{ env.COMMIT }}
           path: dist/macdrv
           retention-days: 7
           if-no-files-found: error
@@ -477,14 +515,15 @@ jobs:
           tar -xf "$RUNNER_TEMP/$f" -C toolchains/llvm-mingw --strip-components 1
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: ntdll-mach9-${{ env.COMMIT }}
+          name: ntdll-arm64-${{ env.COMMIT }}
           path: ${{ runner.temp }}/dist
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: macdrv-mach9-${{ env.COMMIT }}
+          name: macdrv-arm64-${{ env.COMMIT }}
           path: ${{ runner.temp }}/macdrv-dist
 
-      # Three copies of the engine: its own, one with my ntdll.so, one with my winemac.so. APFS
+      # Three copies of the engine: its own, one with my ntdll.so, one with my winemac.so; a fourth
+      # with my ntdll.so (for its request counts) and my win32u.so when the build ships one. APFS
       # clones, so the copies are free.
       - name: Unpack the engine
         run: |
@@ -498,6 +537,11 @@ jobs:
           xattr -drs com.apple.quarantine "$RUNNER_TEMP/engine" "$RUNNER_TEMP/mine" "$RUNNER_TEMP/macdrv"
           shasum -a 256 "$RUNNER_TEMP"/{engine,mine}/wine/lib/wine/aarch64-unix/ntdll.so \
             "$RUNNER_TEMP"/{engine,macdrv}/wine/lib/wine/aarch64-unix/winemac.so
+          if [[ -f $RUNNER_TEMP/macdrv-dist/win32u.so ]]; then
+            cp -Rc "$RUNNER_TEMP/mine" "$RUNNER_TEMP/win32u"
+            install -m 755 "$RUNNER_TEMP/macdrv-dist/win32u.so" "$RUNNER_TEMP/win32u/wine/lib/wine/aarch64-unix/win32u.so"
+            shasum -a 256 "$RUNNER_TEMP"/{engine,win32u}/wine/lib/wine/aarch64-unix/win32u.so
+          fi
           "$RUNNER_TEMP/mine/wine/bin/wine" --version
       - name: Build the test programs
         run: |
@@ -559,7 +603,10 @@ jobs:
           done
       - name: Run them
         if: github.event_name == 'pull_request'
-        run: tests/gw2/matrix.zsh "$RUNNER_TEMP/engine/wine" "$RUNNER_TEMP/mine/wine" "$RUNNER_TEMP/tests" "$RUNNER_TEMP/matrix"
+        run: |
+          win32u=()
+          [[ -d $RUNNER_TEMP/win32u ]] && win32u=("$RUNNER_TEMP/win32u/wine")
+          tests/gw2/matrix.zsh "$RUNNER_TEMP/engine/wine" "$RUNNER_TEMP/mine/wine" "$RUNNER_TEMP/tests" "$RUNNER_TEMP/matrix" "${win32u[@]}"
       # A push runs the tree of a pull request's head that was green and up to date with gw2-on-mac,
       # so the matrix ran on this tree in that pull request's run (Publish names it). Here only that
       # the engine boots a prefix and runs a program with its ntdll.so and with mine, side by side.
@@ -616,25 +663,27 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
-      RELEASE: mach9-builds
+      RELEASE: arm64-builds
     steps:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: ntdll-mach9-${{ env.COMMIT }}
+          name: ntdll-arm64-${{ env.COMMIT }}
           path: dist/ntdll
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: macdrv-mach9-${{ env.COMMIT }}
+          name: macdrv-arm64-${{ env.COMMIT }}
           path: dist/macdrv
       - name: Pack
         run: |
           for kind in ntdll macdrv; do
-            file=ntdll.so
-            [[ $kind == ntdll ]] || file=winemac.so
-            name="$kind-mach9-$COMMIT.tar.xz"
-            chmod 755 "dist/$kind/$file"
+            files=(ntdll.so)
+            [[ $kind == ntdll ]] || files=(winemac.so)
+            # win32u.so, when Build staged it beside winemac.so
+            [[ ! -f dist/$kind/win32u.so ]] || files+=(win32u.so)
+            name="$kind-arm64-$COMMIT.tar.xz"
+            (cd "dist/$kind" && chmod 755 "${files[@]}")
             chmod 644 "dist/$kind/VERSION" "dist/$kind/COPYING.LIB" "dist/$kind/LICENSE"
-            tar --sort=name --owner=0 --group=0 --numeric-owner -C "dist/$kind" -cJf "$name" "$file" VERSION COPYING.LIB LICENSE
+            tar --sort=name --owner=0 --group=0 --numeric-owner -C "dist/$kind" -cJf "$name" "${files[@]}" VERSION COPYING.LIB LICENSE
             tar -tvJf "$name"
             sha256sum "$name" | tee -a "$GITHUB_STEP_SUMMARY"
           done
@@ -642,12 +691,12 @@ jobs:
         if: github.event_name == 'push' && github.ref == 'refs/heads/gw2-on-mac'
         run: |
           if ! gh release view "$RELEASE" >/dev/null 2>&1; then
-            gh release create "$RELEASE" --prerelease --latest=false --target "$COMMIT" --title "Mach9 builds of my ntdll.so and winemac.so" \
-              --notes "CI output for GW2 on Mac's arm64 line, not a release of Wine: my ntdll.so and winemac.so for Mach9 $MACH9_VERSION's engine, built and checked by .github/workflows/gw2.yml for each push to gw2-on-mac. One asset of each per commit, ntdll-mach9-<full sha>.tar.xz and macdrv-mach9-<full sha>.tar.xz; the 30 newest of each stay."
+            gh release create "$RELEASE" --prerelease --latest=false --target "$COMMIT" --title "arm64 builds of my ntdll.so, winemac.so and win32u.so" \
+              --notes "CI output for GW2 on Mac's arm64 line, not a release of Wine: my ntdll.so, winemac.so and win32u.so for Mach9 $MACH9_VERSION's engine, built and checked by .github/workflows/gw2.yml for each push to gw2-on-mac. One asset of each kind per commit, ntdll-arm64-<full sha>.tar.xz and macdrv-arm64-<full sha>.tar.xz (with win32u.so when the commit changed it); the 30 newest of each kind stay."
           fi
           id=$(gh api "repos/$GH_REPO/releases/tags/$RELEASE" -q .id)
           for kind in ntdll macdrv; do
-            name="$kind-mach9-$COMMIT.tar.xz"
+            name="$kind-arm64-$COMMIT.tar.xz"
             uploaded=0
             # grep without -q, which would end the pipe early and fail it under pipefail
             if gh release view "$RELEASE" --json assets -q '.assets[].name' | grep -xF "$name" >/dev/null; then
@@ -658,7 +707,7 @@ jobs:
             fi
             # the 30 newest assets of this kind stay
             gh api --paginate "repos/$GH_REPO/releases/$id/assets?per_page=100" -q '.[] | [.created_at, .id, .name] | @tsv' |
-              grep -P "\t$kind-mach9-[0-9a-f]{40}\\.tar\\.xz\$" | sort -r | tail -n +31 | while IFS=$'\t' read -r _ asset old; do
+              grep -P "\t$kind-arm64-[0-9a-f]{40}\\.tar\\.xz\$" | sort -r | tail -n +31 | while IFS=$'\t' read -r _ asset old; do
                 echo "deleting $old"
                 gh api -X DELETE "repos/$GH_REPO/releases/assets/$asset"
               done
