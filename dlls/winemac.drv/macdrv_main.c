@@ -26,6 +26,7 @@
 
 #include "config.h"
 #include "macdrv.h"
+#include "surface_frame.h"
 
 #include <Security/AuthSession.h>
 #include <IOKit/pwr_mgt/IOPMLib.h>
@@ -51,6 +52,8 @@ bool use_confinement_cursor_clipping = true;
 bool cursor_clipping_locks_windows = true;
 bool use_precise_scrolling = true;
 bool use_gcmouse = false;  /* from compatdb, see setup_options */
+bool surface_copy = false;  /* WINE_MACDRV_SURFACE, see setup_options */
+bool surface_skip = false;
 /* Where the input method window goes, in client coordinates of the focus
    window, for a program that never places it; unset by default. */
 bool ime_fallback_position_set = false;
@@ -274,6 +277,7 @@ static void setup_options(void)
 {
     static const WCHAR macdriverW[] = {'\\','M','a','c',' ','D','r','i','v','e','r',0};
     WCHAR buffer[MAX_PATH + 16], *p, *appname;
+    const char *surface_mode;
     HKEY hkey, appkey = 0;
     DWORD len;
 
@@ -357,6 +361,16 @@ static void setup_options(void)
     use_gcmouse = ntdll_get_compat_gcmouse() > 0;
     TRACE("GameController mice %s (compatdb gcmouse %d)\n", use_gcmouse ? "on" : "off",
           ntdll_get_compat_gcmouse());
+
+    /* GW2 on Mac: copy gives Cocoa a copy of each frame of a window surface,
+       copy,skip also leaves out a frame equal to the last one handed over
+       (surface.c). A compatdb rule's env= sets it before any PE code runs. */
+    if ((surface_mode = getenv("WINE_MACDRV_SURFACE")))
+    {
+        surface_skip = !strcmp(surface_mode, "copy,skip");
+        surface_copy = surface_skip || !strcmp(surface_mode, "copy");
+        if (!surface_copy) ERR("WINE_MACDRV_SURFACE=%s is neither copy nor copy,skip\n", debugstr_a(surface_mode));
+    }
 
     /* "x,y" */
     if (!get_config_key(hkey, appkey, "IMEFallbackPosition", buffer, sizeof(buffer)))
