@@ -629,7 +629,9 @@ jobs:
       # counts) and my winemac.so, unset, with WINE_MACDRV_CALL=quiet, with WINE_MACDRV_CLIP=changes
       # and with all four switches. clip.exe checks the counts itself. Here the driver's
       # "unchanged, not sent" lines: at least 995 of the 1,000 calls with CLIP=changes, none without.
-      # Only where the Mac driver starts.
+      # With CLIP=changes the driver also warns "not applied" for a clip the main thread refused,
+      # which says that this runner can't confine the cursor, not that the record is wrong. Only
+      # where the Mac driver starts.
       - name: The cursor clip and the call's byte
         if: github.event_name == 'pull_request'
         run: |
@@ -652,13 +654,18 @@ jobs:
             WINE_HEAT_EXE=clip.exe WINE_HEAT_COUNT=1 WINE_HEAT_LOG=$log GW2_TEST_WINEDEBUG=-all,+cursor GW2_TEST_SECONDS=300 \
               tests/gw2/run.zsh "$RUNNER_TEMP/both/wine" "$prefix" "$RUNNER_TEMP/tests/clip.exe" >"$RUNNER_TEMP/clip-$mode.txt" || status=1
             skipped=$(tr -d '\r' <"$prefix/clip.log" | grep -c 'macdrv_ClipCursor unchanged, not sent' || true)
+            refused=$(tr -d '\r' <"$prefix/clip.log" | grep -c 'macdrv_ClipCursor .* not applied' || true)
             {
               echo "### clip.exe, $mode"
               echo '```'
               cat "$RUNNER_TEMP/clip-$mode.txt"
-              echo "the driver's \"unchanged, not sent\": $skipped"
+              echo "the driver's \"unchanged, not sent\": $skipped, \"not applied\": $refused"
               echo '```'
             } | tee -a "$GITHUB_STEP_SUMMARY"
+            if (( refused )); then
+              echo "::error::$mode: the main thread refused $refused clips: this runner doesn't confine the cursor, so CLIP=changes can't be tested here and needs the Mac run"
+              exit 1
+            fi
             (( status == 0 )) || { echo "::error::clip.exe failed with $mode"; exit 1; }
             if [[ $mode == changes || $mode == all ]]; then
               (( skipped >= 995 )) || { echo "::error::$mode: $skipped calls not sent, expected at least 995"; exit 1; }

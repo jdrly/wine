@@ -8,7 +8,8 @@
  *    never meets it.
  * 2. WINE_MACDRV_CALL=quiet: event_pipe_settle after a synchronous call. With no event queued the
  *    pipe ends empty, from the call's one byte, from 100 left over, and from none. With one queued
- *    it keeps what it has: the call's one byte, or that and the event's own.
+ *    it ends with one byte: from the call's, from that and the event's own, and from none, when
+ *    the wait loop read both.
  *
  * Prints "gw2 test pipe: passed" and exits 0, or names each case that failed and exits 1. */
 #include <fcntl.h>
@@ -87,7 +88,7 @@ static void settle_case( const char *what, int count, int pending, int want )
 
     make_pipe( fds );
     if (count) put( fds[1], count );
-    event_pipe_settle( fds[0], pending );
+    event_pipe_settle( fds, pending );
     if ((left = event_pipe_bytes( fds[0] )) != want)
     {
         printf( "gw2 test pipe: %s: %d bytes left, not %d\n", what, left, want );
@@ -109,7 +110,8 @@ int main( void )
     settle_case( "100 bytes, no event", 100, 0, 0 );
     settle_case( "no byte, no event", 0, 0, 0 );
     settle_case( "the call's byte, one event", 1, 1, 1 );
-    settle_case( "the call's byte and the event's, one event", 2, 1, 2 );
+    settle_case( "the call's byte and the event's, one event", 2, 1, 1 );
+    settle_case( "no byte, one event", 0, 1, 1 );
 
     if (failed)
     {

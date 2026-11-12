@@ -10,9 +10,10 @@
  * thread: the first starts the clipping, the second finds it. With CALL=quiet no byte stays.
  *
  * The thread first releases a semaphore RELEASES times, so that it is the game thread by the
- * session report's rule (the most releases). It shows a window, makes it the foreground window and
- * pumps its messages. Without the Mac driver it says so and passes. With WINE_HEAT_COUNT=1 and
- * WINE_HEAT_EXE=clip.exe, each part in a 5 s block of the dumper's of its own:
+ * session report's rule (the most releases). It shows a window, makes it the foreground window
+ * (up to 5 s, else a failure of its own when counting) and pumps its messages. Without the Mac
+ * driver it says so and passes. With WINE_HEAT_COUNT=1 and WINE_HEAT_EXE=clip.exe, each part in a
+ * 5 s block of the dumper's of its own:
  * A. CALLS rounds of a 1 ms sleep and pumping its messages until none is left;
  * B. the same with ClipCursor(the window's client area) before each pump.
  * It reads this thread's two blocks in heat-requests-*.log. B must have CALLS set_cursor requests
@@ -22,7 +23,8 @@
  * the bytes the switches remove. Without counting it makes the calls once and passes: the matrix
  * runs every program.
  *
- * The workflow counts the driver's "unchanged, not sent" lines (channel cursor) besides.
+ * The workflow counts the driver's "unchanged, not sent" lines (channel cursor) besides, and its
+ * "not applied" warnings, which say that the runner refused the clip itself.
  *
  * Prints "gw2 test clip: passed" and exits 0, or names what failed and exits 1. */
 #include <stdio.h>
@@ -180,13 +182,20 @@ int main( void )
     }
     if (!hwnd) FAIL( "CreateWindowEx: error %lu", GetLastError() );
     ShowWindow( hwnd, SW_SHOWNORMAL );
-    SetForegroundWindow( hwnd );
-    for (start = GetTickCount(); GetTickCount() - start < 500; Sleep( 10 )) pump();
+    /* up to 5 s for the window to become the foreground window, asking again about every 500 ms */
+    for (start = GetTickCount(), i = 0; GetForegroundWindow() != hwnd && GetTickCount() - start < 5000; Sleep( 10 ), i++)
+    {
+        if (i % 50 == 0) SetForegroundWindow( hwnd );
+        pump();
+    }
+    for (start = GetTickCount(); GetTickCount() - start < 250; Sleep( 10 )) pump();
     if (!GetClientRect( hwnd, &clip )) FAIL( "GetClientRect: error %lu", GetLastError() );
     MapWindowPoints( hwnd, NULL, (POINT *)&clip, 2 );
     printf( "gw2 test clip: the window is %sthe foreground window, clipping to %ld,%ld-%ld,%ld\n",
             GetForegroundWindow() == hwnd ? "" : "not ", clip.left, clip.top, clip.right, clip.bottom );
-    if (counting && GetForegroundWindow() != hwnd) FAIL( "the clip messages would go to another thread" );
+    if (counting && GetForegroundWindow() != hwnd)
+        FAIL( "the runner didn't make the window the foreground window in 5 s, so the clip messages would "
+              "go to another thread" );
 
     if (!counting)
     {

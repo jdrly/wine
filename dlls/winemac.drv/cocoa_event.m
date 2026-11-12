@@ -579,9 +579,17 @@ void OnMainThread(dispatch_block_t block)
         }
         @finally
         {
+            /* GW2 on Mac (WINE_MACDRV_CALL=quiet): the caller takes the queue's lock once it sees
+               finished and before it settles the pipe, so this byte is in the pipe by then */
+            if (queue && call_quiet)
+                [queue->eventsLock lock];
             finished = TRUE;
             if (queue)
+            {
                 [queue signalEventAvailable];
+                if (call_quiet)
+                    [queue->eventsLock unlock];
+            }
             else
             {
                 dispatch_semaphore_signal(semaphore);
@@ -612,12 +620,12 @@ void OnMainThread(dispatch_block_t block)
 
         /* GW2 on Mac (WINE_MACDRV_CALL=quiet): the main thread's byte for this call is still in
            the pipe. The server sees the pipe readable, so the thread's next pump would drain
-           nothing and send one more set_queue_mask. Read it back when no event waits. With one,
-           the byte stays: it may stand in for that event's own, which the loop above read. */
+           nothing and send one more set_queue_mask. Leave one byte if an event waits, else none.
+           The loop above may have read the bytes of events it left queued, this call's own too. */
         if (call_quiet)
         {
             [queue->eventsLock lock];
-            event_pipe_settle(queue->fds[0], [queue->events count] != 0);
+            event_pipe_settle(queue->fds, [queue->events count] != 0);
             [queue->eventsLock unlock];
         }
     }

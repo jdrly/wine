@@ -709,6 +709,7 @@ BOOL macdrv_ClipCursor(const RECT *clip, BOOL reset)
 
     if (clip_changes)
     {
+        if (!ret) WARN("%s not applied\n", wine_dbgstr_cgrect(rect));
         pthread_mutex_lock(&clip_mutex);
         clip_applied = ret;
         clip_applied_rect = rect;

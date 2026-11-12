@@ -7,8 +7,8 @@
  *   main thread only when they differ from what that surface last sent (window.c).
  * - WINE_MACDRV_CLIP=changes: ClipCursor doesn't call the main thread for the rectangle it applied
  *   last, while nothing has changed the clipping since (mouse.c).
- * - WINE_MACDRV_CALL=quiet: a synchronous call to the main thread takes the byte it left in the
- *   caller's event pipe back out when the caller's queue holds no event (cocoa_event.m).
+ * - WINE_MACDRV_CALL=quiet: after a synchronous call to the main thread, the caller's event pipe
+ *   holds one byte if its queue holds an event, else none (cocoa_event.m).
  * - WINE_MACDRV_DRAIN=fionread: ProcessEvents asks the event pipe for its byte count instead of
  *   polling it (event.c).
  * The pipe functions have no Wine or Cocoa type, so tests/gw2/native/pipe.c builds them natively.
@@ -53,17 +53,20 @@ static inline int event_pipe_bytes(int fd)
     return ioctl(fd, FIONREAD, &count) == -1 ? -1 : count;
 }
 
-/* After a synchronous call: with no event <pending> in the queue, read every byte out of the pipe's
-   non-blocking read end <fd>; with one, leave the pipe as it is. The caller holds the queue's lock,
-   so an event posted meanwhile writes its own byte after this. */
-static inline void event_pipe_settle(int fd, bool pending)
+/* After a synchronous call: leave one byte in the non-blocking pipe <fds> if an event is <pending>
+   in the queue, else none. The caller holds the queue's lock, so an event posted meanwhile writes
+   its own byte after this. */
+static inline void event_pipe_settle(const int fds[2], bool pending)
 {
     char buf[64];
     ssize_t rc;
 
-    if (pending) return;
-    do rc = read(fd, buf, sizeof(buf));
+    do rc = read(fds[0], buf, sizeof(buf));
     while (rc == (ssize_t)sizeof(buf) || (rc < 0 && errno == EINTR));
+    if (!pending) return;
+    buf[0] = 1;
+    do rc = write(fds[1], buf, 1);
+    while (rc < 0 && errno == EINTR);
 }
 
 #endif /* __WINE_MACDRV_COCOA_CALLS_H */
