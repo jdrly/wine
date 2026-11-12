@@ -1013,30 +1013,9 @@ BOOL heat_prof_init( const char *dir )
         if (n == 6 && !strncmp( p, "render", 6 )) heat_prof_want |= 1 << 1;
         else if (n == 6 && !strncmp( p, "worker", 6 )) heat_prof_want |= 1 << 2;
     }
-    /* jdrly/gw2-on-mac#111: <32 hex digits>:<age>:<SizeOfImage>, else ignored */
-    if ((p = getenv( "WINE_HEAT_PROF_FEX" )) && strspn( p, "0123456789abcdefABCDEF" ) == 32 && p[32] == ':')
-    {
-        unsigned char guid[16];
-        unsigned long age, image;
-        char hex[3] = { 0 }, *end;
-
-        for (k = 0; k < 16; k++)
-        {
-            memcpy( hex, p + 2 * k, 2 );
-            guid[k] = strtoul( hex, NULL, 16 );
-        }
-        age = strtoul( p + 33, &end, 0 );
-        if (end != p + 33 && *end == ':' && end[1])
-        {
-            image = strtoul( end + 1, &end, 0 );
-            if (!*end && image && image <= 0xffffffff && age <= 0xffffffff)
-            {
-                memcpy( heat_prof_fex_guid, guid, 16 );
-                heat_prof_fex_age = age;
-                heat_prof_fex_size = image;
-            }
-        }
-    }
+    /* jdrly/gw2-on-mac#111: heatfex.h has the form; a value not in it names no FEX */
+    if ((p = getenv( "WINE_HEAT_PROF_FEX" )))
+        heat_fex_parse_id( p, heat_prof_fex_guid, &heat_prof_fex_age, &heat_prof_fex_size );
     rings = mmap( NULL, HEAT_PROF_TARGETS * HEAT_PROF_RING * sizeof(*rings), PROT_READ | PROT_WRITE,
                   MAP_PRIVATE | MAP_ANON, -1, 0 );
     if (rings == MAP_FAILED) return FALSE;

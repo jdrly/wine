@@ -186,6 +186,47 @@ int main( void )
     if (prev[HEAT_FEX_FIELDS_112 - 1] != 1000 + HEAT_FEX_STATS_DC_TIME)
         expect( "a short buffer still takes the values", "not taken", "taken" );
 
+    /* WINE_HEAT_PROF_FEX as the app writes it from my FEX's VERSION (the build of 2026-11-12), and
+     * the engine's own id in the same form: the GUID's bytes in file order, as the sampler compares */
+    {
+        static const unsigned char mine[16] = { 0xf7, 0x98, 0xdb, 0xfa, 0xa1, 0x1b, 0x3b, 0xc4,
+                                                0x4c, 0x4c, 0x44, 0x20, 0x50, 0x44, 0x42, 0x2e };
+        static const unsigned char engine[16] = { 0x65, 0x6e, 0xe1, 0xa2, 0x70, 0x27, 0x23, 0x3b,
+                                                  0x4c, 0x4c, 0x44, 0x20, 0x50, 0x44, 0x42, 0x2e };
+        static const char * const bad[] =
+        {
+            "", "f798dbfaa11b3bc44c4c44205044422:1:0x426000",     /* 31 digits */
+            "f798dbfaa11b3bc44c4c44205044422e0:1:0x426000",       /* 33 */
+            "f798dbfaa11b3bc44c4c44205044422g:1:0x426000",        /* not hex */
+            "f798dbfaa11b3bc44c4c44205044422e", "f798dbfaa11b3bc44c4c44205044422e:1",
+            "f798dbfaa11b3bc44c4c44205044422e:1:", "f798dbfaa11b3bc44c4c44205044422e::0x426000",
+            "f798dbfaa11b3bc44c4c44205044422e:-1:0x426000", "f798dbfaa11b3bc44c4c44205044422e:0x1:0x426000",
+            "f798dbfaa11b3bc44c4c44205044422e:1:0x426000 ", "f798dbfaa11b3bc44c4c44205044422e:1:0",
+            "f798dbfaa11b3bc44c4c44205044422e:1:-0x426000", "f798dbfaa11b3bc44c4c44205044422e:1:0x100000000",
+            "f798dbfaa11b3bc44c4c44205044422e 1 0x426000", "f798dbfaa11b3bc44c4c44205044422e:1: 0x426000",
+            "f798dbfaa11b3bc44c4c44205044422e:1:+0x426000", "f798dbfaa11b3bc44c4c44205044422e: 1:0x426000",
+        };
+        unsigned char guid[16];
+        unsigned int age, image;
+
+        if (!heat_fex_parse_id( "f798dbfaa11b3bc44c4c44205044422e:1:0x426000", guid, &age, &image ) ||
+            memcmp( guid, mine, 16 ) || age != 1 || image != 0x426000)
+            expect( "WINE_HEAT_PROF_FEX, my FEX's VERSION", "not read as f798dbfa... age 1 0x426000", "read" );
+        if (!heat_fex_parse_id( "656EE1A27027233B4C4C44205044422E:1:4349952", guid, &age, &image ) ||
+            memcmp( guid, engine, 16 ) || age != 1 || image != 0x426000)
+            expect( "WINE_HEAT_PROF_FEX, upper case and a decimal size", "not read", "read" );
+        for (i = 0; i < sizeof(bad) / sizeof(bad[0]); i++)
+        {
+            memset( guid, 0xaa, 16 );
+            age = image = 7;
+            if (heat_fex_parse_id( bad[i], guid, &age, &image ) || guid[0] != 0xaa || age != 7 || image != 7)
+            {
+                printf( "gw2 test fexstats: WINE_HEAT_PROF_FEX=\"%s\" was taken, or half of it\n", bad[i] );
+                failed++;
+            }
+        }
+    }
+
     if (failed) return 1;
     printf( "gw2 test fexstats: passed\n" );
     return 0;

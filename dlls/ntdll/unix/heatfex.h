@@ -24,6 +24,7 @@
 
 #include <stddef.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* FEX_PROFILESTATS=1: the shared memory object fex-<pid>-stats
@@ -165,6 +166,34 @@ static inline int heat_fex_line( char *buf, int size, const unsigned char *base,
         break;
     }
     return len < size ? len : size - 1;
+}
+
+/* WINE_HEAT_PROF_FEX (jdrly/gw2-on-mac#111): "<GUID>:<age>:<SizeOfImage>", as my FEX's VERSION
+ * gives them on its line "libarm64ecfex.dll: build id <GUID> age <age>, SizeOfImage <size>": the
+ * CodeView record's 16 GUID bytes as 32 hex digits in file order, the age in decimal, SizeOfImage
+ * in hex with 0x (decimal works too). TRUE and the three values if <s> is exactly that; FALSE and
+ * nothing written otherwise. */
+static inline int heat_fex_parse_id( const char *s, unsigned char guid[16], unsigned int *age, unsigned int *size )
+{
+    unsigned char g[16];
+    unsigned long a, n;
+    char hex[3] = { 0 }, *end;
+    int i;
+
+    if (strspn( s, "0123456789abcdefABCDEF" ) != 32 || s[32] != ':' || !(s[33] >= '0' && s[33] <= '9')) return 0;
+    for (i = 0; i < 16; i++)
+    {
+        memcpy( hex, s + 2 * i, 2 );
+        g[i] = strtoul( hex, NULL, 16 );
+    }
+    a = strtoul( s + 33, &end, 10 );
+    if (*end != ':' || !(end[1] >= '0' && end[1] <= '9')) return 0;
+    n = strtoul( end + 1, &end, 0 );
+    if (*end || !n || a > 0xffffffff || n > 0xffffffff) return 0;
+    memcpy( guid, g, 16 );
+    *age = a;
+    *size = n;
+    return 1;
 }
 
 #endif /* __NTDLL_UNIX_HEATFEX_H */
