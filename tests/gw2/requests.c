@@ -10,8 +10,10 @@
  *    a get_message request whose reply names the message.
  * 3. MsgWaitForMultipleObjectsEx with no handle and no timeout, 100 times, the mask alternating
  *    between QS_KEY and QS_MOUSEBUTTON, so that each call sends set_queue_mask.
- * None of it needs a window or the Mac driver: the server's set_cursor needs only the thread's
- * queue, and SetCursor's event check after it is the null driver's until a window loads a driver.
+ * None of it needs a window: the server's set_cursor needs only the thread's queue. CreateCursor
+ * loads the display driver (CreateCompatibleDC), so the program prints whether the Mac driver
+ * started; with the null driver it passes all the same. It never calls GetCursor, which sends a
+ * set_cursor request of its own once the thread has set a cursor.
  *
  * With WINE_HEAT_COUNT=1 and WINE_HEAT_EXE=requests.exe it starts right after the dumper's first
  * block, so the calls fall in one 5 s block, then waits for the next and adds up this thread's
@@ -77,6 +79,13 @@ static BOOL find_log( char *path, size_t size )
     snprintf( path, size, "Z:%s/%s", dir, fd.cFileName );
     FindClose( find );
     return TRUE;
+}
+
+static DWORD log_size( const char *path )
+{
+    WIN32_FILE_ATTRIBUTE_DATA data;
+    if (!GetFileAttributesExA( path, GetFileExInfoStandard, &data )) FAIL( "can't read %s: error %lu", path, GetLastError() );
+    return data.nFileSizeLow;
 }
 
 /* the number after " <name> " in <line>, or 0 */
@@ -159,7 +168,7 @@ int main(void)
     HANDLE sem;
     BOOL counting = env_is( "WINE_HEAT_COUNT", "1" ) && env_is( "WINE_HEAT_EXE", "requests.exe" );
     char path[MAX_PATH * 2];
-    DWORD start;
+    DWORD start, size;
     MSG msg;
     int i, k;
 
@@ -184,7 +193,8 @@ int main(void)
         for (i = 0; i < 2; i++) prev = set_cursor( b, prev );
         for (i = 0; i < A_RUN; i++) prev = set_cursor( a, prev );
     }
-    if (GetCursor() != a) FAIL( "GetCursor returned %p, not %p", GetCursor(), a );
+    printf( "gw2 test requests: the Mac driver %s\n",
+            GetModuleHandleW( L"winemac.drv" ) ? "started" : "didn't start here, the null driver's calls" );
 
     /* 2 */
     for (i = 0; i < POSTS; i++)
@@ -203,7 +213,9 @@ int main(void)
 
     if (counting)
     {
-        Sleep( 6000 );  /* the next block, 5 s after the first */
+        /* a block written after the calls, at most 5 s on */
+        for (size = log_size( path ), start = GetTickCount(); log_size( path ) == size; Sleep( 20 ))
+            if (GetTickCount() - start > 15000) FAIL( "no block in 15 s after the calls" );
         check_log();
     }
     printf( "gw2 test requests: passed\n" );
