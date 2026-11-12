@@ -172,21 +172,29 @@ class MachO:
 
     @functools.cached_property
     def fixups(self):
-        """address -> what dyld writes there, from LC_DYLD_CHAINED_FIXUPS: ("rebase", target) or
-        ("bind", imported name, addend). Only the 64-bit formats a dylib for arm64 has
-        (DYLD_CHAINED_PTR_64 and _64_OFFSET, whose target is the address in an image based at 0)."""
+        """address -> what dyld writes there, from LC_DYLD_CHAINED_FIXUPS: ("rebase", target, high8)
+        or ("bind", imported name, addend). Only the 64-bit pointer formats a dylib for arm64 has
+        (DYLD_CHAINED_PTR_64 and _64_OFFSET, whose target is the address in an image based at 0),
+        with any of the three import formats (dyld's mach-o/fixup-chains.h)."""
         out, d = {}, self.data
         cmd = next(((off, size) for c, off, size in self.commands if c == 0x80000034), None)
         if not cmd:
             return out
         base = struct.unpack_from("<I", d, cmd[0] + 8)[0]
         _, starts, imports, symbols, nimports, imports_format, _ = struct.unpack_from("<7I", d, base)
-        names = []
+        names = []  # each import's name and addend
         for i in range(nimports):
-            if imports_format != 1:  # DYLD_CHAINED_IMPORT; the addend formats name by index
-                names.append(f"import {i}")
-                continue
-            names.append(cstr(d, base + symbols + (struct.unpack_from("<I", d, base + imports + 4 * i)[0] >> 9)))
+            if imports_format == 1:  # DYLD_CHAINED_IMPORT
+                name_off, addend = struct.unpack_from("<I", d, base + imports + 4 * i)[0] >> 9, 0
+            elif imports_format == 2:  # DYLD_CHAINED_IMPORT_ADDEND
+                word, addend = struct.unpack_from("<Ii", d, base + imports + 8 * i)
+                name_off = word >> 9
+            elif imports_format == 3:  # DYLD_CHAINED_IMPORT_ADDEND64
+                word, addend = struct.unpack_from("<QQ", d, base + imports + 16 * i)
+                name_off = word >> 32
+            else:
+                raise SystemExit(f"{self.path}: chained import format {imports_format}, which compare.py doesn't read")
+            names.append((cstr(d, base + symbols + name_off), addend))
         nsegs = struct.unpack_from("<I", d, base + starts)[0]
         for k in range(nsegs):
             info = struct.unpack_from("<I", d, base + starts + 4 + 4 * k)[0]
@@ -206,10 +214,10 @@ class MachO:
                     v = struct.unpack_from("<Q", d, seg["fileoff"] + addr - seg["vmaddr"])[0]
                     if v >> 63:
                         ordinal = v & 0xffffff
-                        out[addr] = ("bind", names[ordinal] if ordinal < len(names) else f"import {ordinal}",
-                                     (v >> 24) & 0xff)
+                        name, addend = names[ordinal] if ordinal < len(names) else (f"import {ordinal}", 0)
+                        out[addr] = ("bind", name, addend + ((v >> 24) & 0xff))
                     else:
-                        out[addr] = ("rebase", v & ((1 << 36) - 1))
+                        out[addr] = ("rebase", v & ((1 << 36) - 1), (v >> 36) & 0xff)
                     step = (v >> 51) & 0xfff
                     if not step:
                         break
@@ -1301,6 +1309,14 @@ def selftest(engine_dir):
         i = export_index(m, "macdrv_functions")
         sym_set(m, i, v=m.syms[i][4] + 8)
 
+    def table_high8(m):  # bit 36 of the table's first pointer, its rebase's high8, set
+        i = export_index(m, "macdrv_functions")
+        a = m.syms[i][4]
+        sec = next(sec for sec in m.sections if sec["addr"] <= a < sec["addr"] + sec["size"])
+        data = bytearray(m.data)
+        data[sec["offset"] + a - sec["addr"] + 4] ^= 0x10
+        m.data = bytes(data)
+
     def export_index(m, name):  # the symbol table entry of an export
         return next(i for i, (n, t, _, _, _) in enumerate(m.syms)
                     if n == "_" + name and not t & N_STAB and t & N_EXT and t & N_TYPE == N_SECT)
@@ -1382,6 +1398,8 @@ def selftest(engine_dir):
         failed.append(f"structural gate: two sections of a segment in another order, {failures} failed, not in the report")
     if not structural(table_moved, "winemac.so")[0]:
         failed.append("structural gate: winemac.so's data export macdrv_functions 8 bytes on passed")
+    if not structural(table_high8, "winemac.so")[0]:
+        failed.append("structural gate: another high8 in a pointer of macdrv_functions passed")
     failures, line, strict, out = structural(data_bytes)
     if failures or "other sections whose bytes differ: `__DATA,__data`" not in out:
         failed.append(f"structural gate: other bytes in __DATA,__data, {failures} failed, not in the report")
@@ -1585,7 +1603,7 @@ def data_contents(m, s, addr):
     while a < end:
         f = fixups.get(a)
         if f and a + 8 <= end:
-            h.update(f"[{name(f[1]) if f[0] == 'rebase' else f'{f[1]}+{f[2]}'}]".encode())
+            h.update(f"[{f'{name(f[1])} high8 {f[2]}' if f[0] == 'rebase' else f'{f[1]}+{f[2]}'}]".encode())
             a += 8
         else:
             h.update(m.data[s["offset"] + a - s["addr"]:s["offset"] + a - s["addr"] + 1])
