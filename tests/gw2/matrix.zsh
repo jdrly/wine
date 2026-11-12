@@ -15,6 +15,10 @@
 # 3. (jdrly/gw2-on-mac#44) mutexall three runs under the engine's ntdll.so, each of which has to
 #    fail on the bug it shows, and three under mine, which have to pass. unreg under mine with
 #    counting, WINE_HEAT_MSYNC_UNREG unset and set.
+# 4. (jdrly/gw2-on-mac#45) spin.exe under mine, as WINE_HEAT_EXE with WINE_HEAT_COUNT=1, with
+#    WINE_HEAT_SPIN unset and in three settings, three runs each, side by side: the app's string
+#    (lock and event at :game), sem alone at its default scope, and every kind on with a scope of
+#    its own.
 # Prints each run's lines and exits 1 if any failed.
 emulate -L zsh
 setopt err_exit pipe_fail no_unset extended_glob
@@ -69,7 +73,7 @@ quiet() {
   shift 3
   [[ $wine == "$engine" ]] && programs=(${programs:#*/(${(~j:|:)engine_bugs}).exe})
   mkdir -p "$log"
-  env -u WINE_HEAT_COUNT -u WINE_HEAT_WAKE -u WINE_HEAT_EVPOOL -u WINE_HEAT_EXE -u WINE_HEAT_LOG "$@" GW2_TEST_PRODUCER_SECONDS=20 GW2_TEST_SECONDS=300 \
+  env -u WINE_HEAT_COUNT -u WINE_HEAT_WAKE -u WINE_HEAT_EVPOOL -u WINE_HEAT_SPIN -u WINE_HEAT_EXE -u WINE_HEAT_LOG "$@" GW2_TEST_PRODUCER_SECONDS=20 GW2_TEST_SECONDS=300 \
     "$run" "$wine" "$work/prefix-$name" $programs
   left=("$log"/*(N) /tmp/heat-*.log(N))
   if (( ${#left} )); then
@@ -104,7 +108,7 @@ collect
 side engine quiet engine "$engine" "$work/log-engine" WINE_HEAT_LOG=$work/log-engine
 side unset quiet unset "$mine" "$work/log-unset"
 side other quiet other "$mine" "$work/log-other" WINE_HEAT_EXE=other.exe WINE_HEAT_COUNT=1 \
-  WINE_HEAT_WAKE=one,skip WINE_HEAT_EVPOOL=1 WINE_HEAT_LOG=$work/log-other
+  WINE_HEAT_WAKE=one,skip WINE_HEAT_EVPOOL=1 WINE_HEAT_SPIN=lock=20,event=30,sem=5 WINE_HEAT_LOG=$work/log-other
 collect
 
 # 3. jdrly/gw2-on-mac#44
@@ -138,6 +142,27 @@ side mutexall-mine env -u WINE_HEAT_COUNT -u WINE_HEAT_WAKE -u WINE_HEAT_EXE -u 
   "$run" "$mine" "$work/prefix-mutexall-mine" "$exes/mutexall.exe" "$exes/mutexall.exe" "$exes/mutexall.exe"
 side unreg-unset unreg ""
 side unreg-1 unreg 1
+collect
+
+# 4. jdrly/gw2-on-mac#45
+
+# spin <name> <setting>: three runs of spin.exe with counting and WINE_HEAT_SPIN=<setting>, unset
+# if empty
+spin() {
+  local name=$1 v=$2 n
+  for n in 1 2 3; do
+    print -r -- "run $n"
+    mkdir -p "$work/log-spin-$name-$n"
+    env -u WINE_HEAT_WAKE -u WINE_HEAT_SPIN WINE_HEAT_EXE=spin.exe WINE_HEAT_COUNT=1 \
+      WINE_HEAT_LOG=$work/log-spin-$name-$n ${v:+WINE_HEAT_SPIN=$v} GW2_TEST_SECONDS=300 \
+      "$run" "$mine" "$work/prefix-spin-$name" "$exes/spin.exe"
+  done
+}
+
+side spin-off spin off ""
+side spin-app spin app "lock=20:game,event=30:game"
+side spin-sem spin sem "sem=5"
+side spin-scopes spin scopes "lock=20:all,event=30:not=2,sem=20:game"
 collect
 
 (( failed == 0 ))

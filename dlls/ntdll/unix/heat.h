@@ -19,16 +19,39 @@
 #ifndef __NTDLL_UNIX_HEAT_H
 #define __NTDLL_UNIX_HEAT_H
 
-#define HEAT_COUNT     0x1  /* WINE_HEAT_COUNT=1 */
-#define HEAT_WAKE_ONE  0x2  /* WINE_HEAT_WAKE=one */
-#define HEAT_WAKE_SKIP 0x4  /* WINE_HEAT_WAKE=skip */
+/* The bits of heat_mode, by number in one enum: a change that adds a switch adds its line at the
+ * end, so two changes that each add one conflict in git instead of both taking the same value, as
+ * two #defines of 0x10 once did. */
+enum heat_mode_bit
+{
+    HEAT_BIT_COUNT,        /* 0x1    WINE_HEAT_COUNT=1 */
+    HEAT_BIT_WAKE_ONE,     /* 0x2    WINE_HEAT_WAKE=one */
+    HEAT_BIT_WAKE_SKIP,    /* 0x4    WINE_HEAT_WAKE=skip */
+    HEAT_BIT_UNUSED,       /* 0x8    never used */
+    HEAT_BIT_MSYNC_UNREG,  /* 0x10   WINE_HEAT_MSYNC_UNREG=1, jdrly/gw2-on-mac#44 */
+    HEAT_BIT_EVPOOL,       /* 0x20   WINE_HEAT_EVPOOL=1, jdrly/gw2-on-mac#42 */
+    HEAT_BIT_EVPOOL_MASK,  /* 0x40   WINE_HEAT_EVPOOL=1,mask, jdrly/gw2-on-mac#42 */
+    HEAT_BIT_SPIN_LOCK,    /* 0x80   WINE_HEAT_SPIN=lock=<us>, jdrly/gw2-on-mac#45 */
+    HEAT_BIT_SPIN_EVENT,   /* 0x100  WINE_HEAT_SPIN=event=<us> */
+    HEAT_BIT_SPIN_SEM,     /* 0x200  WINE_HEAT_SPIN=sem=<us> */
+    HEAT_BITS
+};
+C_ASSERT( HEAT_BITS <= 32 );  /* heat_mode is an unsigned int */
 
-/* jdrly/gw2-on-mac#44 */
-#define HEAT_MSYNC_UNREG 0x10  /* WINE_HEAT_MSYNC_UNREG=1 */
+#define HEAT_COUNT       (1u << HEAT_BIT_COUNT)
+#define HEAT_WAKE_ONE    (1u << HEAT_BIT_WAKE_ONE)
+#define HEAT_WAKE_SKIP   (1u << HEAT_BIT_WAKE_SKIP)
+#define HEAT_MSYNC_UNREG (1u << HEAT_BIT_MSYNC_UNREG)
 
 /* jdrly/gw2-on-mac#42 */
-#define HEAT_EVPOOL      0x20  /* WINE_HEAT_EVPOOL=1 */
-#define HEAT_EVPOOL_MASK 0x40  /* WINE_HEAT_EVPOOL=1,mask */
+#define HEAT_EVPOOL      (1u << HEAT_BIT_EVPOOL)
+#define HEAT_EVPOOL_MASK (1u << HEAT_BIT_EVPOOL_MASK)
+
+/* jdrly/gw2-on-mac#45 */
+#define HEAT_SPIN_LOCK  (1u << HEAT_BIT_SPIN_LOCK)
+#define HEAT_SPIN_EVENT (1u << HEAT_BIT_SPIN_EVENT)
+#define HEAT_SPIN_SEM   (1u << HEAT_BIT_SPIN_SEM)
+#define HEAT_SPIN_ANY   (HEAT_SPIN_LOCK | HEAT_SPIN_EVENT | HEAT_SPIN_SEM)
 
 enum heat_counter
 {
@@ -55,10 +78,21 @@ enum heat_counter
     HC_EVPOOL_FORGOTTEN,    /* handles that stopped being eligible: duplicated, handed to the server... */
     HC_EVPOOL_BUSY,         /* parked handles a thread still used when their turn came: closed for real */
     HC_EVPOOL_DOUBLE_CLOSE, /* a close or a duplicate of a parked handle: STATUS_INVALID_HANDLE */
+    /* jdrly/gw2-on-mac#45, a spin ends in a hit when what it waits for came while it spun */
+    HC_LSPIN_HIT, HC_LSPIN_MISS,  /* WINE_HEAT_SPIN=lock */
+    HC_ESPIN_HIT, HC_ESPIN_MISS,  /* WINE_HEAT_SPIN=event */
+    HC_SSPIN_HIT, HC_SSPIN_MISS,  /* WINE_HEAT_SPIN=sem */
+    HC_SPIN_OFF,     /* waits that didn't spin: the thread's spins of that kind missed 4 times in a row */
+    HC_SPIN_SCOPED,  /* waits that didn't spin: the scope leaves out the thread's priority */
     HC_NB
 };
 
-enum heat_timer { HT_SERVER, HT_YIELD, HT_NB };
+enum heat_timer
+{
+    HT_SERVER, HT_YIELD,
+    HT_SPIN,  /* jdrly/gw2-on-mac#45 */
+    HT_NB
+};
 
 /* Decided once per process by heat_init(), before any PE code runs, and never changed. In every
  * process that isn't WINE_HEAT_EXE it stays 0, and each probe below is that one load and a
@@ -173,6 +207,52 @@ static inline NTSTATUS heat_evpool_dup( HANDLE process, HANDLE source )
 static inline void heat_evpool_forget( HANDLE handle )
 {
     if ((heat_mode & HEAT_EVPOOL) && handle) heat_evpool_forget_slow( handle );
+}
+
+/***********************************************************************
+ *  the spins (WINE_HEAT_SPIN, jdrly/gw2-on-mac#45), heat.c has the rules
+ */
+enum heat_spin_kind { HEAT_SPIN_KIND_LOCK, HEAT_SPIN_KIND_EVENT, HEAT_SPIN_KIND_SEM, HEAT_SPIN_KINDS };
+/* a kind's switch is HEAT_SPIN_LOCK << kind */
+C_ASSERT( HEAT_BIT_SPIN_EVENT == HEAT_BIT_SPIN_LOCK + HEAT_SPIN_KIND_EVENT );
+C_ASSERT( HEAT_BIT_SPIN_SEM == HEAT_BIT_SPIN_LOCK + HEAT_SPIN_KIND_SEM );
+
+extern __thread LONG heat_priority;
+extern unsigned long long heat_spin_budget( enum heat_spin_kind kind );
+extern void heat_spin_done( enum heat_spin_kind kind, BOOL hit, unsigned long long start );
+extern BOOL heat_spin_lock_slow( LONG *futex, const ULONGLONG *end );
+extern BOOL heat_spin_register( const int *objs, int count, int by );
+extern BOOL heat_pulse_spinners_slow( unsigned int obj );
+
+/* msync_pulse_event_obj, after the wake call found no sleeper: TRUE to keep the pulse for a
+ * thread that may be spinning on the event */
+static inline BOOL heat_pulse_spinners( unsigned int obj )
+{
+    return (heat_mode & HEAT_SPIN_EVENT) && heat_pulse_spinners_slow( obj );
+}
+
+/* NtSetInformationThread: the base priority this thread just set for itself */
+static inline void heat_thread_priority( LONG priority )
+{
+    if (heat_mode & HEAT_SPIN_ANY) heat_priority = priority;
+}
+
+/* NtWaitForAlertByThreadId, before its first sleep: TRUE when an alert came during the spin and
+ * was taken. <end> is the wait's deadline in system time, NULL for none. */
+static inline BOOL heat_spin_lock( LONG *futex, const ULONGLONG *end )
+{
+    return (heat_mode & HEAT_SPIN_LOCK) && !__atomic_load_n( futex, __ATOMIC_RELAXED ) &&
+           heat_spin_lock_slow( futex, end );
+}
+
+/* one turn of a spin: a bare yield on arm64, without YieldProcessor()'s store barrier */
+static inline void heat_pause(void)
+{
+#ifdef __aarch64__
+    __asm__ __volatile__( "yield" ::: "memory" );
+#else
+    YieldProcessor();
+#endif
 }
 
 #endif /* __NTDLL_UNIX_HEAT_H */

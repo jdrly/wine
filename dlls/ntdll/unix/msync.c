@@ -948,7 +948,8 @@ NTSTATUS msync_pulse_event_obj( int obj, LONG *prev_state )
             if (untaken) new++;
         } while (!__atomic_compare_exchange_n( &event->pulse, &pulse, new, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST ));
 
-        if (!signal_all( (void *)event, obj, 0 ) && untaken)
+        /* WINE_HEAT_SPIN=event (jdrly/gw2-on-mac#45): a spinner takes it too */
+        if (!signal_all( (void *)event, obj, 0 ) && untaken && !heat_pulse_spinners( obj ))
         {
             pulse = __atomic_load_n( &event->pulse, __ATOMIC_SEQ_CST );
             while ((pulse & PULSE_UNTAKEN) &&
@@ -1024,6 +1025,65 @@ static NTSTATUS do_single_wait( int obj, void *obj_shm, int alert_obj, void *ale
     return status;
 }
 
+/* WINE_HEAT_SPIN=event and sem (jdrly/gw2-on-mac#45, heat.c has the rules): before a wait-any
+ * first sleeps, when every object is an event, spin until one is signaled or pulsed since the
+ * wait read its pulse word, or the alert object is set; before a single, non-alertable wait first
+ * sleeps on a semaphore, spin until its count is above 0. Returns -1 when none of that came and
+ * the wait sleeps as before, -2 when it came and the caller tries to take it, or the index of an
+ * event whose pulse the spin took. A pulse is taken here, while this thread still counts on the
+ * event's slot, so that the pulser can't take it back first (heat.c). */
+static int heat_spin_objs( const int *objs, void **objs_shm, unsigned int *pulse_seen, int count,
+                           void *alert_obj_shm, const struct deadline *end )
+{
+    enum heat_spin_kind kind = HEAT_SPIN_KIND_EVENT;
+    unsigned long long budget, start;
+    unsigned int turn;
+    uint64_t word;
+    int i, ret = -1;
+
+    if (count == 1 && !alert_obj_shm && ((struct semaphore *)objs_shm[0])->msync_type == MSYNC_SEMAPHORE)
+        kind = HEAT_SPIN_KIND_SEM;
+    else
+        for (i = 0; i < count; i++) if (!is_event( objs_shm[i] )) return -1;
+    if (!(heat_mode & (kind == HEAT_SPIN_KIND_SEM ? HEAT_SPIN_SEM : HEAT_SPIN_EVENT))) return -1;
+    if (!(budget = heat_spin_budget( kind ))) return -1;
+    if (end)
+    {
+        ULONGLONG left = update_timeout( end );  /* 100 ns */
+
+        if (!left) return -1;
+        if (left < budget / 100) budget = left * 100;
+    }
+    if (kind == HEAT_SPIN_KIND_EVENT && !heat_spin_register( objs, count, 1 )) return -1;
+
+    start = heat_now();
+    for (turn = 1; ret == -1; turn++)
+    {
+        if (kind == HEAT_SPIN_KIND_SEM)
+        {
+            if (__atomic_load_n( &((struct semaphore *)objs_shm[0])->count, __ATOMIC_ACQUIRE )) ret = -2;
+        }
+        else
+        {
+            if (alert_obj_shm && __atomic_load_n( (int *)alert_obj_shm, __ATOMIC_ACQUIRE )) ret = -2;
+            for (i = 0; i < count && ret == -1; i++)
+            {
+                /* the signaled state and the pulse word, read together as msync_wait_single does */
+                word = __atomic_load_n( (uint64_t *)objs_shm[i], __ATOMIC_ACQUIRE );
+                if ((int)word) ret = -2;
+                else if (!same_pulse_count( word >> 32, pulse_seen[i] ))
+                    ret = event_pulsed( objs_shm[i], &pulse_seen[i] ) ? i : -2;
+            }
+        }
+        if (ret != -1) break;
+        heat_pause();
+        if (!(turn & 15) && heat_now() - start >= budget) break;
+    }
+    if (kind == HEAT_SPIN_KIND_EVENT) heat_spin_register( objs, count, -1 );
+    heat_spin_done( kind, ret != -1, start );
+    return ret;
+}
+
 NTSTATUS msync_wait_objs( const DWORD count, const int *objs, BOOLEAN wait_any,
                           int alert_obj, const LARGE_INTEGER *timeout )
 {
@@ -1076,6 +1136,7 @@ NTSTATUS msync_wait_objs( const DWORD count, const int *objs, BOOLEAN wait_any,
     if (wait_any || count <= 1)
     {
         BOOL woken = FALSE;
+        BOOL spun = !(heat_mode & (HEAT_SPIN_EVENT | HEAT_SPIN_SEM)) || !count;  /* jdrly/gw2-on-mac#45 */
 
         while (1)
         {
@@ -1170,6 +1231,15 @@ NTSTATUS msync_wait_objs( const DWORD count, const int *objs, BOOLEAN wait_any,
                 /* Unlike esync, we already know that we've timed out, so we
                  * can avoid a syscall. */
                 return STATUS_TIMEOUT;
+            }
+
+            /* WINE_HEAT_SPIN=event and sem: once a wait, before its first sleep */
+            if (!spun)
+            {
+                spun = TRUE;
+                ret = heat_spin_objs( objs, objs_shm, pulse_seen, count, alert_obj_shm, timeout ? &end : NULL );
+                if (ret >= 0) return ret;
+                if (ret == -2) continue;
             }
 
             if (alert_obj && single_wait)

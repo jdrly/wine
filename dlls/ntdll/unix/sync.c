@@ -3751,6 +3751,14 @@ NTSTATUS WINAPI NtWaitForAlertByThreadId( const void *address, const LARGE_INTEG
                 end = get_absolute_timeout( timeout );
         }
 
+        /* WINE_HEAT_SPIN=lock (jdrly/gw2-on-mac#45): spin before the first sleep, never inside
+         * the emulator, whose own waits keep this path as it is; heat.c has the protocol */
+#ifdef __aarch64__
+        if (!in_emulator && heat_spin_lock( futex, timeout ? &end : NULL )) return STATUS_ALERTED;
+#else
+        if (heat_spin_lock( futex, timeout ? &end : NULL )) return STATUS_ALERTED;
+#endif
+
 #ifdef __aarch64__
         while (!(alerts = InterlockedExchange( futex, 0 )))
 #else

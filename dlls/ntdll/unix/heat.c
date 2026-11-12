@@ -22,6 +22,13 @@
  *                         and NtCreateEvent takes one that has been parked for 2 ms: neither asks
  *                         the server (jdrly/gw2-on-mac#42). "1,mask" blocks signals around the
  *                         pool's mutex, as 0.1.x did, instead of the per-thread flag.
+ *   WINE_HEAT_SPIN=lock=<us>,event=<us>,sem=<us>  spin up to that long (1 to 1000 us, each kind
+ *                         optional) before a lock sleep, a sleep on events only, or a single
+ *                         wait's sleep on a semaphore (jdrly/gw2-on-mac#45, "the spins" below).
+ *                         A kind may end in a scope: ":not=<p>" leaves out the threads whose
+ *                         priority is p, and repeats; ":game" is ":not=1", GW2's ABOVE_NORMAL
+ *                         workers; ":all", the default, leaves out none.
+ *   WINE_HEAT_SPIN_PAUSE=<n>  waits without a spin after 4 misses in a row (default 32)
  *
  * See jdrly/gw2-on-mac#40 and, for 0.1.x's version of the same switches, gw2-on-mac's
  * docs/research/heat-locks-2026-10-29.md.
@@ -90,8 +97,11 @@ static const char * const heat_counter_names[HC_NB] =
     "yield_1ms", "yield_long",
     "unreg",  /* jdrly/gw2-on-mac#44 */
     "evpool_hit", "evpool_put", "evpool_evicted", "evpool_forgotten", "evpool_busy", "evpool_double_close",
+    /* jdrly/gw2-on-mac#45 */
+    "lspin_hit", "lspin_miss", "espin_hit", "espin_miss", "sspin_hit", "sspin_miss", "spin_off", "spin_scoped",
 };
-static const char * const heat_timer_names[HT_NB] = { "server_ms", "yield_ms" };
+static const char * const heat_timer_names[HT_NB] = { "server_ms", "yield_ms", "spin_ms" };
+static char heat_spin_line[256];  /* the log's line for WINE_HEAT_SPIN, empty without it */
 
 static struct heat_row *heat_rows;
 static unsigned int heat_nrows;
@@ -182,11 +192,11 @@ static void heat_dump(void)
         for (j = 0; j < HC_NB; j++) total_c[j] += __atomic_load_n( &heat_rows[i].c[j], __ATOMIC_RELAXED );
         for (j = 0; j < HT_NB; j++) total_t[j] += __atomic_load_n( &heat_rows[i].t[j], __ATOMIC_RELAXED );
     }
-    len = snprintf( buf, sizeof(buf), "heat pid %d exe %s mode%s%s%s%s seconds %.1f threads %u\ntotal",
+    len = snprintf( buf, sizeof(buf), "heat pid %d exe %s mode%s%s%s%s seconds %.1f threads %u\n%stotal",
                     getpid(), heat_exe, heat_mode & HEAT_COUNT ? " count" : "",
                     heat_mode & HEAT_WAKE_ONE ? " one" : "", heat_mode & HEAT_WAKE_SKIP ? " skip" : "",
                     heat_mode & HEAT_EVPOOL_MASK ? " evpool,mask" : heat_mode & HEAT_EVPOOL ? " evpool" : "",
-                    (heat_now() - heat_started) / 1e9, n );
+                    (heat_now() - heat_started) / 1e9, n, heat_spin_line );
     len += heat_print_row( buf + len, sizeof(buf) - len, total_c, total_t );
     for (i = 0; i < n && len < sizeof(buf) - 1; i++)
     {
@@ -571,6 +581,222 @@ void heat_evpool_forget_slow( HANDLE handle )
 }
 
 /***********************************************************************
+ *  the spins (WINE_HEAT_SPIN, jdrly/gw2-on-mac#45)
+ *
+ * Three kinds of sleep may spin first, each up to its own time, read from the clock every 16
+ * turns:
+ *
+ *   lock   NtWaitForAlertByThreadId (contended critical sections, SRW locks, condition variables,
+ *          WaitOnAddress), outside the x86 emulator only, so that FEX's own waits keep athei's
+ *          path (sync.c)
+ *   event  a wait-any whose objects are all events, until one is signaled or pulsed or the alert
+ *          object is set (msync.c)
+ *   sem    a single, non-alertable wait on a semaphore, until its count is above 0 (msync.c).
+ *          The thread joins WINE_HEAT_WAKE=skip's count of sleepers only when it stops spinning,
+ *          so a release during the spin makes no wake call.
+ *
+ * A wait spins once, before its first sleep, and only when it has to sleep. Per thread and kind,
+ * after 4 misses in a row the thread doesn't spin for its next WINE_HEAT_SPIN_PAUSE waits of that
+ * kind (spin_off); a hit resets the count. A kind's scope leaves out the threads whose priority is
+ * one it names (spin_scoped): a thread's priority is the base priority it last set for itself
+ * through NtSetInformationThread (heat_priority), 0 until it does.
+ *
+ * The lock's protocol. A thread's alert word (sync.c) holds the sources of its pending alerts as
+ * bits 1 and 2. NtAlertThreadByThreadId ORs its bit in and makes the wake call only when the word
+ * was 0. A spinner sets a third bit, HEAT_ALERT_SPIN, by compare-and-swap from 0, spins while the
+ * word is exactly that bit, and then exchanges the word with 0: alert bits in what it took are the
+ * alerts that came, and NtWaitForAlertByThreadId returns STATUS_ALERTED; without any it sleeps as
+ * before, on a word that is 0 again. An alerter that found the bit made no wake call, and its bit
+ * is in the word until the spinner's exchange takes it. One that comes after the exchange finds 0
+ * and wakes the sleeper as before. Every access to the word is an atomic read-modify-write on that
+ * one word (the spin's plain loads only decide when to stop), so the order of the two sides'
+ * accesses is the word's own order, and no other memory is part of the protocol: arm64's weaker
+ * ordering has nothing to reorder here. The exchange is seq_cst, an acquire of what the alerter
+ * wrote before its OR, as the sleeper's exchange is.
+ *
+ * Taking the alerts at sync.c's sleeper defers the program's alert when the wait is inside the
+ * emulator; the spin never runs there, so that rule has nothing to do. A wait inside the emulator
+ * on this thread's word can only start in a signal handler that interrupts the spin. It finds the
+ * bit, takes it with whatever alerts are in the word and returns, as after any spurious wakeup;
+ * the spin then sees the word changed, takes what is left, and sleeps if that is no alert. With
+ * WINE_HEAT_SPIN unset nothing here runs and the bit is never written.
+ *
+ * A pulse during an event spin. msync takes back an auto-reset event's pulse when its wake call
+ * found no thread asleep (msync_pulse_event_obj), so a spinner that saw the pulse could find it
+ * gone when it tries to take it, and sleep: a lost pulse. So a spinner counts itself on each of
+ * its events' slots in heat_spinners for the length of the spin, and the pulse keeps its pulse
+ * when the count isn't 0; the spinner takes it once it sees the pulse word change, or in its
+ * sleep's own check of the pulse word if the spin ended first. The same pattern as the wake skip:
+ *
+ *   spinner (heat_spin_register)              pulser (msync_pulse_event_obj)
+ *   add 1 to heat_spinners[obj]               change the pulse word (CAS), then the wake call
+ *   full barrier                              full barrier (heat_pulse_spinners)
+ *   read the pulse word, spinning             read heat_spinners[obj]
+ *
+ * If the pulser reads 0, the spinner's first read of the word comes after the pulse, so the
+ * pulse came before the spin began: between the wait reading the pulse word and its sleep, where
+ * msync's own waiter misses a pulse in the same way.
+ */
+#define HEAT_ALERT_SPIN 4
+#define HEAT_SPIN_MISSES 4
+#define HEAT_PRIORITY_BIT(p) (1u << ((p) + 15))  /* base priorities -15 to 15 */
+
+static unsigned long long heat_spin_ns[HEAT_SPIN_KINDS];  /* the most a spin takes, 0 for off */
+static unsigned int heat_spin_not[HEAT_SPIN_KINDS];       /* priorities left out, HEAT_PRIORITY_BIT */
+static unsigned int heat_spin_pause = 32;
+static const char * const heat_spin_names[HEAT_SPIN_KINDS] = { "lock", "event", "sem" };
+__thread LONG heat_priority;
+static int *heat_spinners;  /* per msync slot, the threads of this process in an event spin on it */
+static __thread unsigned int heat_spin_misses[HEAT_SPIN_KINDS];  /* this thread's misses in a row */
+static __thread unsigned int heat_spin_skip[HEAT_SPIN_KINDS];    /* its waits left without a spin */
+
+/* "<kind>=<us>[:all|:game|:not=<p>]...", the kinds separated by commas. A kind with a time out of
+ * range or a word it doesn't know stays off. Returns the HEAT_SPIN_* bits of the kinds on. */
+static unsigned int heat_spin_parse( const char *spec )
+{
+    char buf[256], *item, *save = NULL, *p, *end;
+    unsigned int mode = 0, kind, not;
+    size_t n;
+    long us, prio;
+    BOOL ok;
+
+    snprintf( buf, sizeof(buf), "%s", spec );
+    for (item = strtok_r( buf, ",", &save ); item; item = strtok_r( NULL, ",", &save ))
+    {
+        if (!(p = strchr( item, '=' ))) continue;
+        *p++ = 0;
+        for (kind = 0; kind < HEAT_SPIN_KINDS; kind++) if (!strcmp( item, heat_spin_names[kind] )) break;
+        if (kind == HEAT_SPIN_KINDS) continue;
+        us = strtol( p, &end, 10 );
+        if (end == p || us < 1 || us > 1000) continue;
+        not = 0;
+        ok = TRUE;
+        for (p = end; ok && *p; p += n)
+        {
+            if (*p++ != ':') { ok = FALSE; break; }
+            n = strcspn( p, ":" );
+            if (n == 3 && !strncmp( p, "all", 3 )) not = 0;
+            else if (n == 4 && !strncmp( p, "game", 4 )) not |= HEAT_PRIORITY_BIT( 1 );
+            else if (n > 4 && !strncmp( p, "not=", 4 ) && (prio = strtol( p + 4, &end, 10 )) >= -15 &&
+                     prio <= 15 && end == p + n)
+                not |= HEAT_PRIORITY_BIT( prio );
+            else ok = FALSE;
+        }
+        if (!ok) continue;
+        heat_spin_ns[kind] = us * 1000;
+        heat_spin_not[kind] = not;
+        mode |= HEAT_SPIN_LOCK << kind;
+    }
+    return mode;
+}
+
+/* the log's line: each kind's time and the priorities it leaves out */
+static void heat_spin_describe( unsigned int mode )
+{
+    size_t len = snprintf( heat_spin_line, sizeof(heat_spin_line), "spin" );
+    unsigned int kind;
+    int prio;
+
+    for (kind = 0; kind < HEAT_SPIN_KINDS && len < sizeof(heat_spin_line); kind++)
+    {
+        if (!(mode & (HEAT_SPIN_LOCK << kind)))
+        {
+            len += snprintf( heat_spin_line + len, sizeof(heat_spin_line) - len, " %s=off", heat_spin_names[kind] );
+            continue;
+        }
+        len += snprintf( heat_spin_line + len, sizeof(heat_spin_line) - len, " %s=%lluus",
+                         heat_spin_names[kind], heat_spin_ns[kind] / 1000 );
+        if (!heat_spin_not[kind] && len < sizeof(heat_spin_line))
+            len += snprintf( heat_spin_line + len, sizeof(heat_spin_line) - len, ":all" );
+        for (prio = -15; prio <= 15 && len < sizeof(heat_spin_line); prio++)
+            if (heat_spin_not[kind] & HEAT_PRIORITY_BIT( prio ))
+                len += snprintf( heat_spin_line + len, sizeof(heat_spin_line) - len, ":not=%d", prio );
+    }
+    if (len < sizeof(heat_spin_line))
+        snprintf( heat_spin_line + len, sizeof(heat_spin_line) - len, " pause %u\n", heat_spin_pause );
+    else
+        heat_spin_line[sizeof(heat_spin_line) - 2] = '\n';
+}
+
+/* how long this thread may spin before this sleep (ns), 0 for not at all */
+unsigned long long heat_spin_budget( enum heat_spin_kind kind )
+{
+    LONG prio = heat_priority;
+
+    if (prio >= -15 && prio <= 15 && (heat_spin_not[kind] & HEAT_PRIORITY_BIT( prio )))
+    {
+        heat_count( HC_SPIN_SCOPED );
+        return 0;
+    }
+    if (heat_spin_skip[kind])
+    {
+        heat_spin_skip[kind]--;
+        heat_count( HC_SPIN_OFF );
+        return 0;
+    }
+    return heat_spin_ns[kind];
+}
+
+void heat_spin_done( enum heat_spin_kind kind, BOOL hit, unsigned long long start )
+{
+    static const enum heat_counter hits[HEAT_SPIN_KINDS] = { HC_LSPIN_HIT, HC_ESPIN_HIT, HC_SSPIN_HIT };
+
+    if (heat_mode & HEAT_COUNT) heat_time( hit ? hits[kind] : hits[kind] + 1, HT_SPIN, start );
+    if (hit) heat_spin_misses[kind] = 0;
+    else if (++heat_spin_misses[kind] >= HEAT_SPIN_MISSES)
+    {
+        heat_spin_misses[kind] = 0;
+        heat_spin_skip[kind] = heat_spin_pause;
+    }
+}
+
+/* an event spin on <objs> begins (by 1) or ends (by -1); FALSE when it may not begin */
+BOOL heat_spin_register( const int *objs, int count, int by )
+{
+    int i;
+
+    for (i = 0; i < count; i++) if ((unsigned int)objs[i] >= HEAT_SLOTS) return FALSE;
+    for (i = 0; i < count; i++) __atomic_fetch_add( &heat_spinners[objs[i]], by, __ATOMIC_RELAXED );
+    if (by > 0) __atomic_thread_fence( __ATOMIC_SEQ_CST );  /* before the spin reads a pulse word */
+    return TRUE;
+}
+
+/* the pulse changed the pulse word: TRUE when a thread of this process may be spinning on <obj> */
+BOOL heat_pulse_spinners_slow( unsigned int obj )
+{
+    if (obj >= HEAT_SLOTS) return FALSE;
+    __atomic_thread_fence( __ATOMIC_SEQ_CST );
+    return __atomic_load_n( &heat_spinners[obj], __ATOMIC_RELAXED ) != 0;
+}
+
+BOOL heat_spin_lock_slow( LONG *futex, const ULONGLONG *end )
+{
+    unsigned long long budget = heat_spin_budget( HEAT_SPIN_KIND_LOCK ), start;
+    LONG expected = 0, alerts;
+    LARGE_INTEGER now;
+    unsigned int turn;
+
+    if (!budget) return FALSE;
+    if (end)
+    {
+        NtQuerySystemTime( &now );
+        if ((LONGLONG)(*end - now.QuadPart) <= 0) return FALSE;
+        if (*end - now.QuadPart < budget / 100) budget = (*end - now.QuadPart) * 100;
+    }
+    if (!__atomic_compare_exchange_n( futex, &expected, HEAT_ALERT_SPIN, FALSE, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST ))
+        return FALSE;  /* an alert came: the sleeper's loop takes it */
+    start = heat_now();
+    for (turn = 1; __atomic_load_n( futex, __ATOMIC_RELAXED ) == HEAT_ALERT_SPIN; turn++)
+    {
+        heat_pause();
+        if (!(turn & 15) && heat_now() - start >= budget) break;
+    }
+    alerts = __atomic_exchange_n( futex, 0, __ATOMIC_SEQ_CST ) & ~HEAT_ALERT_SPIN;
+    heat_spin_done( HEAT_SPIN_KIND_LOCK, alerts != 0, start );
+    return alerts != 0;
+}
+
+/***********************************************************************
  *  heat_init
  *
  * Called once, from start_main_thread() right after load_compatdb(), while this is the only
@@ -617,6 +843,14 @@ void heat_init(void)
     if ((p = getenv( "WINE_HEAT_MSYNC_UNREG" )) && !strcmp( p, "1" )) mode |= HEAT_MSYNC_UNREG;
     if (evpool && !strcmp( evpool, "1" )) mode |= HEAT_EVPOOL;
     else if (evpool && !strcmp( evpool, "1,mask" )) mode |= HEAT_EVPOOL | HEAT_EVPOOL_MASK;
+    /* jdrly/gw2-on-mac#45 */
+    if ((p = getenv( "WINE_HEAT_SPIN" ))) mode |= heat_spin_parse( p );
+    if ((p = getenv( "WINE_HEAT_SPIN_PAUSE" )) && *p)
+    {
+        char *end;
+        unsigned long n = strtoul( p, &end, 10 );
+        if (!*end && n <= 1000000) heat_spin_pause = n;
+    }
     if (!mode) return;
     if (!exe || !*exe) exe = "Gw2-64.exe";
     if (!peb || !peb->ProcessParameters || !heat_is_exe( exe )) return;
@@ -629,12 +863,21 @@ void heat_init(void)
     if ((mode & HEAT_EVPOOL) && !(heat_pools = heat_map( 2 * sizeof(*heat_pools) )))
         mode &= ~(HEAT_EVPOOL | HEAT_EVPOOL_MASK);
     if (mode & HEAT_EVPOOL) mach_timebase_info( &heat_timebase );  /* heat_now() */
+    /* jdrly/gw2-on-mac#45 */
+    if ((mode & HEAT_SPIN_EVENT) && !(heat_spinners = heat_map( HEAT_SLOTS * sizeof(int) )))
+        mode &= ~HEAT_SPIN_EVENT;
     if (mode & HEAT_COUNT)
     {
         mach_timebase_info( &heat_timebase );
         heat_started = heat_now();
         snprintf( heat_exe, sizeof(heat_exe), "%s", exe );
         snprintf( heat_log_path, sizeof(heat_log_path), "%s/heat-%d.log", dir && *dir ? dir : "/tmp", getpid() );
+    }
+    /* jdrly/gw2-on-mac#45: a spin reads the clock whether or not it counts */
+    if (mode & HEAT_SPIN_ANY)
+    {
+        mach_timebase_info( &heat_timebase );
+        heat_spin_describe( mode );
     }
     heat_mode = mode;
     if (mode & HEAT_COUNT)
