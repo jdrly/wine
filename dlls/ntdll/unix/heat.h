@@ -34,6 +34,7 @@ enum heat_mode_bit
     HEAT_BIT_SPIN_LOCK,    /* 0x80   WINE_HEAT_SPIN=lock=<us>, jdrly/gw2-on-mac#45 */
     HEAT_BIT_SPIN_EVENT,   /* 0x100  WINE_HEAT_SPIN=event=<us> */
     HEAT_BIT_SPIN_SEM,     /* 0x200  WINE_HEAT_SPIN=sem=<us> */
+    HEAT_BIT_PROF,         /* 0x400  WINE_HEAT_PROF=1, jdrly/gw2-on-mac#43 */
     HEAT_BITS
 };
 C_ASSERT( HEAT_BITS <= 32 );  /* heat_mode is an unsigned int */
@@ -52,6 +53,9 @@ C_ASSERT( HEAT_BITS <= 32 );  /* heat_mode is an unsigned int */
 #define HEAT_SPIN_EVENT (1u << HEAT_BIT_SPIN_EVENT)
 #define HEAT_SPIN_SEM   (1u << HEAT_BIT_SPIN_SEM)
 #define HEAT_SPIN_ANY   (HEAT_SPIN_LOCK | HEAT_SPIN_EVENT | HEAT_SPIN_SEM)
+
+/* jdrly/gw2-on-mac#43 */
+#define HEAT_PROF       (1u << HEAT_BIT_PROF)  /* heatprof.c */
 
 enum heat_counter
 {
