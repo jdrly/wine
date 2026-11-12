@@ -10,22 +10,26 @@
  *    each with at least its count of get_thread_info, and the counters lines of the main thread's
  *    blocks add up to its RELEASES releases.
  * 2. lock: a holder takes a critical section, waits until the sleeper's EnterCriticalSection has
- *    raised its lock count, yields 200 times so the sleeper goes to sleep, and leaves, 50 rounds.
- *    The sleeper's row: lock_sleep and lock_ms above 0, and its five lock_ buckets add up to
- *    lock_sleep. The holder's: at least one alert that made the wake call, and alert_ms above 0.
+ *    raised its lock count, yields 200 times so the sleeper can go to sleep, and leaves, 50 rounds.
+ *    The sleepers' rows: lock_sleep and lock_ms above 0, and their five lock_ buckets add up to
+ *    lock_sleep. The holders': at least one alert that made the wake call, and alert_ms above 0.
  * 3. events: a thread sets and resets an auto-reset event nobody waits on 1,000 times: event_set
- *    1,000, event_wake_none 1,000, event_wake 0, wake_none 0, wake_ms above 0. Then another sets an
+ *    1,000, event_wake_none 1,000, event_wake 0, wake_none 0, wake_ms above 0. Then a setter sets an
  *    event 20 times, each time after its waiter said it is about to wait and 200 yields: event_set
- *    20, event_wake at least 1, event_wake and event_wake_none 20 together, wake_none 0.
+ *    and event_wake with event_wake_none 20 a batch, wake_none 0, and event_wake above 0.
  * 4. waits: a thread waits on a semaphore at 0 1,000 times with a zero timeout and 100 times with
- *    1 ms: wait_poll 1,000, wait_timed 100, wait_sleep 100, its five wait_ buckets 100 together,
- *    wait_ms above 0, and its row's name is "-".
+ *    1 ms: wait_poll 1,000 and wait_timed 100 a batch, wait_sleep and wait_ms above 0, its five
+ *    wait_ buckets add up to wait_sleep, and its row's name is "-".
  * 5. name: a thread calls SetThreadDescription( L"gw2 timers name" ): its row ends in
  *    "start <its start routine> name gw2_timers_name".
  *
  * Then it waits for two more blocks in heat-requests-*.log, so that the second dump began after
- * the cases ended, and reads both files. Without counting it runs the cases and checks only what
- * the program itself sees.
+ * the cases ended, and reads both files. Nothing a program can see says that a thread is asleep,
+ * or that a timed wait reached its sleep before the deadline (a preempted one returns without it,
+ * an interrupted one sleeps twice). So the counts that need a sleep or a wake are checked as above
+ * 0, and a case whose counters don't show one yet runs again on new threads, a batch, up to
+ * BATCHES in all; the checks add up the rows of all of a case's threads. Without counting it runs
+ * each case once and checks only what the program itself sees.
  *
  * Prints "gw2 test timers: passed" and exits 0, or names what failed and exits 1. */
 #include <stdio.h>
@@ -46,6 +50,7 @@
 #define NAME         L"gw2 timers name"
 #define NAME_IN_LOG  "gw2_timers_name"
 #define LIMIT_MS     10000
+#define BATCHES      4
 
 #define FAIL(...) do { \
         printf( "gw2 test timers: failed, line %d: ", __LINE__ ); \
@@ -119,11 +124,12 @@ static void test_requests(void)
     join( b, "requester B" );
 }
 
-/* 2: lock */
+/* 2: lock, a batch at a time */
 
 static CRITICAL_SECTION cs;
 static volatile LONG lock_go, lock_done;
-static DWORD lock_holder, lock_sleeper;
+static DWORD lock_holders[BATCHES], lock_sleepers[BATCHES];
+static int lock_batches;
 
 static DWORD WINAPI holder( void *arg )
 {
@@ -161,23 +167,26 @@ static DWORD WINAPI sleeper( void *arg )
     return 0;
 }
 
-static void test_lock(void)
+static void lock_batch(void)
 {
     HANDLE h, s;
 
+    lock_go = lock_done = 0;
     InitializeCriticalSection( &cs );
-    h = thread( holder, NULL, &lock_holder );
-    s = thread( sleeper, NULL, &lock_sleeper );
+    h = thread( holder, NULL, &lock_holders[lock_batches] );
+    s = thread( sleeper, NULL, &lock_sleepers[lock_batches] );
     join( h, "the holder" );
     join( s, "the sleeper" );
     DeleteCriticalSection( &cs );
+    lock_batches++;
 }
 
 /* 3: events */
 
 static HANDLE wake_event;
 static volatile LONG wake_ready, wake_done;
-static DWORD event_alone, event_setter;
+static DWORD event_alone, event_setters[BATCHES];
+static int wake_batches;
 
 static DWORD WINAPI set_alone( void *arg )
 {
@@ -188,6 +197,11 @@ static DWORD WINAPI set_alone( void *arg )
     for (i = 0; i < NO_WAITER; i++) if (!SetEvent( ev ) || !ResetEvent( ev )) return 3;
     CloseHandle( ev );
     return 0;
+}
+
+static void test_alone(void)
+{
+    join( thread( set_alone, NULL, &event_alone ), "the setter without a waiter" );
 }
 
 static DWORD WINAPI event_waiter( void *arg )
@@ -210,30 +224,31 @@ static DWORD WINAPI set_waited( void *arg )
     for (r = 1; r <= WAKE_ROUNDS; r++)
     {
         if (!until( &wake_ready, r )) return 2;
-        yields();  /* the waiter goes to sleep */
+        yields();  /* the waiter can go to sleep */
         if (!SetEvent( wake_event )) return 3;
         if (!until( &wake_done, r )) return 4;
     }
     return 0;
 }
 
-static void test_events(void)
+static void wake_batch(void)
 {
-    HANDLE a, w, s;
+    HANDLE w, s;
 
-    a = thread( set_alone, NULL, &event_alone );
-    join( a, "the setter without a waiter" );
+    wake_ready = wake_done = 0;
     if (!(wake_event = CreateEventW( NULL, FALSE, FALSE, NULL ))) FAIL( "CreateEvent: error %lu", GetLastError() );
     w = thread( event_waiter, NULL, NULL );
-    s = thread( set_waited, NULL, &event_setter );
+    s = thread( set_waited, NULL, &event_setters[wake_batches] );
     join( w, "the event's waiter" );
     join( s, "the setter with a waiter" );
     CloseHandle( wake_event );
+    wake_batches++;
 }
 
 /* 4: waits */
 
-static DWORD waits_tid;
+static DWORD waiters[BATCHES];
+static int wait_batches;
 
 static DWORD WINAPI waiter( void *arg )
 {
@@ -247,9 +262,10 @@ static DWORD WINAPI waiter( void *arg )
     return 0;
 }
 
-static void test_waits(void)
+static void wait_batch(void)
 {
-    join( thread( waiter, NULL, &waits_tid ), "the waiter" );
+    join( thread( waiter, NULL, &waiters[wait_batches] ), "the waiter" );
+    wait_batches++;
 }
 
 /* 5: name */
@@ -398,6 +414,45 @@ static long long buckets( DWORD tid, const char *prefix )
     return sum;
 }
 
+/* counter <name>, timer <name> and the <prefix>_ buckets of the <n> threads <tids>, added up */
+static long long sum( const DWORD *tids, int n, const char *name )
+{
+    long long total = 0;
+    while (n--) total += counter( tids[n], name );
+    return total;
+}
+
+static double sum_ms( const DWORD *tids, int n, const char *name )
+{
+    double total = 0;
+    while (n--) total += timer( tids[n], name );
+    return total;
+}
+
+static long long sum_buckets( const DWORD *tids, int n, const char *prefix )
+{
+    long long total = 0;
+    while (n--) total += buckets( tids[n], prefix );
+    return total;
+}
+
+/* whether the counters show the sleeps and wakes each case needs */
+static BOOL lock_seen(void)
+{
+    return sum( lock_sleepers, lock_batches, "lock_sleep" ) > 0 && sum_ms( lock_sleepers, lock_batches, "lock_ms" ) > 0 &&
+           sum( lock_holders, lock_batches, "alert_wake" ) > 0 && sum_ms( lock_holders, lock_batches, "alert_ms" ) > 0;
+}
+
+static BOOL wake_seen(void)
+{
+    return sum( event_setters, wake_batches, "event_wake" ) > 0;
+}
+
+static BOOL wait_seen(void)
+{
+    return sum( waiters, wait_batches, "wait_sleep" ) > 0 && sum_ms( waiters, wait_batches, "wait_ms" ) > 0;
+}
+
 /* the start and name at the end of thread <tid>'s row */
 static void start_and_name( DWORD tid, ULONG_PTR *start, char *name, size_t size )
 {
@@ -410,54 +465,54 @@ static void start_and_name( DWORD tid, ULONG_PTR *start, char *name, size_t size
     snprintf( name, size, "%.*s", (int)strcspn( n, " \n" ), n );
 }
 
+/* every case's checks, on the counters file as load_heat() read it last */
 static void check_heat(void)
 {
-    long long sleeps, alerts, woke, none, wake;
+    long long sleeps, alerts, woke, set, wake, none;
     char name[64];
     ULONG_PTR start;
 
-    load_heat();
-
     /* 2 */
-    sleeps = counter( lock_sleeper, "lock_sleep" );
-    alerts = counter( lock_holder, "alert" );
-    woke = counter( lock_holder, "alert_wake" );
-    printf( "gw2 test timers: lock: the sleeper's lock_sleep %lld lock_ms %.3f buckets %lld; the holder's alert %lld "
-            "alert_wake %lld alert_ms %.3f\n", sleeps, timer( lock_sleeper, "lock_ms" ), buckets( lock_sleeper, "lock" ),
-            alerts, woke, timer( lock_holder, "alert_ms" ) );
-    if (sleeps <= 0) FAIL( "the sleeper never slept on the lock" );
-    if (timer( lock_sleeper, "lock_ms" ) <= 0) FAIL( "no lock_ms" );
-    if (buckets( lock_sleeper, "lock" ) != sleeps) FAIL( "the lock buckets add up to %lld, not %lld", buckets( lock_sleeper, "lock" ), sleeps );
-    if (woke < 1 || alerts < woke) FAIL( "the holder: alert %lld, alert_wake %lld", alerts, woke );
-    if (timer( lock_holder, "alert_ms" ) <= 0) FAIL( "no alert_ms" );
+    sleeps = sum( lock_sleepers, lock_batches, "lock_sleep" );
+    alerts = sum( lock_holders, lock_batches, "alert" );
+    woke = sum( lock_holders, lock_batches, "alert_wake" );
+    printf( "gw2 test timers: lock, %d batches: the sleepers' lock_sleep %lld lock_ms %.3f buckets %lld; the holders' "
+            "alert %lld alert_wake %lld alert_ms %.3f\n", lock_batches, sleeps, sum_ms( lock_sleepers, lock_batches, "lock_ms" ),
+            sum_buckets( lock_sleepers, lock_batches, "lock" ), alerts, woke, sum_ms( lock_holders, lock_batches, "alert_ms" ) );
+    if (sum_buckets( lock_sleepers, lock_batches, "lock" ) != sleeps) FAIL( "the lock buckets don't add up to lock_sleep" );
+    if (alerts < woke) FAIL( "the holders: alert %lld, alert_wake %lld", alerts, woke );
+    if (!lock_seen()) FAIL( "no lock sleep with its time, or no alert wake with its time, in %d batches", lock_batches );
 
     /* 3 */
+    set = sum( event_setters, wake_batches, "event_set" );
+    wake = sum( event_setters, wake_batches, "event_wake" );
+    none = sum( event_setters, wake_batches, "event_wake_none" );
     printf( "gw2 test timers: events: alone event_set %lld event_wake %lld event_wake_none %lld wake_none %lld wake_ms %.3f; "
-            "with a waiter event_set %lld event_wake %lld event_wake_none %lld wake_none %lld\n",
+            "with a waiter, %d batches: event_set %lld event_wake %lld event_wake_none %lld wake_none %lld\n",
             counter( event_alone, "event_set" ), counter( event_alone, "event_wake" ), counter( event_alone, "event_wake_none" ),
-            counter( event_alone, "wake_none" ), timer( event_alone, "wake_ms" ), counter( event_setter, "event_set" ),
-            counter( event_setter, "event_wake" ), counter( event_setter, "event_wake_none" ), counter( event_setter, "wake_none" ) );
+            counter( event_alone, "wake_none" ), timer( event_alone, "wake_ms" ), wake_batches, set, wake, none,
+            sum( event_setters, wake_batches, "wake_none" ) );
     if (counter( event_alone, "event_set" ) != NO_WAITER || counter( event_alone, "event_wake_none" ) != NO_WAITER ||
         counter( event_alone, "event_wake" ) || counter( event_alone, "wake_none" ))
         FAIL( "the event without a waiter" );
     if (timer( event_alone, "wake_ms" ) <= 0) FAIL( "no wake_ms" );
-    wake = counter( event_setter, "event_wake" );
-    none = counter( event_setter, "event_wake_none" );
-    if (counter( event_setter, "event_set" ) != WAKE_ROUNDS || wake < 1 || wake + none != WAKE_ROUNDS ||
-        counter( event_setter, "wake_none" ))
+    if (set != WAKE_ROUNDS * wake_batches || wake + none != set || sum( event_setters, wake_batches, "wake_none" ))
         FAIL( "the event with a waiter" );
+    if (!wake_seen()) FAIL( "no set woke the waiter in %d batches", wake_batches );
 
     /* 4 */
-    sleeps = counter( waits_tid, "wait_sleep" );
-    printf( "gw2 test timers: waits: wait %lld wait_poll %lld wait_timed %lld wait_sleep %lld buckets %lld wait_ms %.3f\n",
-            counter( waits_tid, "wait" ), counter( waits_tid, "wait_poll" ), counter( waits_tid, "wait_timed" ), sleeps,
-            buckets( waits_tid, "wait" ), timer( waits_tid, "wait_ms" ) );
-    if (counter( waits_tid, "wait_poll" ) != POLLS || counter( waits_tid, "wait_timed" ) != TIMED || sleeps != TIMED)
-        FAIL( "the waits" );
-    if (counter( waits_tid, "wait" ) < POLLS + TIMED) FAIL( "%lld waits", counter( waits_tid, "wait" ) );
-    if (buckets( waits_tid, "wait" ) != sleeps) FAIL( "the wait buckets add up to %lld, not %lld", buckets( waits_tid, "wait" ), sleeps );
-    if (timer( waits_tid, "wait_ms" ) <= 0) FAIL( "no wait_ms" );
-    start_and_name( waits_tid, &start, name, sizeof(name) );
+    sleeps = sum( waiters, wait_batches, "wait_sleep" );
+    printf( "gw2 test timers: waits, %d batches: wait %lld wait_poll %lld wait_timed %lld wait_sleep %lld buckets %lld "
+            "wait_ms %.3f\n", wait_batches, sum( waiters, wait_batches, "wait" ), sum( waiters, wait_batches, "wait_poll" ),
+            sum( waiters, wait_batches, "wait_timed" ), sleeps, sum_buckets( waiters, wait_batches, "wait" ),
+            sum_ms( waiters, wait_batches, "wait_ms" ) );
+    if (sum( waiters, wait_batches, "wait_poll" ) != POLLS * wait_batches ||
+        sum( waiters, wait_batches, "wait_timed" ) != TIMED * wait_batches)
+        FAIL( "the waits by timeout" );
+    if (sum( waiters, wait_batches, "wait" ) < (POLLS + TIMED) * wait_batches) FAIL( "too few waits" );
+    if (sum_buckets( waiters, wait_batches, "wait" ) != sleeps) FAIL( "the wait buckets don't add up to wait_sleep" );
+    if (!wait_seen()) FAIL( "no wait sleep with its time in %d batches", wait_batches );
+    start_and_name( waiters[0], &start, name, sizeof(name) );
     if (strcmp( name, "-" )) FAIL( "the waiter's name is %s, not -", name );
 
     /* 5 */
@@ -542,15 +597,30 @@ int main(void)
     }
 
     test_requests();
-    test_lock();
-    test_events();
-    test_waits();
+    test_alone();
     test_name();
+    lock_batch();
+    wake_batch();
+    wait_batch();
     printf( "gw2 test timers: the cases ran\n" );
 
     if (counting)
     {
-        await_dumps( path );
+        for (;;)
+        {
+            BOOL lock, wake, wait;
+
+            await_dumps( path );
+            load_heat();
+            lock = lock_seen() || lock_batches == BATCHES;
+            wake = wake_seen() || wake_batches == BATCHES;
+            wait = wait_seen() || wait_batches == BATCHES;
+            if (lock && wake && wait) break;
+            printf( "gw2 test timers: another batch of%s%s%s\n", lock ? "" : " lock", wake ? "" : " events", wait ? "" : " waits" );
+            if (!lock) lock_batch();
+            if (!wake) wake_batch();
+            if (!wait) wait_batch();
+        }
         check_requests( path );
         check_heat();
     }
