@@ -18,6 +18,10 @@
  *                         it registered with the server unregisters there, and drops the alert
  *                         object's count, instead of dropping only the objects' counts
  *                         (dappermint/winecx 9be392b3b4, jdrly/gw2-on-mac#44). Counted as unreg.
+ *   WINE_HEAT_EVPOOL=1    NtClose of an event that only this process can hold parks the handle,
+ *                         and NtCreateEvent takes one that has been parked for 2 ms: neither asks
+ *                         the server (jdrly/gw2-on-mac#42). "1,mask" blocks signals around the
+ *                         pool's mutex, as 0.1.x did, instead of the per-thread flag.
  *
  * See jdrly/gw2-on-mac#40 and, for 0.1.x's version of the same switches, gw2-on-mac's
  * docs/research/heat-locks-2026-10-29.md.
@@ -85,6 +89,7 @@ static const char * const heat_counter_names[HC_NB] =
     "event_close", "close", "server", "lock_sleep", "qpc", "yield", "yield_5us", "yield_20us", "yield_100us",
     "yield_1ms", "yield_long",
     "unreg",  /* jdrly/gw2-on-mac#44 */
+    "evpool_hit", "evpool_put", "evpool_evicted", "evpool_forgotten", "evpool_busy", "evpool_double_close",
 };
 static const char * const heat_timer_names[HT_NB] = { "server_ms", "yield_ms" };
 
@@ -177,9 +182,10 @@ static void heat_dump(void)
         for (j = 0; j < HC_NB; j++) total_c[j] += __atomic_load_n( &heat_rows[i].c[j], __ATOMIC_RELAXED );
         for (j = 0; j < HT_NB; j++) total_t[j] += __atomic_load_n( &heat_rows[i].t[j], __ATOMIC_RELAXED );
     }
-    len = snprintf( buf, sizeof(buf), "heat pid %d exe %s mode%s%s%s seconds %.1f threads %u\ntotal",
+    len = snprintf( buf, sizeof(buf), "heat pid %d exe %s mode%s%s%s%s seconds %.1f threads %u\ntotal",
                     getpid(), heat_exe, heat_mode & HEAT_COUNT ? " count" : "",
                     heat_mode & HEAT_WAKE_ONE ? " one" : "", heat_mode & HEAT_WAKE_SKIP ? " skip" : "",
+                    heat_mode & HEAT_EVPOOL_MASK ? " evpool,mask" : heat_mode & HEAT_EVPOOL ? " evpool" : "",
                     (heat_now() - heat_started) / 1e9, n );
     len += heat_print_row( buf + len, sizeof(buf) - len, total_c, total_t );
     for (i = 0; i < n && len < sizeof(buf) - 1; i++)
@@ -314,6 +320,257 @@ BOOL heat_skip_wake_slow( unsigned int obj, const unsigned short *refcount )
 }
 
 /***********************************************************************
+ *  the event pool (WINE_HEAT_EVPOOL)
+ *
+ * An event is eligible when NtCreateEvent made it here with EVENT_ALL_ACCESS and without a name,
+ * a root directory, a security descriptor or OBJ_INHERIT: no other process can have it, and this
+ * one holds it through that handle only. NtClose of an eligible handle parks it in the pool of
+ * its kind (auto-reset or manual-reset) instead of closing it, and NtCreateEvent of that kind
+ * takes the oldest handle that has been parked for at least 2 ms, then sets or resets it. The
+ * handle stays open at the server the whole time, so its value can't go to another object, and
+ * its cached in-process sync (sync.c) stays too: neither call makes a server request.
+ *
+ * The handle's byte in heat_handles carries three bits for this:
+ *   HEAT_H_POOL    eligible, and this process's code holds it
+ *   HEAT_H_MANUAL  a manual-reset event
+ *   HEAT_H_PARKED  in a pool: closed, as far as this process's code knows
+ *
+ * A handle stops being eligible, and its next close is a real one, once it was duplicated (with
+ * any source process handle), given new handle flags, pulsed (an auto-reset event can keep a
+ * pulse nobody took, msync.c), or handed to the server, which may signal it later: an
+ * asynchronous I/O's event (server_async), a registry notification's, IOCTL_AFD_EVENT_SELECT's.
+ * heat_evpool_forget() clears HEAT_H_POOL for that without the pool's mutex, since a duplicate
+ * can come from a system APC in a signal handler. A parked handle that loses HEAT_H_POOL stays
+ * parked and is closed for real when its turn comes.
+ *
+ * A close or a duplicate (from this process) of a parked handle returns STATUS_INVALID_HANDLE,
+ * as Windows does for a closed handle, and never reaches the server: a parked handle must stay
+ * open until the pool closes it. NtCreateEvent keeps HEAT_H_PARKED while it takes a handle out
+ * and resets it, and clears it only if HEAT_H_POOL is still set; otherwise it closes the handle
+ * for real. The pool's own closes (heat_pool_close) never take the pool path, and clear the
+ * handle's bits before and after the server closes it. A second close of that value by this
+ * process's code between the two is a real one, and then the pool's close may hit a new object
+ * that got the value meanwhile: the same as two closes of one handle without the pool, and only
+ * after code closed a handle it had already closed. The 2 ms give a thread that still uses a closed handle time to
+ * finish; a parked handle that a thread of this process still waits on or signals in-process when
+ * its turn comes is closed for real (heat_inproc_sync_idle). What can't be seen from here:
+ * another process that duplicated the handle out of this one without DUPLICATE_CLOSE_SOURCE
+ * (with it, the close runs here as a system APC), and a wait through the server that outlives
+ * the 2 ms.
+ *
+ * The guard (jdrly/gw2-on-mac#6). A signal handler may run any of this on a thread that holds
+ * the pool's mutex. Instead of blocking signals around the mutex, two system calls each time, a
+ * thread sets its heat_pool_busy before it takes the mutex and clears it after it lets go. Code
+ * that finds its own thread's flag set doesn't take the mutex and goes to the server: a real
+ * create or a real close. The mutex is only tried, never waited for, and a busy one sends the
+ * call to the server too: with signals open, the holder can be suspended (SuspendThread is a
+ * signal) or killed inside, and a thread that waited for it could wait for its own suspender.
+ * WINE_HEAT_EVPOOL=1,mask uses Wine's uninterrupted section instead, as 0.1.x did.
+ */
+#define HEAT_H_POOL    4
+#define HEAT_H_MANUAL  8
+#define HEAT_H_PARKED  16
+#define HEAT_H_EVPOOL  (HEAT_H_POOL | HEAT_H_MANUAL | HEAT_H_PARKED)
+
+#define HEAT_POOL_SIZE   1024
+#define HEAT_POOL_AGE_NS 2000000
+
+struct heat_pool
+{
+    HANDLE             h[HEAT_POOL_SIZE];
+    unsigned long long t[HEAT_POOL_SIZE];  /* when it was parked, heat_now() */
+    unsigned int       head, count;
+};
+
+static struct heat_pool *heat_pools;  /* [0] auto-reset, [1] manual-reset */
+static pthread_mutex_t heat_pool_mutex = PTHREAD_MUTEX_INITIALIZER;
+static __thread int heat_pool_busy;
+static __thread HANDLE heat_pool_closing;  /* the handle heat_pool_close() is closing */
+
+static BOOL heat_pool_lock( sigset_t *sigset )
+{
+    if (heat_mode & HEAT_EVPOOL_MASK)
+    {
+        server_enter_uninterrupted_section( &heat_pool_mutex, sigset );
+        return TRUE;
+    }
+    /* a signal handler on a thread that is in here, or about to be */
+    if (__atomic_load_n( &heat_pool_busy, __ATOMIC_RELAXED )) return FALSE;
+    __atomic_store_n( &heat_pool_busy, 1, __ATOMIC_RELAXED );
+    __atomic_signal_fence( __ATOMIC_SEQ_CST );
+    if (!pthread_mutex_trylock( &heat_pool_mutex )) return TRUE;
+    __atomic_signal_fence( __ATOMIC_SEQ_CST );
+    __atomic_store_n( &heat_pool_busy, 0, __ATOMIC_RELAXED );
+    return FALSE;
+}
+
+static void heat_pool_unlock( sigset_t *sigset )
+{
+    if (heat_mode & HEAT_EVPOOL_MASK)
+    {
+        server_leave_uninterrupted_section( &heat_pool_mutex, sigset );
+        return;
+    }
+    pthread_mutex_unlock( &heat_pool_mutex );
+    __atomic_signal_fence( __ATOMIC_SEQ_CST );
+    __atomic_store_n( &heat_pool_busy, 0, __ATOMIC_RELAXED );
+}
+
+static BOOL heat_evpool_eligible( ACCESS_MASK access, const OBJECT_ATTRIBUTES *attr )
+{
+    if (access != EVENT_ALL_ACCESS) return FALSE;
+    return !attr || (!attr->RootDirectory && (!attr->ObjectName || !attr->ObjectName->Length) &&
+                     !attr->SecurityDescriptor && !(attr->Attributes & OBJ_INHERIT));
+}
+
+/* a handle the pool took out of use, closed for real and never parked again */
+static void heat_pool_close( HANDLE handle )
+{
+    unsigned char *mark = &heat_handles[heat_handle_index( handle )];
+
+    __atomic_fetch_and( mark, ~HEAT_H_EVPOOL, __ATOMIC_ACQ_REL );
+    heat_pool_closing = handle;
+    NtClose( handle );
+    heat_pool_closing = 0;
+    /* an eligible event that got the value after a stale close in between would leave its bits
+     * on a value the server has freed */
+    __atomic_fetch_and( mark, ~HEAT_H_EVPOOL, __ATOMIC_ACQ_REL );
+}
+
+static NTSTATUS heat_evpool_closed_twice(void)
+{
+    heat_count( HC_EVPOOL_DOUBLE_CLOSE );
+    return STATUS_INVALID_HANDLE;
+}
+
+BOOL heat_evpool_get_slow( HANDLE *handle, ACCESS_MASK access, const OBJECT_ATTRIBUTES *attr,
+                           EVENT_TYPE type, BOOLEAN state )
+{
+    struct heat_pool *pool = &heat_pools[type == NotificationEvent];
+    unsigned char *mark, flags;
+    HANDLE h = 0;
+    sigset_t sigset;
+
+    if (!heat_evpool_eligible( access, attr ) || !heat_pool_lock( &sigset )) return FALSE;
+    if (pool->count && heat_now() - pool->t[pool->head] >= HEAT_POOL_AGE_NS)
+    {
+        h = pool->h[pool->head];
+        pool->head = (pool->head + 1) % HEAT_POOL_SIZE;
+        pool->count--;
+    }
+    heat_pool_unlock( &sigset );
+    if (!h) return FALSE;
+
+    /* Out of the pool but still HEAT_H_PARKED, so a stale close or duplicate meanwhile gets
+     * STATUS_INVALID_HANDLE and the handle stays open. Only a forget can change the byte now:
+     * it clears HEAT_H_POOL, and then the handle isn't handed out. */
+    mark = &heat_handles[heat_handle_index( h )];
+    flags = __atomic_load_n( mark, __ATOMIC_ACQUIRE );
+    if (!heat_inproc_sync_idle( h )) heat_count( HC_EVPOOL_BUSY );
+    else if ((flags & HEAT_H_POOL) && !(state ? NtSetEvent( h, NULL ) : NtResetEvent( h, NULL )))
+    {
+        while (flags & HEAT_H_POOL)
+        {
+            if (!__atomic_compare_exchange_n( mark, &flags, flags & ~HEAT_H_PARKED, FALSE,
+                                              __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE ))
+                continue;
+            *handle = h;
+            heat_count( HC_EVPOOL_HIT );
+            return TRUE;
+        }
+    }
+    /* forgotten while parked, or still in use: close it for real */
+    heat_pool_close( h );
+    return FALSE;
+}
+
+void heat_evpool_created_slow( HANDLE handle, ACCESS_MASK access, const OBJECT_ATTRIBUTES *attr, EVENT_TYPE type )
+{
+    unsigned int i = heat_handle_index( handle );
+    unsigned char flags, want = HEAT_H_POOL | (type == NotificationEvent ? HEAT_H_MANUAL : 0);
+
+    if (i >= HEAT_HANDLES || !heat_evpool_eligible( access, attr )) return;
+    /* a new value: only a HEAT_H_MANUAL of an earlier object can be left */
+    flags = __atomic_load_n( &heat_handles[i], __ATOMIC_RELAXED );
+    while (!__atomic_compare_exchange_n( &heat_handles[i], &flags, (flags & ~HEAT_H_EVPOOL) | want, FALSE,
+                                         __ATOMIC_RELEASE, __ATOMIC_RELAXED ))
+        ;
+}
+
+NTSTATUS heat_evpool_close_slow( HANDLE handle )
+{
+    unsigned int i = heat_handle_index( handle ), slot;
+    struct heat_pool *pool;
+    unsigned char flags;
+    HANDLE evict = 0;
+    sigset_t sigset;
+
+    if (i >= HEAT_HANDLES || handle == heat_pool_closing) return STATUS_PENDING;
+    flags = __atomic_load_n( &heat_handles[i], __ATOMIC_ACQUIRE );
+    if (flags & HEAT_H_PARKED) return heat_evpool_closed_twice();
+    if (!(flags & HEAT_H_POOL)) return STATUS_PENDING;
+    if (!heat_pool_lock( &sigset )) return heat_evpool_take_slow( handle );
+
+    /* park it, unless a forget or another close of the same handle came first */
+    while ((flags & (HEAT_H_POOL | HEAT_H_PARKED)) == HEAT_H_POOL &&
+           !__atomic_compare_exchange_n( &heat_handles[i], &flags, flags | HEAT_H_PARKED, FALSE,
+                                         __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE ))
+        ;
+    if ((flags & (HEAT_H_POOL | HEAT_H_PARKED)) != HEAT_H_POOL)
+    {
+        heat_pool_unlock( &sigset );
+        return (flags & HEAT_H_PARKED) ? heat_evpool_closed_twice() : STATUS_PENDING;
+    }
+    pool = &heat_pools[!!(flags & HEAT_H_MANUAL)];
+    if (pool->count == HEAT_POOL_SIZE)
+    {
+        evict = pool->h[pool->head];
+        pool->head = (pool->head + 1) % HEAT_POOL_SIZE;
+        pool->count--;
+    }
+    slot = (pool->head + pool->count) % HEAT_POOL_SIZE;
+    pool->h[slot] = handle;
+    pool->t[slot] = heat_now();
+    pool->count++;
+    heat_pool_unlock( &sigset );
+
+    if (evict)
+    {
+        heat_count( HC_EVPOOL_EVICTED );
+        heat_pool_close( evict );
+    }
+    heat_count( HC_EVPOOL_PUT );
+    return STATUS_SUCCESS;
+}
+
+/* the handle is about to be closed for real, or duplicated from this process: no longer
+ * eligible, or STATUS_INVALID_HANDLE if it is parked */
+NTSTATUS heat_evpool_take_slow( HANDLE handle )
+{
+    unsigned int i = heat_handle_index( handle );
+    unsigned char flags;
+
+    if (i >= HEAT_HANDLES) return STATUS_PENDING;
+    flags = __atomic_load_n( &heat_handles[i], __ATOMIC_ACQUIRE );
+    do
+    {
+        if (flags & HEAT_H_PARKED) return heat_evpool_closed_twice();
+        if (!(flags & HEAT_H_POOL)) return STATUS_PENDING;
+    } while (!__atomic_compare_exchange_n( &heat_handles[i], &flags, flags & ~HEAT_H_POOL, FALSE,
+                                           __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE ));
+    heat_count( HC_EVPOOL_FORGOTTEN );
+    return STATUS_PENDING;
+}
+
+void heat_evpool_forget_slow( HANDLE handle )
+{
+    unsigned int i = heat_handle_index( handle );
+
+    if (i < HEAT_HANDLES && (__atomic_fetch_and( &heat_handles[i], ~HEAT_H_POOL, __ATOMIC_ACQ_REL ) & HEAT_H_POOL))
+        heat_count( HC_EVPOOL_FORGOTTEN );
+}
+
+/***********************************************************************
  *  heat_init
  *
  * Called once, from start_main_thread() right after load_compatdb(), while this is the only
@@ -343,6 +600,7 @@ static void *heat_map( size_t size )
 void heat_init(void)
 {
     const char *count = getenv( "WINE_HEAT_COUNT" ), *wake = getenv( "WINE_HEAT_WAKE" );
+    const char *evpool = getenv( "WINE_HEAT_EVPOOL" );
     const char *exe = getenv( "WINE_HEAT_EXE" ), *dir = getenv( "WINE_HEAT_LOG" ), *p;
     unsigned int mode = 0;
     sigset_t all, old;
@@ -357,6 +615,8 @@ void heat_init(void)
     }
     /* jdrly/gw2-on-mac#44 */
     if ((p = getenv( "WINE_HEAT_MSYNC_UNREG" )) && !strcmp( p, "1" )) mode |= HEAT_MSYNC_UNREG;
+    if (evpool && !strcmp( evpool, "1" )) mode |= HEAT_EVPOOL;
+    else if (evpool && !strcmp( evpool, "1,mask" )) mode |= HEAT_EVPOOL | HEAT_EVPOOL_MASK;
     if (!mode) return;
     if (!exe || !*exe) exe = "Gw2-64.exe";
     if (!peb || !peb->ProcessParameters || !heat_is_exe( exe )) return;
@@ -366,6 +626,9 @@ void heat_init(void)
         mode &= ~HEAT_WAKE_SKIP;
     if ((mode & HEAT_COUNT) && !(heat_rows = heat_map( HEAT_ROWS * sizeof(*heat_rows) )))
         mode &= ~HEAT_COUNT;
+    if ((mode & HEAT_EVPOOL) && !(heat_pools = heat_map( 2 * sizeof(*heat_pools) )))
+        mode &= ~(HEAT_EVPOOL | HEAT_EVPOOL_MASK);
+    if (mode & HEAT_EVPOOL) mach_timebase_info( &heat_timebase );  /* heat_now() */
     if (mode & HEAT_COUNT)
     {
         mach_timebase_info( &heat_timebase );
