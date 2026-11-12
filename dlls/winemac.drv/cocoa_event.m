@@ -28,6 +28,7 @@
 #import "cocoa_event.h"
 #import "cocoa_app.h"
 #import "cocoa_window.h"
+#import "cocoa_calls.h"
 
 #pragma GCC diagnostic ignored "-Wdeclaration-after-statement"
 
@@ -607,6 +608,17 @@ void OnMainThread(dispatch_block_t block)
                 if (!finished)
                     kevent(queue->kq, NULL, 0, &kev, 1, NULL);
             }
+        }
+
+        /* GW2 on Mac (WINE_MACDRV_CALL=quiet): the main thread's byte for this call is still in
+           the pipe. The server sees the pipe readable, so the thread's next pump would drain
+           nothing and send one more set_queue_mask. Read it back when no event waits. With one,
+           the byte stays: it may stand in for that event's own, which the loop above read. */
+        if (call_quiet)
+        {
+            [queue->eventsLock lock];
+            event_pipe_settle(queue->fds[0], [queue->events count] != 0);
+            [queue->eventsLock unlock];
         }
     }
     else

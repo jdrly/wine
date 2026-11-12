@@ -54,7 +54,11 @@
 #   ntdll.so, and with mine in each WINE_HEAT_WAKE mode, with no WINE_HEAT_* variable and with
 #   them set for another program, and, when the build ships my win32u.so, SetCursor and the empty
 #   PeekMessage's yield under the engine's win32u.so and mine, with WINE_WIN32U_SETCURSOR and
-#   WINE_WIN32U_PEEK_YIELD unset and set. A push to gw2-on-mac runs only the prefix boot and
+#   WINE_WIN32U_PEEK_YIELD unset and set. Test 9 of jdrly/gw2-on-mac#62: tests/gw2/native/pipe.c,
+#   built natively, tests the event pipe functions of WINE_MACDRV_DRAIN and WINE_MACDRV_CALL; and
+#   clip.exe under the engine with my ntdll.so and my winemac.so, counting its requests, calls
+#   ClipCursor 1,000 times with one rectangle in each of four settings of the Mac driver's
+#   switches. A push to gw2-on-mac runs only the prefix boot and
 #   smoke.exe, under the engine's ntdll.so and under mine: its tree is a merged pull request's head,
 #   which went through all of that in that pull request's run, and Publish names that run.
 # lint: actionlint (.github/actionlint.yaml names the xcode-27 label), and the Python script compiles.
@@ -524,9 +528,10 @@ jobs:
           name: macdrv-arm64-${{ env.COMMIT }}
           path: ${{ runner.temp }}/macdrv-dist
 
-      # Three copies of the engine: its own, one with my ntdll.so, one with my winemac.so; a fourth
-      # with my ntdll.so (for its request counts) and my win32u.so when the build ships one. APFS
-      # clones, so the copies are free.
+      # Four copies of the engine: its own, one with my ntdll.so, one with my winemac.so, one with
+      # both (jdrly/gw2-on-mac#62's clip.exe, for the request counts); a fifth with my ntdll.so (for
+      # its request counts) and my win32u.so when the build ships one. APFS clones, so the copies
+      # are free.
       - name: Unpack the engine
         run: |
           echo "$MACH9_SHA256  toolchains/mach9.tar.xz" | shasum -a 256 -c
@@ -534,9 +539,12 @@ jobs:
           tar -xf toolchains/mach9.tar.xz -C "$RUNNER_TEMP/engine"
           cp -Rc "$RUNNER_TEMP/engine" "$RUNNER_TEMP/mine"
           cp -Rc "$RUNNER_TEMP/engine" "$RUNNER_TEMP/macdrv"
+          cp -Rc "$RUNNER_TEMP/engine" "$RUNNER_TEMP/both"
           install -m 755 "$RUNNER_TEMP/dist/ntdll.so" "$RUNNER_TEMP/mine/wine/lib/wine/aarch64-unix/ntdll.so"
           install -m 755 "$RUNNER_TEMP/macdrv-dist/winemac.so" "$RUNNER_TEMP/macdrv/wine/lib/wine/aarch64-unix/winemac.so"
-          xattr -drs com.apple.quarantine "$RUNNER_TEMP/engine" "$RUNNER_TEMP/mine" "$RUNNER_TEMP/macdrv"
+          install -m 755 "$RUNNER_TEMP/dist/ntdll.so" "$RUNNER_TEMP/both/wine/lib/wine/aarch64-unix/ntdll.so"
+          install -m 755 "$RUNNER_TEMP/macdrv-dist/winemac.so" "$RUNNER_TEMP/both/wine/lib/wine/aarch64-unix/winemac.so"
+          xattr -drs com.apple.quarantine "$RUNNER_TEMP/engine" "$RUNNER_TEMP/mine" "$RUNNER_TEMP/macdrv" "$RUNNER_TEMP/both"
           shasum -a 256 "$RUNNER_TEMP"/{engine,mine}/wine/lib/wine/aarch64-unix/ntdll.so \
             "$RUNNER_TEMP"/{engine,macdrv}/wine/lib/wine/aarch64-unix/winemac.so
           if [[ -f $RUNNER_TEMP/macdrv-dist/win32u.so ]]; then
@@ -583,6 +591,13 @@ jobs:
         run: |
           clang -std=gnu23 -O2 -Wall -Werror -o "$RUNNER_TEMP/fexstats" tests/gw2/native/fexstats.c
           "$RUNNER_TEMP/fexstats"
+      # test 9 of jdrly/gw2-on-mac#62, natively: WINE_MACDRV_DRAIN's FIONREAD against poll, and
+      # WINE_MACDRV_CALL's rule for the byte a synchronous call leaves (dlls/winemac.drv/cocoa_calls.h)
+      - name: The event pipe, natively
+        if: github.event_name == 'pull_request'
+        run: |
+          clang -std=gnu23 -O2 -Wall -Werror -o "$RUNNER_TEMP/pipe" tests/gw2/native/pipe.c
+          "$RUNNER_TEMP/pipe"
       # test 12: layered.exe's 600 frames, every third new, under the engine with my winemac.so and
       # the macsurface channel on. The driver's line at the 600th flush has to say 400 skipped with
       # WINE_MACDRV_SURFACE=copy,skip, and 0 with copy and unset. Only where the Mac driver starts,
@@ -609,6 +624,47 @@ jobs:
             line=$(tr -d '\r' <"$prefix/layered.log" | grep -E 'macsurface:.*: 600 flushes' || true)
             echo "WINE_MACDRV_SURFACE=$mode: ${line:-no macsurface line at the 600th flush}" | tee -a "$GITHUB_STEP_SUMMARY"
             [[ $line == *"$want"* ]] || { echo "::error::WINE_MACDRV_SURFACE=$mode: expected \"$want\""; exit 1; }
+          done
+      # test 9 of jdrly/gw2-on-mac#62: clip.exe under the engine with my ntdll.so (its request
+      # counts) and my winemac.so, unset, with WINE_MACDRV_CALL=quiet, with WINE_MACDRV_CLIP=changes
+      # and with all four switches. clip.exe checks the counts itself. Here the driver's
+      # "unchanged, not sent" lines: at least 995 of the 1,000 calls with CLIP=changes, none without.
+      # Only where the Mac driver starts.
+      - name: The cursor clip and the call's byte
+        if: github.event_name == 'pull_request'
+        run: |
+          if ! grep -qF 'gw2 test window: the Mac driver started' "$RUNNER_TEMP/window.txt"; then
+            echo "::warning::the Mac driver doesn't start on this runner, so test 9's clip.exe needs the Mac run" |
+              tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          prefix=$RUNNER_TEMP/clip-prefix
+          for mode in unset quiet changes all; do
+            unset WINE_MACDRV_VIEW WINE_MACDRV_CLIP WINE_MACDRV_CALL WINE_MACDRV_DRAIN
+            case $mode in
+              quiet) export WINE_MACDRV_CALL=quiet ;;
+              changes) export WINE_MACDRV_CLIP=changes ;;
+              all) export WINE_MACDRV_VIEW=changes WINE_MACDRV_CLIP=changes WINE_MACDRV_CALL=quiet WINE_MACDRV_DRAIN=fionread ;;
+            esac
+            log=$RUNNER_TEMP/clip-log-$mode
+            mkdir -p "$log"
+            status=0
+            WINE_HEAT_EXE=clip.exe WINE_HEAT_COUNT=1 WINE_HEAT_LOG=$log GW2_TEST_WINEDEBUG=-all,+cursor GW2_TEST_SECONDS=300 \
+              tests/gw2/run.zsh "$RUNNER_TEMP/both/wine" "$prefix" "$RUNNER_TEMP/tests/clip.exe" >"$RUNNER_TEMP/clip-$mode.txt" || status=1
+            skipped=$(tr -d '\r' <"$prefix/clip.log" | grep -c 'macdrv_ClipCursor unchanged, not sent' || true)
+            {
+              echo "### clip.exe, $mode"
+              echo '```'
+              cat "$RUNNER_TEMP/clip-$mode.txt"
+              echo "the driver's \"unchanged, not sent\": $skipped"
+              echo '```'
+            } | tee -a "$GITHUB_STEP_SUMMARY"
+            (( status == 0 )) || { echo "::error::clip.exe failed with $mode"; exit 1; }
+            if [[ $mode == changes || $mode == all ]]; then
+              (( skipped >= 995 )) || { echo "::error::$mode: $skipped calls not sent, expected at least 995"; exit 1; }
+            else
+              (( skipped == 0 )) || { echo "::error::$mode: $skipped calls not sent, expected none"; exit 1; }
+            fi
           done
       - name: Run them
         if: github.event_name == 'pull_request'
