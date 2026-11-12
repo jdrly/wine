@@ -49,6 +49,10 @@ static const struct _KUSER_SHARED_DATA *user_shared_data = (struct _KUSER_SHARED
 
 static const struct ratio no_dpi;
 
+/* GW2 on Mac (jdrly/gw2-on-mac#61): WINE_WIN32U_PEEK_YIELD=off, read at the first empty
+   NtUserPeekMessage: 1 off (no yield), 0 Wine's yield, -1 not read yet */
+static LONG peek_no_yield = -1;
+
 static LONG atomic_load_long( const volatile LONG *ptr )
 {
 #if defined(__i386__) || defined(__x86_64__)
@@ -3591,8 +3595,21 @@ BOOL WINAPI NtUserPeekMessage( MSG *msg_out, HWND hwnd, UINT first, UINT last, U
             struct thunk_lock_params params = {.dispatch.callback = thunk_lock_callback};
             void *ret_ptr;
             ULONG ret_len;
+            LONG no_yield = ReadNoFence( &peek_no_yield );
 
             flush_window_surfaces( TRUE );
+
+            if (no_yield < 0)
+            {
+                const char *value = getenv( "WINE_WIN32U_PEEK_YIELD" );
+
+                no_yield = value && !strcmp( value, "off" );
+                if (value && !no_yield) ERR( "WINE_WIN32U_PEEK_YIELD=%s isn't off\n", debugstr_a(value) );
+                WriteNoFence( &peek_no_yield, no_yield );
+            }
+            /* off leaves out the yield, and with it the release and restore of the Win16 lock
+               around it */
+            if (no_yield) return FALSE;
 
             if (!KeUserDispatchCallback( &params.dispatch, sizeof(params), &ret_ptr, &ret_len ) &&
                 ret_len == sizeof(params.locks))
