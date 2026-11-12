@@ -288,11 +288,13 @@ unsigned int server_call_unlocked( void *req_ptr )
     struct thread_data *data = get_thread_data();
     struct __server_request_info * const req = req_ptr;
     unsigned long long start = heat_start();
+    union generic_request sent;  /* jdrly/gw2-on-mac#60: the reply overwrites the request */
     unsigned int ret;
 
+    if (start) sent = req->u.req;
     if ((ret = send_request( data->request_fd, req ))) return ret;
     ret = wait_reply( data->reply_fd, req );
-    if (start) heat_time( HC_SERVER, HT_SERVER, start );
+    if (start) heat_server_done( &sent, &req->u.reply, ret, start );
     return ret;
 }
 
