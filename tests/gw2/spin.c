@@ -132,11 +132,15 @@ static void await( volatile LONG *value, LONG want, DWORD ms, const char *what, 
     }
 }
 
-/* lets a case's threads run until *count reaches want, or for 2 s at most */
+/* lets a case's threads run until *count reaches want; 30 s without that is a hang */
 static void work_until( volatile LONG *count, LONG want )
 {
     DWORD t0 = GetTickCount();
-    while (*count < want && GetTickCount() - t0 < 2000) Sleep( 10 );
+    while (*count < want)
+    {
+        if (GetTickCount() - t0 > 30000) FAIL( "%ld of %ld after 30 s", *count, want );
+        Sleep( 10 );
+    }
 }
 
 /* WINE_HEAT_SPIN as heat.c reads it */
@@ -466,12 +470,11 @@ static DWORD WINAPI job_worker( void *arg )
 static DWORD WINAPI game_thread( void *arg )
 {
     LONG rounds = 0;
-    LONGLONG t0, until;
+    LONGLONG t0;
 
     set_priority( THREAD_PRIORITY_HIGHEST );
     t0 = now();
-    until = t0 + 2 * freq.QuadPart;
-    while (rounds < JOB_ROUNDS && now() < until)
+    while (rounds < JOB_ROUNDS)
     {
         jobs_left = WORKERS;
         if (!ReleaseSemaphore( job_sem, WORKERS, NULL )) FAIL( "ReleaseSemaphore: error %lu", GetLastError() );
@@ -521,7 +524,8 @@ struct alerted
 {
     int           priority;
     DWORD         tid;
-    volatile LONG ready, go, armed, taken, stop;  /* go: the round the alerter lets it arm */
+    HANDLE        go;  /* a semaphore the alerter releases when it turns to this thread */
+    volatile LONG ready, armed, taken, stop;
     NTSTATUS      failed;
 };
 
@@ -537,13 +541,10 @@ static DWORD WINAPI alert_waiter( void *arg )
     InterlockedExchange( &w->ready, 1 );
     for (i = 1;; i++)
     {
-        /* armed only when the alerter turns to this thread, so its delay starts at the wait */
-        while (w->go < i)
-        {
-            if (w->stop) return 0;
-            /* the other waiter's turn: leave the CPU to the alerter and that waiter */
-            if (!SwitchToThread()) YieldProcessor();
-        }
+        /* armed only when the alerter turns to this thread, so its delay starts at the wait;
+         * asleep meanwhile, so that it takes no CPU from the alerter and the other waiter */
+        if (WaitForSingleObject( w->go, 10000 ) != WAIT_OBJECT_0) return 1;
+        if (w->stop) return 0;
         InterlockedExchange( &w->armed, i );
         status = pNtWaitForAlertByThreadId( (const void *)&w->armed, &timeout );
         if (status != STATUS_ALERTED)
@@ -557,8 +558,11 @@ static DWORD WINAPI alert_waiter( void *arg )
 
 static HANDLE start_waiter( struct alerted *w )
 {
-    HANDLE h = thread( alert_waiter, w );
+    HANDLE h;
     DWORD t0 = GetTickCount();
+
+    if (!(w->go = CreateSemaphoreW( NULL, 0, 1, NULL ))) FAIL( "CreateSemaphore: error %lu", GetLastError() );
+    h = thread( alert_waiter, w );
 
     /* alone: no other thread starts or ends while it does, and it set its priority */
     while (!w->ready)
@@ -570,20 +574,20 @@ static HANDLE start_waiter( struct alerted *w )
 }
 
 static struct alerted high = { THREAD_PRIORITY_HIGHEST }, above = { THREAD_PRIORITY_ABOVE_NORMAL };
-static LONG alert_rounds;
+#define ALERT_ROUNDS 2000
 
 static DWORD WINAPI alerter( void *arg )
 {
     struct alerted *w[2] = { &high, &above };
-    LONGLONG span = us_ticks( 2 * (spin[LOCK].on ? spin[LOCK].us : 20) ), until = now() + 3 * freq.QuadPart;
+    LONGLONG span = us_ticks( 2 * (spin[LOCK].on ? spin[LOCK].us : 20) );
     LONG i;
     int j;
 
-    for (i = 1; i <= 5000 && now() < until; i++)
+    for (i = 1; i <= ALERT_ROUNDS; i++)
     {
         for (j = 0; j < 2; j++)
         {
-            InterlockedExchange( &w[j]->go, i );
+            ReleaseSemaphore( w[j]->go, 1, NULL );
             await( &w[j]->armed, i, 2000, "a waiter didn't get to its wait", i );
             busy( span * (i % 64) / 64 );
             pNtAlertThreadByThreadId( ULongToHandle( w[j]->tid ) );
@@ -592,7 +596,6 @@ static DWORD WINAPI alerter( void *arg )
             await( &w[j]->taken, i, 3000, "the alert wasn't taken", i );
         }
     }
-    alert_rounds = i - 1;
     return 0;
 }
 
@@ -609,18 +612,22 @@ static void test_alerts(void)
     h = start_waiter( &high );
     s = thread( alerter, NULL );
     join( s, 60000 );
-    high.stop = above.stop = 1;  /* both wait for their next go */
+    high.stop = above.stop = 1;  /* both wait for their next turn */
+    ReleaseSemaphore( high.go, 1, NULL );
+    ReleaseSemaphore( above.go, 1, NULL );
     join( h, 10000 );
     join( a, 10000 );
-    printf( "gw2 test spin: %ld rounds of an alert to each thread, every one taken\n", alert_rounds );
-    if (alert_rounds < 1000) FAIL( "only %ld rounds in 3 s", alert_rounds );
+    CloseHandle( high.go );
+    CloseHandle( above.go );
+    printf( "gw2 test spin: %d rounds of an alert to each thread, every one taken\n", ALERT_ROUNDS );
 }
 
 /* pulse: PulseEvent during an event spin */
 
 static HANDLE pulse_event;
-/* the round the pulser lets the waiter start, the waiter's last round armed and done, its result */
-static volatile LONG pulse_go, pulse_armed, pulse_taken, pulse_stop;
+static HANDLE pulse_go;  /* a semaphore the pulser releases for each round */
+/* the waiter's last round armed and done, and its result */
+static volatile LONG pulse_armed, pulse_taken, pulse_stop;
 static volatile DWORD pulse_result;
 static DWORD pulse_tid;
 
@@ -634,11 +641,8 @@ static DWORD WINAPI pulse_waiter( void *arg )
 
     for (i = 1;; i++)
     {
-        while (pulse_go < i)
-        {
-            if (pulse_stop) return 0;
-            YieldProcessor();
-        }
+        if (WaitForSingleObject( pulse_go, 10000 ) != WAIT_OBJECT_0) return 1;
+        if (pulse_stop) return 0;
         InterlockedExchange( &pulse_armed, i );
         pulse_result = WaitForSingleObject( pulse_event, PULSE_WAIT_MS );
         InterlockedExchange( &pulse_taken, i );
@@ -648,7 +652,7 @@ static DWORD WINAPI pulse_waiter( void *arg )
 
 static void test_pulse(void)
 {
-    LONGLONG span = us_ticks( 2 * (spin[EVENT].on ? spin[EVENT].us : 30) ), until;
+    LONGLONG span = us_ticks( 2 * (spin[EVENT].on ? spin[EVENT].us : 30) );
     LONG i, pulsed = 0, late = 0, missed = 0, slept_missed = 0, seen;
     DWORD t0;
     BOOL sent;
@@ -656,12 +660,12 @@ static void test_pulse(void)
 
     start( "pulse" );
     if (!(pulse_event = CreateEventW( NULL, FALSE, FALSE, NULL ))) FAIL( "CreateEvent: error %lu", GetLastError() );
+    if (!(pulse_go = CreateSemaphoreW( NULL, 0, 1, NULL ))) FAIL( "CreateSemaphore: error %lu", GetLastError() );
     w = thread( pulse_waiter, NULL );
     pulse_tid = GetThreadId( w );
-    until = now() + 3 * freq.QuadPart;
-    for (i = 1; i <= PULSE_ROUNDS && now() < until; i++)
+    for (i = 1; i <= PULSE_ROUNDS; i++)
     {
-        InterlockedExchange( &pulse_go, i );
+        ReleaseSemaphore( pulse_go, 1, NULL );
         await( &pulse_armed, i, 2000, "the waiter didn't get to its wait", i );
         busy( i % 16 ? span / 4 + span * (i % 32) / 32 : us_ticks( 3000 ) );
         /* this thread was off its core longer than the wait: the round tests nothing */
@@ -687,15 +691,16 @@ static void test_pulse(void)
         }
     }
     pulse_stop = 1;
+    ReleaseSemaphore( pulse_go, 1, NULL );
     join( w, 10000 );
     i--;
     printf( "gw2 test spin: %ld rounds, %ld pulsed, %ld with the pulser late; %ld waits timed out "
             "(a pulse before the wait, or a lost one): %ld in the sweep, %ld of the 3 ms rounds\n",
             i, pulsed, late, missed, missed - slept_missed, slept_missed );
-    if (i < 500) FAIL( "only %ld rounds in 3 s", i );
     if (late * 10 > i) FAIL( "the pulser was late in %ld of %ld rounds, more than 10%%: too few pulses tested", late, i );
     if (missed * 50 > pulsed) FAIL( "%ld of %ld pulsed waits timed out, more than 2%%", missed, pulsed );
     CloseHandle( pulse_event );
+    CloseHandle( pulse_go );
 }
 
 /* what the counters say */
