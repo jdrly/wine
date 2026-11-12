@@ -115,6 +115,13 @@ extern void heat_woke_on( unsigned int obj );
 extern BOOL heat_skip_wake_slow( unsigned int obj, const unsigned short *refcount );
 extern __thread HANDLE heat_releasing;
 
+/* jdrly/gw2-on-mac#60: a server call ended, <status> from the reply. Counts it as HC_SERVER with
+ * HT_SERVER, and by its request code. <sent> is the request as it was before the reply overwrote it. */
+union generic_request;
+union generic_reply;
+extern void heat_server_done( const union generic_request *sent, const union generic_reply *reply,
+                              unsigned int status, unsigned long long start );
+
 static inline void heat_count( enum heat_counter c )
 {
     if (heat_mode & HEAT_COUNT) heat_add( c );
