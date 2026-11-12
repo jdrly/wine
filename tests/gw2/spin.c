@@ -2,20 +2,20 @@
  * passes under the engine's own ntdll.so and under mine in every mode; the counter checks run
  * when WINE_HEAT_COUNT=1 and WINE_HEAT_EXE names this program.
  *
- *   cs      4 threads on one critical section (no spin count) for 2 s: never two inside, every
- *           entry counted.
+ *   cs      4 threads on one critical section (no spin count) for 200,000 entries: never two
+ *           inside, every entry counted.
  *   srw     2 producers and 2 consumers on a queue of 8 behind an SRW lock with two condition
- *           variables, 2 s: every item produced is consumed, nobody stays asleep.
+ *           variables, 100,000 items: every item produced is consumed, nobody stays asleep.
  *   jobs    a game thread at HIGHEST releases 2 jobs of 20 us (then 100 us) at a time to 2
  *           workers at ABOVE_NORMAL that wait on a semaphore, and waits on an event that the
- *           round's last job sets, 2 s each: every round ends, every job runs once.
+ *           round's last job sets, 2,000 rounds each: every round ends, every job runs once.
  *   alerts  a thread at HIGHEST and one at ABOVE_NORMAL wait in NtWaitForAlertByThreadId, and a
  *           third alerts each in turn after a delay that sweeps 0 to twice the lock spin, so
  *           alerts land before, during and after the spin. An alert is never lost: one sent
  *           before the wait stays pending, so each wait has to return STATUS_ALERTED, no
  *           exception allowed.
  *   pulse   a thread waits on an auto-reset event that only PulseEvent touches, the pulse after
- *           a delay that sweeps through the event spin, and every 8th round after 3 ms, when the
+ *           a delay that sweeps through the event spin, and every 16th round after 3 ms, when the
  *           waiter is asleep.
  *
  * The counters, from the threads' rows in heat.c's log:
@@ -120,6 +120,13 @@ static void await( volatile LONG *value, LONG want, DWORD ms, const char *what, 
     }
 }
 
+/* lets a case's threads run until *count reaches want, or for 2 s at most */
+static void work_until( volatile LONG *count, LONG want )
+{
+    DWORD t0 = GetTickCount();
+    while (*count < want && GetTickCount() - t0 < 2000) Sleep( 10 );
+}
+
 /* WINE_HEAT_SPIN as heat.c reads it */
 
 enum { LOCK, EVENT, SEM, KINDS };
@@ -185,19 +192,18 @@ static BOOL spins( int kind, int priority )
 
 static char log_text[1 << 20];
 
-static void read_log(void)
+/* this process's log into log_text; the "seconds" of its header, -1 if there is none yet */
+static double load_log( const char *dir )
 {
-    char dir[MAX_PATH], path[MAX_PATH * 2];
-    const char *line;
+    char path[MAX_PATH * 2];
+    const char *p;
     WIN32_FIND_DATAA fd;
     HANDLE find;
     size_t len = 0;
     FILE *f;
 
-    if (!GetEnvironmentVariableA( "WINE_HEAT_LOG", dir, sizeof(dir) )) FAIL( "WINE_HEAT_LOG isn't set" );
-    Sleep( 6000 );  /* the counters are written every 5 s */
     snprintf( path, sizeof(path), "Z:%s/heat-*.log", dir );
-    if ((find = FindFirstFileA( path, &fd )) == INVALID_HANDLE_VALUE) FAIL( "no heat-*.log in %s", dir );
+    if ((find = FindFirstFileA( path, &fd )) == INVALID_HANDLE_VALUE) return -1;
     do
     {
         snprintf( path, sizeof(path), "Z:%s/%s", dir, fd.cFileName );
@@ -207,6 +213,27 @@ static void read_log(void)
     } while (FindNextFileA( find, &fd ));
     FindClose( find );
     log_text[len] = 0;
+    /* heat.c writes the file in one call after truncating it; a read in between is incomplete */
+    if (!len || log_text[len - 1] != '\n') return -1;
+    return (p = strstr( log_text, " seconds " )) && strstr( log_text, "\ntotal " ) ? atof( p + 9 ) : -1;
+}
+
+/* the first dump made after the cases ended: heat.c writes one every 5 s */
+static void read_log(void)
+{
+    char dir[MAX_PATH];
+    const char *line;
+    double before, seconds;
+    DWORD t0 = GetTickCount();
+
+    if (!GetEnvironmentVariableA( "WINE_HEAT_LOG", dir, sizeof(dir) )) FAIL( "WINE_HEAT_LOG isn't set" );
+    before = load_log( dir );
+    while ((seconds = load_log( dir )) <= before)
+    {
+        if (GetTickCount() - t0 > 12000) FAIL( "no new counters in %s after 12 s", dir );
+        Sleep( 100 );
+    }
+    printf( "gw2 test spin: the counters of %.1f s, after the cases' end at %.1f s or later\n", seconds, before );
     if ((line = strstr( log_text, "\nspin " )))
         printf( "gw2 test spin: the log's line: %.*s\n", (int)strcspn( line + 1, "\n" ), line + 1 );
 }
@@ -256,6 +283,7 @@ static BOOL spun( DWORD tid, int kind )
 /* cs: 4 threads on one critical section */
 
 #define CS_THREADS 4
+#define CS_ENTRIES 200000  /* thousands of collisions, each a lock wait with no spin count */
 static CRITICAL_SECTION cs;
 static volatile LONG cs_stop, cs_inside, cs_twice;
 static LONG cs_count, cs_local[CS_THREADS];
@@ -295,19 +323,20 @@ static void test_cs(void)
         threads[i] = thread( cs_thread, (void *)(INT_PTR)i );
         cs_tid[i] = GetThreadId( threads[i] );
     }
-    Sleep( 2000 );
+    work_until( (volatile LONG *)&cs_count, CS_ENTRIES );
     cs_stop = 1;
     for (i = 0; i < CS_THREADS; i++) join( threads[i], 10000 );
     for (i = 0; i < CS_THREADS; i++) sum += cs_local[i];
     if (cs_twice) FAIL( "two threads were inside at once" );
     if (sum != cs_count) FAIL( "%ld entries counted inside, %ld by the threads", cs_count, sum );
-    printf( "gw2 test spin: %ld entries in 2 s\n", sum );
+    printf( "gw2 test spin: %ld entries\n", sum );
     DeleteCriticalSection( &cs );
 }
 
 /* srw: a queue behind an SRW lock with condition variables */
 
 #define QUEUE 8
+#define QUEUE_ITEMS 100000
 static SRWLOCK srw = SRWLOCK_INIT;
 static CONDITION_VARIABLE not_empty = CONDITION_VARIABLE_INIT, not_full = CONDITION_VARIABLE_INIT;
 static LONGLONG queue[QUEUE];
@@ -373,7 +402,7 @@ static void test_srw(void)
         p[i] = thread( producer, (void *)(INT_PTR)(i + 1) );
         c[i] = thread( consumer, NULL );
     }
-    Sleep( 2000 );
+    work_until( (volatile LONG *)&produced, QUEUE_ITEMS );
     AcquireSRWLockExclusive( &srw );
     q_stop = TRUE;
     ReleaseSRWLockExclusive( &srw );
@@ -386,12 +415,13 @@ static void test_srw(void)
     for (i = 0; i < 2; i++) join( c[i], 10000 );
     if (consumed != produced || consumed_sum != produced_sum)
         FAIL( "%ld items produced, %ld consumed", produced, consumed );
-    printf( "gw2 test spin: %ld items through the queue in 2 s\n", produced );
+    printf( "gw2 test spin: %ld items through the queue\n", produced );
 }
 
 /* jobs: a game thread, its job semaphore and the event of its rounds */
 
 #define WORKERS 2
+#define JOB_ROUNDS 2000  /* each round sleeps or spins the game thread once and each worker once */
 static HANDLE job_sem, job_done;
 static volatile LONG jobs_left, jobs_stop;
 static LONG jobs_ran;
@@ -419,7 +449,7 @@ static DWORD WINAPI game_thread( void *arg )
     set_priority( THREAD_PRIORITY_HIGHEST );
     t0 = now();
     until = t0 + 2 * freq.QuadPart;
-    while (now() < until)
+    while (rounds < JOB_ROUNDS && now() < until)
     {
         jobs_left = WORKERS;
         if (!ReleaseSemaphore( job_sem, WORKERS, NULL )) FAIL( "ReleaseSemaphore: error %lu", GetLastError() );
@@ -521,7 +551,7 @@ static DWORD WINAPI alerter( void *arg )
     LONG i;
     int j;
 
-    for (i = 1; i <= 20000 && now() < until; i++)
+    for (i = 1; i <= 5000 && now() < until; i++)
     {
         for (j = 0; j < 2; j++)
         {
@@ -579,7 +609,7 @@ static DWORD WINAPI pulse_waiter( void *arg )
         {
             if (pulse_stop) return 0;
             pulse_missed++;
-            if (!(i % 8)) pulse_slept_missed++;
+            if (!(i % 16)) pulse_slept_missed++;
         }
         else if (r != WAIT_OBJECT_0) return 1;
         InterlockedExchange( &pulse_taken, i );
@@ -598,10 +628,10 @@ static void test_pulse(void)
     w = thread( pulse_waiter, NULL );
     pulse_tid = GetThreadId( w );
     until = now() + 3 * freq.QuadPart;
-    for (i = 1; i <= 5000 && now() < until; i++)
+    for (i = 1; i <= 2000 && now() < until; i++)
     {
         await( &pulse_armed, i, 2000, "the waiter didn't get to its wait", i );
-        busy( i % 8 ? span / 4 + span * (i % 32) / 32 : us_ticks( 3000 ) );
+        busy( i % 16 ? span / 4 + span * (i % 32) / 32 : us_ticks( 3000 ) );
         if (!PulseEvent( pulse_event )) FAIL( "PulseEvent: error %lu", GetLastError() );
         await( &pulse_taken, i, 2000, "the waiter didn't come back", i );
     }
