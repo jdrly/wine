@@ -750,36 +750,58 @@ def byte_gate(mine, theirs, r):
 
 # objects: the patched build against my build of the engine's commit, per object file
 
-def literal(m, num):
-    """symbol <num> as the text of the string literal it labels, or None for any other symbol. The
-    compiler numbers the labels (l_.str.12) in the order it makes the literals, so a string added
-    to one function renames those of every function made after it; the text is what the code uses."""
+def literal(m, num, addend=0):
+    """symbol <num>, at <addend> from it, as the string literal it labels: its section and every
+    byte from the label to the next label in the section, or on to the first NUL after it where the
+    bytes up to that label don't end in one, or to the section's end. None for any other symbol,
+    and for an addend outside those bytes, which then go by the label. The compiler numbers the
+    labels (l_.str.12) in the order it makes the literals, so a string added to one function renames
+    those of every function made after it; the section and the bytes are what the code uses."""
     _, t, sect, _, value = m.syms[num]
     if t & (N_STAB | N_EXT) or not 0 < sect <= len(m.sections):
         return None
     s = m.sections[sect - 1]
     if s["type"] != S_CSTRING_LITERALS or not s["addr"] <= value < s["addr"] + s["size"]:
         return None
+    if "_labels" not in m.__dict__:  # each section's label addresses, sorted, once per file
+        m._labels = {}
+        for _, ty, se, _, v in m.syms:
+            if not ty & N_STAB and ty & N_TYPE == N_SECT:
+                m._labels.setdefault(se, []).append(v)
+        for v in m._labels.values():
+            v.sort()
+    labels = m._labels.get(sect, [])
+    i = bisect.bisect_right(labels, value)
     start, stop = s["offset"] + value - s["addr"], s["offset"] + s["size"]
-    end = m.data.find(b"\0", start, stop)
-    return f"literal {bytes(m.data[start:end if end >= 0 else stop])!r}"
+    end = s["offset"] + labels[i] - s["addr"] if i < len(labels) else stop
+    if not m.data[start:end].endswith(b"\0"):  # a read runs on to the first NUL, past the next label
+        nul = m.data.find(b"\0", end, stop)
+        end = nul + 1 if nul >= 0 else stop
+    text = bytes(m.data[start:end])
+    if not 0 <= addend < len(text):
+        return None
+    return f"literal {s['name']} {text!r}"
 
 
 def relocations(m, sec):
     """a section's relocations as (offset, type, pc-relative, length, target): the target by symbol
-    name, a string literal by its text (literal), or by section name for one within the file, or
-    the addend of an ARM64_RELOC_ADDEND"""
-    out = []
+    name, a string literal by its section and bytes (literal), or by section name for one within the
+    file, or the addend of an ARM64_RELOC_ADDEND, which comes right before the relocation it adds to"""
+    out, addend = [], 0
     for k in range(sec["nreloc"]):
         address, info = struct.unpack_from("<iI", m.data, sec["reloff"] + 8 * k)
         num, pcrel, length, ext, rtype = info & 0xffffff, info >> 24 & 1, info >> 25 & 3, info >> 27 & 1, info >> 28
         if rtype == 10:
             target = f"addend {sext(num, 24)}"
-        elif ext:
-            target = literal(m, num) or m.syms[num][0]
+            out.append((address, rtype, pcrel, length, target))
+            addend = sext(num, 24)
+            continue
+        if ext:
+            target = literal(m, num, addend) or m.syms[num][0]
         else:
             target = m.sections[num - 1]["name"] if 0 < num <= len(m.sections) else f"section {num}"
         out.append((address, rtype, pcrel, length, target))
+        addend = 0
     return out
 
 
@@ -1240,20 +1262,50 @@ def selftest(engine_dir):
     if got != ([], [], []):
         failed.append(f"touched object: __text at another address with the same functions, not {got}")
 
-    # a string literal by its text: a string added before it renames its label (l_.str.1 to
-    # l_.str.2), which leaves the function as it is; other text is a change
-    def with_literal(label, text):
-        m = fake_object(code, [(0, page | 3), (4, off | 3)], b"")
-        m.sections.append(dict(name="__TEXT,__cstring", addr=0x2000, offset=len(m.data), size=len(text) + 1, align=0,
+    # a string literal by its section and bytes: a string added before it renames its label (l_.str.1
+    # to l_.str.2), which leaves the function as it is. Other text, another section with the same
+    # text, a literal without its NUL (other bytes up to the next NUL), other bytes past the first
+    # NUL that an addend reaches, an addend outside the literal (compared by label then) and an
+    # addend that would carry over to the next relocation are changes.
+    def with_literal(text, labels, relocs, name="__TEXT,__cstring"):
+        """__text's two words relocated by <relocs> [(address, label index, addend or None)] to
+        <labels> [(name, offset)] in a cstring section of <text>"""
+        rel = []
+        for address, label, addend in relocs:
+            if addend is not None:  # ARM64_RELOC_ADDEND, right before the one it adds to
+                rel.append((address, 10 << 28 | addend & 0xffffff))
+            rel.append((address, (page if address == 0 else off) | 3 + label))
+        m = fake_object(code, rel, b"")
+        m.sections.append(dict(name=name, addr=0x2000, offset=len(m.data), size=len(text), align=0,
                                flags=S_CSTRING_LITERALS, type=S_CSTRING_LITERALS, reloff=0, nreloc=0,
                                reserved1=0, reserved2=0))
-        m.data += text + b"\0"
-        m.syms.append((label, N_SECT, len(m.sections), 0, 0x2000))
+        m.data += text
+        m.syms += [(n, N_SECT, len(m.sections), 0, 0x2000 + o) for n, o in labels]
         return m
-    if function_changes(with_literal("l_.str.1", b"text"), with_literal("l_.str.2", b"text"), "x.c") != ([], [], []):
-        failed.append("touched object: a string literal's label renumbered, its text the same")
-    if function_changes(with_literal("l_.str.1", b"text"), with_literal("l_.str.1", b"other"), "x.c")[0] != ["x.c: f"]:
-        failed.append("touched object: a string literal's text")
+    one = lambda text, label="l_.str.1", name="__TEXT,__cstring", addend=None: with_literal(
+        text, [(label, 0)], [(0, 0, addend), (4, 0, addend)], name)
+    if function_changes(one(b"text\0"), one(b"text\0", "l_.str.2"), "x.c") != ([], [], []):
+        failed.append("touched object: a string literal's label renumbered, its bytes the same")
+    if function_changes(one(b"ab\0cd\0", addend=3), one(b"ab\0cd\0", "l_.str.2", addend=3), "x.c") != ([], [], []):
+        failed.append("touched object: a renumbered label with an addend inside the literal")
+    carry = lambda b: with_literal(b"ab\0" + b"cdefgh\0", [(f"l_.str.{b}", 0), (f"l_.str.{b + 1}", 3)],
+                                   [(0, 1, 5), (4, 0, None)])
+    if function_changes(carry(1), carry(2), "x.c") != ([], [], []):
+        failed.append("touched object: renumbered labels, one with an addend and one without")
+    for what, base, head in (
+            ("its text", one(b"text\0"), one(b"other\0")),
+            ("its section", one(b"text\0"), one(b"text\0", "l_.str.2", "__DATA,__cstring")),
+            ("its NUL", one(b"text\0"), one(b"text")),
+            ("without its NUL, the bytes after it", with_literal(b"text" + b"AB\0", [("l_.str.1", 0), ("l_.str.2", 4)],
+                                                                 [(0, 0, None), (4, 0, None)]),
+             with_literal(b"text" + b"CD\0", [("l_.str.1", 0), ("l_.str.2", 4)], [(0, 0, None), (4, 0, None)])),
+            ("bytes an addend reaches past the first NUL", one(b"ab\0cd\0", addend=3), one(b"ab\0ce\0", addend=3)),
+            ("a renumbered label with an addend outside the literal", one(b"ab\0", addend=5),
+             one(b"ab\0", "l_.str.2", addend=5)),
+            ("an addend carried over to the next relocation", carry(1),
+             with_literal(b"ab\0" + b"cdefgh\0", [("l_.str.1", 0), ("l_.str.2", 3)], [(0, 1, 5), (4, 0, 5)]))):
+        if function_changes(base, head, "x.c")[0] != ["x.c: f"]:
+            failed.append(f"touched object: a string literal, {what}")
 
     # an object's inputs, from makedep's rules: a header change that alters an object whose .c
     # didn't change makes it a touched one (listed, passes); a difference with no changed input

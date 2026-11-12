@@ -3607,17 +3607,16 @@ BOOL WINAPI NtUserPeekMessage( MSG *msg_out, HWND hwnd, UINT first, UINT last, U
                 if (value && !no_yield) ERR( "WINE_WIN32U_PEEK_YIELD=%s isn't off\n", debugstr_a(value) );
                 WriteNoFence( &peek_no_yield, no_yield );
             }
-            /* off leaves out the yield, and with it the release and restore of the Win16 lock
-               around it */
-            if (no_yield) return FALSE;
-
             if (!KeUserDispatchCallback( &params.dispatch, sizeof(params), &ret_ptr, &ret_len ) &&
                 ret_len == sizeof(params.locks))
             {
                 params.locks = *(DWORD *)ret_ptr;
                 params.restore = TRUE;
             }
-            NtYieldExecution();
+            /* off leaves out the yield, unless the Win16 thunk lock's callback is registered:
+               then the yield is what hands the lock to another Win16 task. Without the callback
+               both dispatches return at once. */
+            if (!no_yield || params.dispatch.callback) NtYieldExecution();
             KeUserDispatchCallback( &params.dispatch, sizeof(params), &ret_ptr, &ret_len );
         }
         return FALSE;
