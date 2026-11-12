@@ -23,6 +23,9 @@
 #define HEAT_WAKE_ONE  0x2  /* WINE_HEAT_WAKE=one */
 #define HEAT_WAKE_SKIP 0x4  /* WINE_HEAT_WAKE=skip */
 
+/* jdrly/gw2-on-mac#44 */
+#define HEAT_MSYNC_UNREG 0x10  /* WINE_HEAT_MSYNC_UNREG=1 */
+
 enum heat_counter
 {
     HC_RELEASE,      /* semaphore releases */
@@ -39,6 +42,8 @@ enum heat_counter
     HC_QPC,          /* NtQueryPerformanceCounter */
     HC_YIELD,        /* NtYieldExecution, with HT_YIELD and by how long the yield took: */
     HC_YIELD_5US, HC_YIELD_20US, HC_YIELD_100US, HC_YIELD_1MS, HC_YIELD_LONG,
+    /* jdrly/gw2-on-mac#44 */
+    HC_UNREG,        /* multiple-object waits that unregistered after finding an object signaled */
     HC_NB
 };
 

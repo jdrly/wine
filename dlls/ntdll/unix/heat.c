@@ -14,6 +14,10 @@
  *                         every release. Events and mutexes keep that.
  *   WINE_HEAT_WAKE=skip   a release of a private semaphore with no thread of this process
  *                         asleep on it makes no wake call. "one,skip" for both.
+ *   WINE_HEAT_MSYNC_UNREG=1  a multiple-object wait that finds an object signaled right after
+ *                         it registered with the server unregisters there, and drops the alert
+ *                         object's count, instead of dropping only the objects' counts
+ *                         (dappermint/winecx 9be392b3b4, jdrly/gw2-on-mac#44). Counted as unreg.
  *
  * See jdrly/gw2-on-mac#40 and, for 0.1.x's version of the same switches, gw2-on-mac's
  * docs/research/heat-locks-2026-10-29.md.
@@ -80,6 +84,7 @@ static const char * const heat_counter_names[HC_NB] =
     "release", "wake_skipped", "wake_one", "wake_none", "woken", "spurious", "event_create",
     "event_close", "close", "server", "lock_sleep", "qpc", "yield", "yield_5us", "yield_20us", "yield_100us",
     "yield_1ms", "yield_long",
+    "unreg",  /* jdrly/gw2-on-mac#44 */
 };
 static const char * const heat_timer_names[HT_NB] = { "server_ms", "yield_ms" };
 
@@ -350,6 +355,8 @@ void heat_init(void)
         if (n == 3 && !strncmp( p, "one", 3 )) mode |= HEAT_WAKE_ONE;
         else if (n == 4 && !strncmp( p, "skip", 4 )) mode |= HEAT_WAKE_SKIP;
     }
+    /* jdrly/gw2-on-mac#44 */
+    if ((p = getenv( "WINE_HEAT_MSYNC_UNREG" )) && !strcmp( p, "1" )) mode |= HEAT_MSYNC_UNREG;
     if (!mode) return;
     if (!exe || !*exe) exe = "Gw2-64.exe";
     if (!peb || !peb->ProcessParameters || !heat_is_exe( exe )) return;

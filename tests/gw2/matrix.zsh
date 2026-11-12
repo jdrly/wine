@@ -8,7 +8,11 @@
 #    one,skip), three runs each. The modes run side by side, each in a prefix of its own.
 # 2. Every program once more, side by side: under the engine's ntdll.so; under mine with no
 #    WINE_HEAT_* variable; under mine with the variables set but WINE_HEAT_EXE naming another
-#    program. Neither of the last two may write a counters file.
+#    program. Neither of the last two may write a counters file. The engine skips the programs in
+#    $engine_bugs, which show a bug of its file.
+# 3. (jdrly/gw2-on-mac#44) mutexall three runs under the engine's ntdll.so, each of which has to
+#    fail on the bug it shows, and three under mine, which have to pass. unreg under mine with
+#    counting, WINE_HEAT_MSYNC_UNREG unset and set.
 # Prints each run's lines and exits 1 if any failed.
 emulate -L zsh
 setopt err_exit pipe_fail no_unset extended_glob
@@ -53,13 +57,18 @@ mode() {
   done
 }
 
+# programs that fail under the engine's ntdll.so, on a bug of its that mine fixes (block 3)
+engine_bugs=(mutexall)
+
 # quiet <name> <wine> <log> [<variable>=<value>...]: every program, then no counters file in <log>
 quiet() {
   local name=$1 wine=$2 log=$3 left
+  local -a programs=("$exes"/*.exe)
   shift 3
+  [[ $wine == "$engine" ]] && programs=(${programs:#*/(${(~j:|:)engine_bugs}).exe})
   mkdir -p "$log"
   env -u WINE_HEAT_COUNT -u WINE_HEAT_WAKE -u WINE_HEAT_EXE -u WINE_HEAT_LOG "$@" GW2_TEST_PRODUCER_SECONDS=20 GW2_TEST_SECONDS=300 \
-    "$run" "$wine" "$work/prefix-$name" "$exes"/*.exe
+    "$run" "$wine" "$work/prefix-$name" $programs
   left=("$log"/*(N) /tmp/heat-*.log(N))
   if (( ${#left} )); then
     print "FAIL  a counters file was written: $left"
@@ -78,6 +87,39 @@ side engine quiet engine "$engine" "$work/log-engine" WINE_HEAT_LOG=$work/log-en
 side unset quiet unset "$mine" "$work/log-unset"
 side other quiet other "$mine" "$work/log-other" WINE_HEAT_EXE=other.exe WINE_HEAT_COUNT=1 \
   WINE_HEAT_WAKE=one,skip WINE_HEAT_LOG=$work/log-other
+collect
+
+# 3. jdrly/gw2-on-mac#44
+
+# engine_bug <program> <line>: three runs under the engine's ntdll.so, each failing with <line>
+engine_bug() {
+  local exe=$exes/$1.exe line=$2 out rc=0
+  integer n
+  out=$(env -u WINE_HEAT_COUNT -u WINE_HEAT_WAKE -u WINE_HEAT_EXE -u WINE_HEAT_LOG GW2_TEST_SECONDS=300 \
+    "$run" "$engine" "$work/prefix-bug-$1" "$exe" "$exe" "$exe") || rc=$?
+  print -r -- "$out"
+  n=${#${(M)${(f)out}:#*$line*}}
+  if (( rc && n == 3 )); then
+    print "ok    $1 failed 3 of 3 under the engine's ntdll.so, on its bug"
+  else
+    print "FAIL  $1 under the engine's ntdll.so: $n of 3 runs failed on its bug, the run exited $rc"
+    return 1
+  fi
+}
+
+# unreg <value>: unreg under mine, counting, WINE_HEAT_MSYNC_UNREG=<value> or unset if empty
+unreg() {
+  local v=$1 log=$work/log-unreg-${1:-unset}
+  mkdir -p "$log"
+  env -u WINE_HEAT_WAKE -u WINE_HEAT_MSYNC_UNREG WINE_HEAT_EXE=unreg.exe WINE_HEAT_COUNT=1 WINE_HEAT_LOG=$log \
+    ${v:+WINE_HEAT_MSYNC_UNREG=$v} GW2_TEST_SECONDS=300 "$run" "$mine" "$work/prefix-unreg-${1:-unset}" "$exes/unreg.exe"
+}
+
+side mutexall-engine engine_bug mutexall "another thread took the mutex its owner held"
+side mutexall-mine env -u WINE_HEAT_COUNT -u WINE_HEAT_WAKE -u WINE_HEAT_EXE -u WINE_HEAT_LOG GW2_TEST_SECONDS=300 \
+  "$run" "$mine" "$work/prefix-mutexall-mine" "$exes/mutexall.exe" "$exes/mutexall.exe" "$exes/mutexall.exe"
+side unreg-unset unreg ""
+side unreg-1 unreg 1
 collect
 
 (( failed == 0 ))
