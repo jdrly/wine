@@ -16,13 +16,17 @@
 #   The per-function listing with masked addresses that follows a failed byte gate only names
 #   what differs; it is not the gate and never passes or fails a build.
 #   Artifact ntdll-mach9-<commit>: ntdll.so, VERSION, COPYING.LIB, LICENSE, kept 7 days.
-# tests: tests/gw2/*.c built for Win64 x86_64 with llvm-mingw and run by tests/gw2/matrix.zsh under
-#   the engine from the release tarball: with its own ntdll.so, and with mine in each
-#   WINE_HEAT_WAKE mode, with no WINE_HEAT_* variable and with them set for another program.
+# tests: tests/gw2/*.c built for Win64 x86_64 with llvm-mingw. On a pull request,
+#   tests/gw2/matrix.zsh runs them under the engine from the release tarball: with its own
+#   ntdll.so, and with mine in each WINE_HEAT_WAKE mode, with no WINE_HEAT_* variable and with them
+#   set for another program. A push to gw2-on-mac runs only the prefix boot and smoke.exe, under
+#   the engine's ntdll.so and under mine: its tree is a merged pull request's head, which went
+#   through the matrix in that pull request's run, and Publish names that run.
 # lint: actionlint, and the Python script compiles.
 # publish: after the others are green, packs ntdll-mach9-<commit>.tar.xz and prints its sha256. For
 #   a push to gw2-on-mac it adds the archive to the pre-release mach9-builds, the one release this
-#   workflow makes, never marked latest, and keeps its 30 newest assets.
+#   workflow makes, never marked latest, and keeps its 30 newest assets, and says which pull
+#   request's green run tested the same tree, or that none did.
 name: GW2
 
 on:
@@ -98,10 +102,7 @@ jobs:
             clang --version | sed -n 1p
             echo '```'
           } | tee -a "$GITHUB_STEP_SUMMARY"
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ env.COMMIT }}
-          persist-credentials: false
+      # (no checkout of the whole tree at the workspace's root: the source is the one in src below)
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
@@ -303,9 +304,13 @@ jobs:
     runs-on: macos-26
     timeout-minutes: 30
     steps:
+      # only the scripts and the test programs, not the whole Wine tree
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ env.COMMIT }}
+          sparse-checkout: |
+            .github/gw2
+            tests/gw2
           persist-credentials: false
       - name: zsh syntax
         run: for f in .github/gw2/*.zsh tests/gw2/*.zsh; do zsh -n "$f"; echo "ok $f"; done
@@ -360,7 +365,26 @@ jobs:
           done
           ls "$RUNNER_TEMP/tests"
       - name: Run them
+        if: github.event_name == 'pull_request'
         run: tests/gw2/matrix.zsh "$RUNNER_TEMP/engine/wine" "$RUNNER_TEMP/mine/wine" "$RUNNER_TEMP/tests" "$RUNNER_TEMP/matrix"
+      # A push runs the tree of a pull request's head that was green and up to date with gw2-on-mac,
+      # so the matrix ran on this tree in that pull request's run (Publish names it). Here only that
+      # the engine boots a prefix and runs a program with its ntdll.so and with mine, side by side.
+      - name: Smoke (a push)
+        if: github.event_name != 'pull_request'
+        run: |
+          tests/gw2/run.zsh "$RUNNER_TEMP/engine/wine" "$RUNNER_TEMP/smoke-engine" "$RUNNER_TEMP/tests/smoke.exe" \
+            >"$RUNNER_TEMP/smoke-engine.txt" 2>&1 &
+          engine=$!
+          tests/gw2/run.zsh "$RUNNER_TEMP/mine/wine" "$RUNNER_TEMP/smoke-mine" "$RUNNER_TEMP/tests/smoke.exe" \
+            >"$RUNNER_TEMP/smoke-mine.txt" 2>&1 &
+          mine=$!
+          status=0
+          wait "$engine" || status=1
+          wait "$mine" || status=1
+          echo "== the engine's ntdll.so"; cat "$RUNNER_TEMP/smoke-engine.txt"
+          echo "== mine"; cat "$RUNNER_TEMP/smoke-mine.txt"
+          exit "$status"
 
   lint:
     name: Lint
@@ -369,6 +393,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ env.COMMIT }}
+          sparse-checkout: .github
           persist-credentials: false
       - name: actionlint
         env:
@@ -389,6 +414,9 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: write
+      # to find the pull request whose run tested a pushed tree
+      actions: read
+      pull-requests: read
     # Two pushes never upload at once: the workflow's concurrency group runs one push to gw2-on-mac
     # at a time and never cancels it. A group of this job's own would let a pull request's pending
     # job cancel a push's, as it did to run 43116636183's upload.
@@ -439,3 +467,20 @@ jobs:
           latest=$(gh api "repos/$GH_REPO/releases/latest" -q .tag_name 2>/dev/null || true)
           echo "releases/latest: ${latest:-none}"
           [[ $latest != "$RELEASE" ]]
+      # The push's run skips the matrix; the run of the pull request it merged ran it. That run counts
+      # if it was green and on a head whose tree is the pushed tree (a head up to date with
+      # gw2-on-mac, squashed). Says which, or that none did; it fails nothing.
+      - name: Which pull request's run tested this tree
+        if: github.event_name == 'push' && github.ref == 'refs/heads/gw2-on-mac'
+        run: |
+          tree=$(gh api "repos/$GH_REPO/commits/$COMMIT" -q .commit.tree.sha)
+          found=""
+          while read -r pr head; do
+            [[ -n $pr ]] || continue
+            [[ $(gh api "repos/$GH_REPO/commits/$head" -q .commit.tree.sha) == "$tree" ]] || continue
+            run=$(gh api "repos/$GH_REPO/actions/workflows/gw2.yml/runs?event=pull_request&status=success&head_sha=$head" \
+              -q '.workflow_runs[0].html_url // empty')
+            [[ -n $run ]] && found="pull request #$pr, head $head, the same tree: $run" && break
+          done < <(gh api "repos/$GH_REPO/commits/$COMMIT/pulls" -q '.[] | select(.merged_at != null) | "\(.number) \(.head.sha)"')
+          [[ -n $found ]] || found="no green run of a pull request tested this tree"
+          echo "The matrix for $COMMIT (tree $tree): $found" | tee -a "$GITHUB_STEP_SUMMARY"
