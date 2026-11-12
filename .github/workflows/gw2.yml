@@ -1,6 +1,22 @@
-# gw2 (jdrly/gw2-on-mac#40, #57): my ntdll.so and winemac.so for Mach9 $MACH9_VERSION's engine,
-# built on GitHub's runner the way Mach9's CI built the engine's, and checked against the engine's
-# files. Nothing here runs on my Mac.
+# gw2 (jdrly/gw2-on-mac#40, #57, #124): my ntdll.so and winemac.so for Mach9 $MACH9_VERSION's
+# engine, built on GitHub's runner the way Mach9's CI built the engine's, and checked against the
+# engine's files. Nothing here runs on my Mac.
+#
+# The toolchain and the gate (jdrly/gw2-on-mac#124). The build and test jobs run on $RUNNER with
+# Xcode $XCODE_VERSION. With the engine's own, $ENGINE_RUNNER and Xcode $ENGINE_XCODE_VERSION, my
+# build of the engine's commit is held to the strict gate, byte for byte; with any other it is held
+# to the structural gate: the engine's exports, imports, libraries, install name, rpaths, minos,
+# segments, sections and functions by name, with the functions whose bytes differ only a report
+# (.github/gw2/compare.py). Going back is one edit: RUNNER and XCODE_VERSION below to the engine's
+# values. Until 2026-11-12 it ran on macos-26 with Xcode 26.6, and my build of the engine's commit
+# was the engine's ntdll.so and winemac.so byte for byte in the header, every section of every
+# loaded segment, the load commands and the link edit data (run 43109476509 of pull request #1 and
+# run 43156131896 of #10). Since 2026-11-12 it runs on GitHub's Xcode 27 image: no macos-26 runner
+# was assigned all evening, and I have no Mac of my own for it. Xcode 27's clang isn't the
+# engine's, so my files can't be the engine's byte for byte. The patched compare is the same either
+# way, my base build against this commit's from one run and one toolchain, and the tests on the
+# engine are the proof that files from the other compiler work. The flags stay the engine's: its
+# unix side is built at -O0.
 #
 # build: one Wine tree configured as Mach9 configures its own (.github/gw2/wine.zsh), in the
 #   engine's paths, with Xcode $XCODE_VERSION, macOS $MACOSX_DEPLOYMENT_TARGET and llvm-mingw
@@ -8,11 +24,13 @@
 #   (and win32u.so on the way, which winemac.so links with and nothing checks or ships). In the
 #   tree, one after the other:
 #   - $BASE_COMMIT, the commit the engine was built from, each file compared with the engine's by
-#     .github/gw2/compare.py baseline: the same exports and imports, and the header, every
-#     section, the load commands and the link edit data byte for byte
+#     .github/gw2/compare.py baseline with the gate above. The strict one wants the same exports
+#     and imports, and the header, every section, the load commands and the link edit data byte
+#     for byte.
 #   - the same with one line of NtYieldExecution changed, and then with one line of an
-#     Objective-C method of the Mac driver changed: that compare has to fail on the file and name
-#     the function
+#     Objective-C method of the Mac driver changed: the strict gate has to fail on the file and name
+#     the function. It holds the broken file to the engine's with the strict gate, and to my base
+#     build of the engine's commit with the structural one, so it runs whatever the toolchain.
 #   - this commit, every object of both files compiled again, compared by compare.py patched: each
 #     object none of whose inputs (makedep's rule for it: its .c or .m and every header it
 #     includes) the commit changes is the base build's, by its compile command, code, data,
@@ -21,7 +39,8 @@
 #   The per-function listing with masked addresses that follows a failed byte gate only names
 #   what differs; it is not the gate and never passes or fails a build.
 #   Artifacts ntdll-mach9-<commit> and macdrv-mach9-<commit>: ntdll.so or winemac.so, VERSION,
-#   COPYING.LIB, LICENSE, kept 7 days. VERSION's line "switches: …" names every WINE_HEAT_*
+#   COPYING.LIB, LICENSE, kept 7 days. VERSION's line "baseline: <file> <gate>" says which gate
+#   held, and its toolchain line names the runner. Its line "switches: …" names every WINE_HEAT_*
 #   (ntdll.so) or WINE_MACDRV_* (winemac.so) variable the file reads, from the sources, and the
 #   step fails unless those are exactly that kind of string in the file (.github/gw2/switches.zsh).
 # tests: tests/gw2/*.c built for Win64 x86_64 with llvm-mingw. On a pull request, window.exe under
@@ -33,7 +52,7 @@
 #   with them set for another program. A push to gw2-on-mac runs only the prefix boot and
 #   smoke.exe, under the engine's ntdll.so and under mine: its tree is a merged pull request's head,
 #   which went through all of that in that pull request's run, and Publish names that run.
-# lint: actionlint, and the Python script compiles.
+# lint: actionlint (.github/actionlint.yaml names the xcode-27 label), and the Python script compiles.
 # publish: after the others are green, packs ntdll-mach9-<commit>.tar.xz and
 #   macdrv-mach9-<commit>.tar.xz and prints their sha256. For a push to gw2-on-mac it adds both to
 #   the pre-release mach9-builds, the one release this workflow makes, never marked latest, keeps
@@ -63,11 +82,18 @@ env:
   GW2: ${{ github.workspace }}/gw2-ci/.github/gw2
   # athei/wine's commit Mach9 0.3.1 was built from (wine-11.21-37-g53def89293), where gw2-on-mac starts
   BASE_COMMIT: 53def89293adfe1a62c43ef46abe80a536e9ca49
+  # The runner and Xcode my build and tests use; their runs-on read the anchor, since runs-on can't
+  # read env. With the engine's two below, my build of the engine's commit gets the strict gate; with
+  # any other, the structural one. xcode-27 has Xcode 27.0 and 27.1 (macOS SDK 27.0) and 27.2 (SDK
+  # 27.2; actions/runner-images, images/macos/xcode-27-arm64-Readme.md). 27.2 is the one my app and
+  # my DXMT fork build with.
+  RUNNER: &runner xcode-27
+  XCODE_VERSION: "27.2"
   # What Mach9's release run of v0.3.1 used (athei/mach9 run 42769825957): Xcode 26.6 (SDK 26.5,
   # clang-2100.1.1.101) on the macos-26 image (macos-26-arm64 20261102.0473.1), and its
-  # pins/redist.env and bin/lib/profile.sh. Mine runs on the same image, with Xcode 26.6 selected
-  # by name.
-  XCODE_VERSION: "26.6"
+  # pins/redist.env and bin/lib/profile.sh
+  ENGINE_RUNNER: macos-26
+  ENGINE_XCODE_VERSION: "26.6"
   LLVM_MINGW_VERSION: "20261104"
   LLVM_MINGW_SHA256: 66cbd5178c4a71b0d473e68ede172f8eb7d15d023e67f39201d0a69e21f6bf3c
   MACH9_VERSION: v0.3.1
@@ -80,7 +106,7 @@ defaults:
 jobs:
   build:
     name: Build ntdll.so and winemac.so
-    runs-on: macos-26
+    runs-on: *runner
     timeout-minutes: 60
     env:
       MACOSX_DEPLOYMENT_TARGET: "26.4"
@@ -102,10 +128,16 @@ jobs:
           } | tee -a "$GITHUB_STEP_SUMMARY"
           app=/Applications/Xcode_$XCODE_VERSION.app
           if [[ ! -d $app ]]; then
-            echo "::error::Xcode $XCODE_VERSION isn't on this runner's image ($ImageOS $ImageVersion), so the engine's files can't be rebuilt."
+            echo "::error::Xcode $XCODE_VERSION isn't on this runner's image ($ImageOS $ImageVersion). Pick one it has in XCODE_VERSION, or the engine's $ENGINE_XCODE_VERSION on $ENGINE_RUNNER."
             exit 1
           fi
           sudo xcode-select -s "$app"
+          # the gate for my build of the engine's commit: strict only with the engine's runner and Xcode
+          gate=structural
+          [[ $RUNNER == "$ENGINE_RUNNER" && $XCODE_VERSION == "$ENGINE_XCODE_VERSION" ]] && gate=strict
+          echo "GATE=$gate" >>"$GITHUB_ENV"
+          echo "runner $RUNNER, Xcode $XCODE_VERSION (the engine's: $ENGINE_RUNNER, Xcode $ENGINE_XCODE_VERSION): the $gate gate" |
+            tee -a "$GITHUB_STEP_SUMMARY"
           {
             echo "### Toolchain"
             echo '```'
@@ -209,13 +241,24 @@ jobs:
           cp "$BUILD/Makefile" "$RUNNER_TEMP/base-Makefile"
           # config.h and the generated headers, which reach an object besides its source
           (cd "$BUILD" && find include -type f -print0 | sort -z | xargs -0 shasum -a 256) >"$RUNNER_TEMP/base-headers.txt"
+          # what the broken builds below are held to with the strict gate: the engine's files, or with
+          # the structural gate my base build of them in a copy of the engine's unix directory (the
+          # compare reads the engine's other modules there)
+          reference=toolchains/engine/lib/wine/aarch64-unix
+          if [[ $GATE != strict ]]; then
+            reference=$RUNNER_TEMP/reference
+            cp -R toolchains/engine/lib/wine/aarch64-unix "$reference"
+            cp "$RUNNER_TEMP/baseline-ntdll.so" "$reference/ntdll.so"
+            cp "$RUNNER_TEMP/baseline-winemac.so" "$reference/winemac.so"
+          fi
+          echo "REFERENCE=$reference" >>"$GITHUB_ENV"
       - name: Baseline compare
         id: baseline
         run: |
           status=0
           for lib in ntdll winemac; do
             python3 -I "$GW2/compare.py" baseline "$lib.so" "$RUNNER_TEMP/baseline-$lib.so" toolchains/engine/lib/wine/aarch64-unix \
-              >"$RUNNER_TEMP/baseline-$lib.md" || status=1
+              "$GATE" >"$RUNNER_TEMP/baseline-$lib.md" || status=1
             tee -a "$GITHUB_STEP_SUMMARY" <"$RUNNER_TEMP/baseline-$lib.md"
           done
           exit "$status"
@@ -245,7 +288,8 @@ jobs:
           retention-days: 7
 
       # One line of NtYieldExecution changed: a second sched_yield call, which also moves every
-      # function the linker puts after it. The byte gate has to fail, and its listing has to name
+      # function the linker puts after it. The byte gate against $REFERENCE (the engine's file, or
+      # with another toolchain my base build) has to fail, and its listing has to name
       # NtYieldExecution and nothing outside sync.c, where NtDelayExecution may have it inlined.
       - name: The baseline compare fails on a broken build
         if: ${{ !cancelled() && steps.base.outcome == 'success' }}
@@ -256,7 +300,7 @@ jobs:
           [[ $(git -C "$SRC" diff --numstat) == $'1\t1\t'"$f" ]] || { echo "::error::the line to change isn't in $f"; exit 1; }
           "$GW2/wine.zsh" build
           status=0
-          python3 -I "$GW2/compare.py" baseline ntdll.so "$BUILD/dlls/ntdll/ntdll.so" toolchains/engine/lib/wine/aarch64-unix \
+          python3 -I "$GW2/compare.py" baseline ntdll.so "$BUILD/dlls/ntdll/ntdll.so" "$REFERENCE" strict \
             >"$RUNNER_TEMP/broken.md" || status=$?
           git -C "$SRC" checkout -- "$f"
           cat "$RUNNER_TEMP/broken.md"
@@ -265,8 +309,8 @@ jobs:
             ! grep '^  - `' "$RUNNER_TEMP/broken.md" | grep -v '^  - `sync\.c: '
       # One line of an Objective-C method changed: -[WineContentView setColorImage:] retains the
       # image twice. No selector or string is added, so only __text changes, and every function
-      # after it moves. The byte gate has to fail on winemac.so, and its listing has to name the
-      # method and nothing outside cocoa_window.m.
+      # after it moves. The byte gate against $REFERENCE has to fail on winemac.so, and its listing
+      # has to name the method and nothing outside cocoa_window.m.
       - name: The baseline compare fails on a broken Objective-C method
         if: ${{ !cancelled() && steps.base.outcome == 'success' }}
         run: |
@@ -275,7 +319,7 @@ jobs:
           [[ $(git -C "$SRC" diff --numstat) == $'1\t1\t'"$f" ]] || { echo "::error::the line to change isn't in $f"; exit 1; }
           "$GW2/wine.zsh" build
           status=0
-          python3 -I "$GW2/compare.py" baseline winemac.so "$BUILD/dlls/winemac.drv/winemac.so" toolchains/engine/lib/wine/aarch64-unix \
+          python3 -I "$GW2/compare.py" baseline winemac.so "$BUILD/dlls/winemac.drv/winemac.so" "$REFERENCE" strict \
             >"$RUNNER_TEMP/broken-winemac.md" || status=$?
           git -C "$SRC" checkout -- "$f"
           cat "$RUNNER_TEMP/broken-winemac.md"
@@ -344,9 +388,10 @@ jobs:
               strings -a dist/ntdll/ntdll.so | grep -oE 'wine-[0-9]+\.[0-9]+-[0-9]+-g[0-9a-f]+'
               echo "commit: $COMMIT"
               echo "$switches"
+              grep '^baseline: ' "$RUNNER_TEMP/baseline-$lib.md"
               echo "base: $BASE_COMMIT ($(git -C "$SRC" describe "$BASE_COMMIT"))"
               echo "engine: Mach9 $MACH9_VERSION (wine-$MACH9_VERSION-macos-arm64.tar.xz, sha256 $MACH9_SHA256)"
-              echo "toolchain: Xcode $(xcodebuild -version | sed -n 's/^Xcode //p') (macOS SDK $(xcrun -sdk macosx --show-sdk-version)), $(clang --version | sed -n 1p), llvm-mingw $LLVM_MINGW_VERSION, macOS $MACOSX_DEPLOYMENT_TARGET"
+              echo "toolchain: $RUNNER ($ImageOS $ImageVersion), Xcode $(xcodebuild -version | sed -n 's/^Xcode //p') (macOS SDK $(xcrun -sdk macosx --show-sdk-version)), $(clang --version | sed -n 1p), llvm-mingw $LLVM_MINGW_VERSION, macOS $MACOSX_DEPLOYMENT_TARGET"
               echo "$lib.so: sha256 $(shasum -a 256 "$dir/$lib.so" | cut -d' ' -f1)"
               echo
               cat "$RUNNER_TEMP/baseline-$lib.md"
@@ -372,7 +417,7 @@ jobs:
   tests:
     name: Tests on the engine
     needs: build
-    runs-on: macos-26
+    runs-on: *runner
     timeout-minutes: 30
     steps:
       # only the scripts and the test programs, not the whole Wine tree; the Mac driver's sources for

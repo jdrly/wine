@@ -2,7 +2,7 @@
 # gw2 (jdrly/gw2-on-mac#40, #57): compare my ntdll.so or winemac.so with the one in Mach9's
 # engine. It reads files and runs nothing.
 #
-#   compare.py baseline <library> <mine> <engine-unix-dir>
+#   compare.py baseline <library> <mine> <engine-unix-dir> [strict | structural]
 #   compare.py patched <library> <mine> <engine-unix-dir> <source dir> <build dir> <base file>
 #                      <base objects> <base make log> <make log> <base Makefile> <Makefile>
 #                      <checkout time> [<changed file>...]
@@ -15,12 +15,20 @@
 # compatdb.so looks up and every symbol the engine's win32u.so, winemac.so and winemetal.so import
 # from it.
 #
-# baseline: my build of the engine's commit. Its exports and imports are the engine's, and every
-#   section of every loaded segment, every load command and the link edit data are the engine's
-#   byte for byte (byte_gate: what it leaves out, and why, is in its report line). Where they
+# baseline (strict, the default): my build of the engine's commit. Its exports and imports are the
+#   engine's, and every section of every loaded segment, every load command and the link edit data
+#   are the engine's byte for byte (byte_gate: what it leaves out, and why, is in its report line). Where they
 #   aren't, the functions are compared with the addresses masked to list what differs. That
 #   listing (diagnose, masked) is not the gate: it never passes or fails a build. A function is
 #   named by its source file, an Objective-C method or block like any other.
+# baseline structural: my build of the engine's commit with another toolchain than the engine's
+#   (jdrly/gw2-on-mac#124). Its exports, imports, libraries, install name, rpaths and minos are the
+#   engine's, as with the strict gate, and so are its segments with their protections, its sections
+#   in their order with their types, and its functions by source and name (structural_gate). How
+#   many functions differ in their bytes, with the addresses masked, is a report: that is the other
+#   compiler, and it never fails a build. With either gate a baseline that passes ends with the line
+#   "baseline: <library> <the gate that held>", which the workflow copies into VERSION, in the form
+#   my FEX fork's record has.
 # patched: my build of a later commit, made in the same tree after the baseline with every object
 #   compiled again. Its exports are the engine's (ntdll.so's may be more). Its objects are compared with the
 #   base build's (compare_objects): first that both sets are what their files linked (the link
@@ -32,12 +40,14 @@
 #   bytes and relocations, with the changed inputs that touched each object. A header every file
 #   includes touches every object: all of them are listed, none is hidden. Naming why each listed
 #   function changed stays the pull request's job.
-#   With the baseline that makes the chain: the engine's file = my base build, byte for byte, and
-#   my base build's objects = this build's, except the touched ones.
+#   With the baseline that makes the chain: the engine's file = my base build, byte for byte (or in
+#   its structure, with another toolchain), and my base build's objects = this build's, except the
+#   touched ones.
 import bisect
 import contextlib
 import functools
 import hashlib
+import io
 import os
 import struct
 import sys
@@ -1208,12 +1218,59 @@ def selftest(engine_dir):
         if not link_proof(both, [(real, when)], {real: obj, other: obj}, "/build"):
             failed.append("link proof: an object with code the debug map leaves out")
 
+    # the structural gate (jdrly/gw2-on-mac#124), on the engine's ntdll.so against itself: a missing
+    # export, a changed import, another minos, another section type and a missing function each
+    # fail; other bytes in a function alone don't, and the byte gate still fails on those
+    def structural(change):
+        mine = MachO(os.path.join(engine_dir, "ntdll.so"))
+        change(mine)
+        r = Report()
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            shape(r, "structural", "ntdll.so", mine, theirs, engine_dir)
+            line = structural_gate(mine, theirs, r)
+            strict = byte_gate(mine, theirs, Report())
+        return r.failed, line, strict
+
+    def no_function(m):  # the debug map's first function gone: its two N_FUN entries made N_BNSYM
+        i = next(i for i, (n, t, _, _, _) in enumerate(m.syms) if t == N_FUN and n)
+        m.syms = m.syms[:i] + [("", 0x2e, 0, 0, v) for _, _, _, _, v in m.syms[i:i + 2]] + m.syms[i + 2:]
+
+    def other_bytes(m):
+        text = m.section("__TEXT,__text")
+        data = bytearray(m.data)
+        data[text["offset"] + 4] ^= 0x01  # the second instruction of the file's first function
+        m.data = bytes(data)
+
+    theirs = MachO(os.path.join(engine_dir, "ntdll.so"))
+    failures, line, strict = structural(lambda m: None)
+    if failures or not line.startswith("structural, 0 of ") or not strict:
+        failed.append(f"structural gate: the engine's file against itself, {failures} failed, {line}")
+    # an export no other module of the engine imports and compatdb.so doesn't look up, so only the
+    # exports check can see it go
+    needed = set(COMPATDB) | {n for dep in LIBRARIES["ntdll.so"]["dependents"]
+                              for n, where in MachO(os.path.join(engine_dir, dep)).imports.items()
+                              if where == "@rpath/ntdll.so"}
+    unneeded = next(n for n in theirs.exports if n not in needed)
+    for what, change in (("a missing export", lambda m: setattr(m, "exports", [n for n in m.exports if n != unneeded])),
+                         ("a changed import", lambda m: setattr(m, "imports", dict(
+                             m.imports, **{next(iter(m.imports)): "/usr/lib/libother.dylib"}))),
+                         ("another minos", lambda m: setattr(m, "minos", "27.0")),
+                         ("another section type", lambda m: m.sections[0].update(type=m.sections[0]["type"] ^ 1)),
+                         ("a missing function", no_function)):
+        if not structural(change)[0]:
+            failed.append(f"structural gate: {what} passed")
+    failures, line, strict = structural(other_bytes)
+    if failures or not line.startswith("structural, 1 of "):
+        failed.append(f"structural gate: other bytes in one function, {failures} failed, {line}")
+    if strict:
+        failed.append("byte gate: other bytes in one function passed")
+
     for item in fixtures():
         failed.append(f"masking fixture: {item}")
     for item in failed:
         print(f"- **FAIL**: {item}")
     print(f"selftest: {len(failed)} failed" if failed else
-          "selftest: the byte gate and the object compare see every change they must, and the masking fixtures hold")
+          "selftest: the byte gate, the structural gate and the object compare see every change they must, and the masking fixtures hold")
     return 1 if failed else 0
 
 
@@ -1221,9 +1278,9 @@ def main():
     args = sys.argv[1:]
     if len(args) == 2 and args[0] == "selftest":
         return selftest(args[1])
-    if not ((len(args) == 4 and args[0] == "baseline") or (len(args) >= 13 and args[0] == "patched")) \
-            or args[1] not in LIBRARIES:
-        print("usage: compare.py baseline <library> <mine> <engine-unix-dir>\n"
+    if not ((args[:1] == ["baseline"] and (len(args) == 4 or (len(args) == 5 and args[4] in ("strict", "structural"))))
+            or (len(args) >= 13 and args[0] == "patched")) or args[1] not in LIBRARIES:
+        print("usage: compare.py baseline <library> <mine> <engine-unix-dir> [strict | structural]\n"
               "       compare.py patched <library> <mine> <engine-unix-dir> <source dir> <build dir> <base file> "
               "<base objects> <base make log> <make log> <base Makefile> <Makefile> <checkout time> "
               "[<changed file>...]\n"
@@ -1231,17 +1288,49 @@ def main():
               f"<library> is one of {', '.join(LIBRARIES)}", file=sys.stderr)
         return 2
     mode, lib, mine_path, engine_dir = args[:4]
+    gate = args[4] if mode == "baseline" and len(args) == 5 else "strict"
     if mode == "patched":
         src_dir, build_dir, base_file, base_objs, base_log, head_log, base_mk, head_mk, since = args[4:13]
         since, touched = float(since), args[13:]
     mine, theirs = MachO(mine_path), MachO(os.path.join(engine_dir, lib))
-    spec = LIBRARIES[lib]
     r = Report()
 
-    print(f"### {lib} compare ({mode})\n")
+    print(f"### {lib} compare ({mode}{', ' + gate + ' gate' if mode == 'baseline' else ''})\n")
     print(f"- mine: {os.path.getsize(mine_path)} bytes, sha256 `{sha256(mine_path)}`")
     print(f"- the engine's: {os.path.getsize(theirs.path)} bytes, sha256 `{sha256(theirs.path)}`")
 
+    shape(r, mode, lib, mine, theirs, engine_dir)
+    if mode == "baseline" and gate == "strict":
+        held = "byte for byte"
+        if not byte_gate(mine, theirs, r):
+            diagnose(mine, theirs)
+    elif mode == "baseline":
+        held = structural_gate(mine, theirs, r)
+    else:
+        changed, new, removed, through = compare_objects(r, lib, src_dir, build_dir, base_file, base_objs, mine_path,
+                                                         base_log, head_log, base_mk, head_mk, since, touched)
+        print("\n#### Changed by this branch\n")
+        print("Objects compared function by function, and the changed inputs that made them so:\n")
+        for f, via in sorted(through.items()):
+            print(f"- `{f}`: through {', '.join(f'`{v}`' for v in via)}")
+        print()
+        for title, items in (("changed", changed), ("new", new), ("removed", removed)):
+            print(f"- {title}: {len(items)}")
+            for item in items:
+                print(f"  - `{item}`")
+
+    if mode == "baseline" and not r.failed:
+        print(f"\nbaseline: {lib} {held}")
+    print("\n" + ("all checks passed" if not r.failed else f"{r.failed} checks failed"))
+    return 1 if r.failed else 0
+
+
+def shape(r, mode, lib, mine, theirs, engine_dir):
+    """the linked file's shape against the engine's: what it is, its install name, rpaths,
+    libraries and minos, pipe2, its exports, the names other modules need from it, and its imports.
+    A baseline mode wants the engine's exports and imports exactly; patched lets ntdll.so export more
+    and lets imports differ, as long as nothing new comes from an @rpath library."""
+    spec = LIBRARIES[lib]
     r.check(mine.filetype == theirs.filetype == 6, "a dylib, as the engine's", "not a dylib like the engine's")
     r.check(mine.install_name == theirs.install_name, f"install name `{mine.install_name}`",
             f"install name `{mine.install_name}`, the engine's is `{theirs.install_name}`")
@@ -1255,7 +1344,7 @@ def main():
 
     mine_exp, theirs_exp = set(mine.exports), set(theirs.exports)
     missing, extra = theirs_exp - mine_exp, mine_exp - theirs_exp
-    if mode == "baseline" or not spec["more_exports"]:
+    if mode != "patched" or not spec["more_exports"]:
         r.check(not missing and not extra, f"exports the engine's {len(theirs_exp)} symbols, no more: {listing(theirs_exp, 3)}",
                 f"exports differ: missing {listing(missing)}; extra {listing(extra)}")
     else:
@@ -1282,26 +1371,42 @@ def main():
         diff = {f"{n} ({mine.imports.get(n)} / {theirs.imports.get(n)})"
                 for n in set(mine.imports) | set(theirs.imports) if mine.imports.get(n) != theirs.imports.get(n)}
         text = f"imports differ (mine / the engine's): {listing(diff)}"
-        r.fail(text) if mode == "baseline" else r.ok(text)
+        r.fail(text) if mode != "patched" else r.ok(text)
 
-    if mode == "baseline":
-        if not byte_gate(mine, theirs, r):
-            diagnose(mine, theirs)
-    else:
-        changed, new, removed, through = compare_objects(r, lib, src_dir, build_dir, base_file, base_objs, mine_path,
-                                                         base_log, head_log, base_mk, head_mk, since, touched)
-        print("\n#### Changed by this branch\n")
-        print("Objects compared function by function, and the changed inputs that made them so:\n")
-        for f, via in sorted(through.items()):
-            print(f"- `{f}`: through {', '.join(f'`{v}`' for v in via)}")
-        print()
-        for title, items in (("changed", changed), ("new", new), ("removed", removed)):
-            print(f"- {title}: {len(items)}")
-            for item in items:
-                print(f"  - `{item}`")
 
-    print("\n" + ("all checks passed" if not r.failed else f"{r.failed} checks failed"))
-    return 1 if r.failed else 0
+
+def structural_gate(mine, theirs, r):
+    """my build with another toolchain against the engine's file: the same segments with the same
+    protections, the same sections in the same order with the same types, the same functions by
+    source and name. Which functions differ in their bytes, with the addresses masked, is a report
+    and not a check. Returns the gate that held, for VERSION's baseline line."""
+    seg = lambda m: [(s["name"], s["maxprot"], s["initprot"]) for s in m.segments]
+    sec = lambda m: [(s["name"], s["type"]) for s in m.sections]
+    r.check(seg(mine) == seg(theirs), f"the engine's {len(theirs.segments)} segments with their protections: "
+                                      f"{', '.join(n for n, _, _ in seg(theirs))}",
+            f"segments differ: mine {seg(mine)}, the engine's {seg(theirs)}")
+    r.check(sec(mine) == sec(theirs), f"the engine's {len(theirs.sections)} sections, in order and of the same types",
+            f"sections differ: mine {sec(mine)}, the engine's {sec(theirs)}")
+    fm, ft = mine.functions(), theirs.functions()
+    missing, extra = set(ft) - set(fm), set(fm) - set(ft)
+    name = lambda k: f"{k[0]}: {k[1][1:] if k[1].startswith('_') else k[1]}"
+    r.check(not missing and not extra, f"the engine's {len(ft)} functions by source and name",
+            f"functions differ: missing {listing(map(name, missing))}; extra {listing(map(name, extra))}")
+    differ = differing(mine, theirs, fm, ft)
+    line = f"structural, {len(differ)} of {len(ft)} functions differ from the engine's file"
+    print(f"- report: {len(differ)} of the {len(ft)} functions differ in their bytes with the addresses masked, "
+          f"the other compiler's doing and not a check" + (f": {listing(differ)}" if differ else ""))
+    for d in differ:  # all of them, in the job's log
+        print(f"differs from the engine's: {d}", file=sys.stderr)
+    return line
+
+
+def differing(mine, theirs, fm, ft):
+    """the functions both files have whose code differs with the addresses masked, by source and name"""
+    rm, rt = mine.resolver(), theirs.resolver()
+    return [f"{obj}: {name[1:] if name.startswith('_') else name}"
+            for obj, name in sorted(set(fm) & set(ft), key=lambda k: (k[0] or "", k[1]))
+            if masked(mine, rm, *fm[(obj, name)]) != masked(theirs, rt, *ft[(obj, name)])]
 
 
 def diagnose(mine, theirs):
