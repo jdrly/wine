@@ -49,14 +49,16 @@ COMPATDB = ["prepend_dll_path", "add_load_order_override", "set_compat_dpi_aware
             "set_compat_opengl"]
 # What each library is: its link target and the directory of its unix objects in the build tree
 # (a PE object is in a subdirectory, aarch64-windows/ for instance), whether a patched build may
-# export more than the engine's, what of it the engine's other modules use, and the names of
-# another module's contract it has to export.
+# export more than the engine's, what of it the engine's other modules use, the names of another
+# module's contract it has to export, and the object made from a generated source that differs in
+# every commit (ntdll's version.o, from git describe), which counts as touched.
 LIBRARIES = {
     "ntdll.so": dict(target="dlls/ntdll/ntdll.so", objects="dlls/ntdll/unix", more_exports=True,
-                     dependents=["win32u.so", "winemac.so", "winemetal.so"], contract=("compatdb.so", COMPATDB)),
+                     dependents=["win32u.so", "winemac.so", "winemetal.so"], contract=("compatdb.so", COMPATDB),
+                     per_commit=("version.o", "build:dlls/ntdll/unix/version.c")),
     # macdrv_functions is DXMT's private contract, without a version field (Mach9's docs/maintenance.md)
     "winemac.so": dict(target="dlls/winemac.drv/winemac.so", objects="dlls/winemac.drv", more_exports=False,
-                       dependents=[], contract=None),
+                       dependents=[], contract=None, per_commit=None),
 }
 
 LC_REQ_DYLD = 0x80000000
@@ -809,7 +811,8 @@ def compare_objects(r, lib, src_dir, build_dir, base_file, base_dir, head_file, 
     inputs = makefile_inputs(base_makefile, src_dir, LIBRARIES[lib]["objects"])
     for obj, deps in makefile_inputs(head_makefile, src_dir, LIBRARIES[lib]["objects"]).items():
         inputs.setdefault(obj, set()).update(deps)
-    bad, changed, new, removed, through = sort_objects(base_objs, head_objs, inputs, set(touched), base_cc, head_cc)
+    bad, changed, new, removed, through = sort_objects(base_objs, head_objs, inputs, set(touched), base_cc, head_cc,
+                                                       LIBRARIES[lib]["per_commit"])
     r.check(not bad, "every object none of whose inputs this commit changes is my base build's: its compile "
                      "command, and its code, data, relocations and symbols",
             f"{len(bad)} objects none of whose inputs this commit changes differ from my base build's, "
@@ -841,12 +844,14 @@ def makefile_inputs(makefile, src_dir, objects):
     return out
 
 
-def sort_objects(base_objs, head_objs, inputs, touched, base_cc, head_cc, load=MachO):
+def sort_objects(base_objs, head_objs, inputs, touched, base_cc, head_cc, per_commit=None, load=MachO):
     """each object, by its inputs: one none of whose inputs is in <touched> (paths as git prints
     them) must be the base build's, compile command and canonical() alike; one with a changed input
     is compared function by function. An input outside the source tree that the workflow doesn't
-    hold equal makes an object fail, since git can't say whether it changed. Returns the failures,
+    hold equal makes an object fail, since git can't say whether it changed. <per_commit> is the
+    library's (object, generated source) made anew for each commit, or None. Returns the failures,
     the changed, new and gone functions, and object -> the changed inputs that touched it."""
+    per_object, per_source = per_commit or (None, None)
     bad, changed, new, removed, through = [], [], [], [], {}
     for f in sorted(set(base_objs) | set(head_objs)):
         deps = inputs.get(f)
@@ -854,12 +859,12 @@ def sort_objects(base_objs, head_objs, inputs, touched, base_cc, head_cc, load=M
             bad.append(f"{f}: no rule in the Makefile names its inputs")
             continue
         unseen = sorted(d for d in deps if d.startswith("build:") and not d.startswith(GENERATED_INPUTS_HELD)
-                        and d != "build:dlls/ntdll/unix/version.c")
+                        and d != per_source)
         if unseen:
             bad.append(f"{f}: inputs the compare doesn't hold equal: {', '.join(d[6:] for d in unseen)}")
             continue
         via = sorted(d for d in deps if d in touched)
-        if f == "version.o":
+        if f == per_object:
             via = ["git describe's text, made for each commit"]
         if via:
             through[f] = via
@@ -1157,6 +1162,18 @@ def selftest(engine_dir):
                                              "head": fake_object(four, rel(1), b"", functions=(("-[WineWindow a]", 0),))}[o])
     if bad or changed != ["cocoa_window.m: -[WineWindow a]"]:
         failed.append(f"winemac.so: a touched .m file's method, not {bad} {changed}")
+    # ntdll's version.o is touched in every commit; an object of that name elsewhere is not, and a
+    # generated version.c is an input the compare can't see
+    version = {"version.o": {"dlls/winemac.drv/version.c"}}
+    for per_commit, want_bad in ((LIBRARIES["ntdll.so"]["per_commit"], False), (LIBRARIES["winemac.so"]["per_commit"], True)):
+        bad = sort_objects({"version.o": "base"}, {"version.o": "head"}, version, set(), {"version.o": "cc"},
+                           {"version.o": "other cc"}, per_commit, load=objects.get)[0]
+        if bool(bad) != want_bad:
+            failed.append(f"version.o with unchanged inputs and other code, as {per_commit}: {bad}")
+    generated = {"version.o": {"build:dlls/ntdll/unix/version.c"}}
+    if not sort_objects({"version.o": "base"}, {"version.o": "base"}, generated, set(), {"version.o": "cc"},
+                        {"version.o": "cc"}, None, load=objects.get)[0]:
+        failed.append("version.o: ntdll's generated version.c passed outside ntdll")
     objc = MachO.__new__(MachO)
     objc.syms = [("", N_SO, 0, 0, 0), ("/src/dlls/winemac.drv/", N_SO, 0, 0, 0), ("cocoa_window.m", N_SO, 0, 0, 0),
                  ("/build/dlls/winemac.drv/cocoa_window.o", N_OSO, 0, 0, 0), ("-[WineWindow a]", N_FUN, 1, 0, 0x100),
