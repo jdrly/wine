@@ -27,6 +27,7 @@
 #include "config.h"
 #include "macdrv.h"
 #include "surface_frame.h"
+#include "gcmouse_scale.h"
 
 #include <Security/AuthSession.h>
 #include <IOKit/pwr_mgt/IOPMLib.h>
@@ -54,6 +55,7 @@ bool use_precise_scrolling = true;
 bool use_gcmouse = false;  /* from compatdb, see setup_options */
 bool surface_copy = false;  /* WINE_MACDRV_SURFACE, see setup_options */
 bool surface_skip = false;
+double gcmouse_scale = 1;  /* WINE_MACDRV_MOUSE_SCALE, see setup_options */
 /* Where the input method window goes, in client coordinates of the focus
    window, for a program that never places it; unset by default. */
 bool ime_fallback_position_set = false;
@@ -277,7 +279,7 @@ static void setup_options(void)
 {
     static const WCHAR macdriverW[] = {'\\','M','a','c',' ','D','r','i','v','e','r',0};
     WCHAR buffer[MAX_PATH + 16], *p, *appname;
-    const char *surface_mode;
+    const char *surface_mode, *mouse_scale;
     HKEY hkey, appkey = 0;
     DWORD len;
 
@@ -371,6 +373,11 @@ static void setup_options(void)
         surface_copy = surface_skip || !strcmp(surface_mode, "copy");
         if (!surface_copy) ERR("WINE_MACDRV_SURFACE=%s is neither copy nor copy,skip\n", debugstr_a(surface_mode));
     }
+
+    /* GW2 on Mac: a factor on the counts a GameController mouse reports (cocoa_gcmouse.m), for
+       the game's mouse-look. A compatdb rule's env= sets it too. */
+    if ((mouse_scale = getenv("WINE_MACDRV_MOUSE_SCALE")) && !gcmouse_parse_scale(mouse_scale, &gcmouse_scale))
+        ERR("WINE_MACDRV_MOUSE_SCALE=%s is not a number above 0 and up to 100, using 1\n", debugstr_a(mouse_scale));
 
     /* "x,y" */
     if (!get_config_key(hkey, appkey, "IMEFallbackPosition", buffer, sizeof(buffer)))
