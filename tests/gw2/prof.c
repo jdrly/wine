@@ -3,7 +3,8 @@
  * A thread of this program, started in the exe and unnamed like GW2's game thread, loops over
  * four functions: hot_a and hot_b, the same loop at 600,000 and 400,000 turns (a 60 to 40 split),
  * sys_caller, 20 calls of ntdll's NtYieldExecution, and waiter, a 1 ms wait on an event nobody
- * sets. It runs GW2_TEST_PROF_SECONDS (default 15).
+ * sets. It runs GW2_TEST_PROF_SECONDS (default 8): at 1000 samples a second that is about 8,000
+ * samples, 1% of them in the system call, enough for every count below.
  *
  * With WINE_HEAT_PROF=1 and WINE_HEAT_EXE=prof.exe, the program then reads the sampler's files in
  * WINE_HEAT_LOG (heatprof.h has their format) and checks what doesn't depend on the runner's load:
@@ -17,8 +18,9 @@
  *   - samples in Wine's unix side name sys_caller as the x86 caller (the call and return stack's
  *     last return address, or the first return address of this program on the guest stack), and
  *     others waiter: the system call under its caller, and the wait
- * With FEX_PROFILESTATS=1 as well, the heat log must have a line of FEX's counters for the thread
- * while it runs.
+ * With FEX_PROFILESTATS=1 as well, the heat log must get a line of FEX's counters for the thread
+ * while it runs: heat.c's dumper writes every 5 s, and FEX frees the thread's slot when it ends,
+ * so the thread runs on after its time until the line came, 10 s more at most.
  *
  * Without the sampler for it, the program runs its thread for a second and passes: matrix.zsh
  * runs it under the engine's ntdll.so and under mine with the variables unset or set for another
@@ -100,8 +102,7 @@ static __attribute__((noinline)) void waiter(void)
 
 static DWORD WINAPI game( void *arg )
 {
-    ULONGLONG end = GetTickCount64() + (ULONG_PTR)arg * 1000;
-    while (GetTickCount64() < end)
+    while (!stop)
     {
         hot_a();
         hot_b();
@@ -140,8 +141,8 @@ static BOOL env_is( const char *name, const char *value )
     return n && n < sizeof(buf) && !_stricmp( buf, value );
 }
 
-/* the one file matching <pattern> in WINE_HEAT_LOG, opened */
-static FILE *open_one( const char *pattern, const char *mode )
+/* the one file matching <pattern> in WINE_HEAT_LOG, opened, or NULL if there is none */
+static FILE *find_one( const char *pattern, const char *mode )
 {
     char dir[MAX_PATH], path[MAX_PATH * 2];
     WIN32_FIND_DATAA fd;
@@ -150,7 +151,7 @@ static FILE *open_one( const char *pattern, const char *mode )
 
     if (!GetEnvironmentVariableA( "WINE_HEAT_LOG", dir, sizeof(dir) )) FAIL( "WINE_HEAT_LOG isn't set" );
     snprintf( path, sizeof(path), "Z:%s/%s", dir, pattern );
-    if ((find = FindFirstFileA( path, &fd )) == INVALID_HANDLE_VALUE) FAIL( "no %s in %s", pattern, dir );
+    if ((find = FindFirstFileA( path, &fd )) == INVALID_HANDLE_VALUE) return NULL;
     snprintf( path, sizeof(path), "Z:%s/%s", dir, fd.cFileName );
     if (FindNextFileA( find, &fd )) FAIL( "more than one %s in %s", pattern, dir );
     FindClose( find );
@@ -158,13 +159,22 @@ static FILE *open_one( const char *pattern, const char *mode )
     return f;
 }
 
-/* FEX_PROFILESTATS=1: the dumper's line of FEX's counters for the thread, while it runs */
-static void check_fex_stats( DWORD tid )
+static FILE *open_one( const char *pattern, const char *mode )
+{
+    FILE *f = find_one( pattern, mode );
+    if (!f) FAIL( "no %s in WINE_HEAT_LOG", pattern );
+    return f;
+}
+
+/* FEX_PROFILESTATS=1: whether the heat log has the dumper's line of FEX's counters for the thread
+ * yet; the dumper rewrites the file, so a read may find it empty */
+static BOOL fex_stats_seen( DWORD tid )
 {
     char want[32], line[4096];
     BOOL found = FALSE;
-    FILE *f = open_one( "heat-*.log", "r" );
+    FILE *f = find_one( "heat-*.log", "r" );
 
+    if (!f) return FALSE;
     snprintf( want, sizeof(want), "fex thread %04lx ", tid );
     while (!found && fgets( line, sizeof(line), f ))
     {
@@ -174,7 +184,7 @@ static void check_fex_stats( DWORD tid )
         if (strstr( line, "no slot" )) FAIL( "FEX keeps no counters for the thread" );
     }
     fclose( f );
-    if (!found) FAIL( "no line of FEX's counters for thread %04lx in the heat log", tid );
+    return found;
 }
 
 /* the first address on the guest's stack, or the last call's return address, in sys_caller or
@@ -295,7 +305,7 @@ int main(void)
 
     setvbuf( stdout, NULL, _IONBF, 0 );
     if (on && GetEnvironmentVariableA( "GW2_TEST_PROF_SECONDS", buf, sizeof(buf) )) seconds = atoi( buf );
-    else if (on) seconds = 15;
+    else if (on) seconds = 8;
     if (!(pNtYieldExecution = (void *)GetProcAddress( GetModuleHandleA( "ntdll.dll" ), "NtYieldExecution" )))
         FAIL( "no NtYieldExecution" );
     if (!(never = CreateEventA( NULL, TRUE, FALSE, NULL ))) FAIL( "CreateEvent: error %lu", GetLastError() );
@@ -306,16 +316,20 @@ int main(void)
     range( R_KEEP, "keep", keep );
     range( R_GAME, "game", game );
 
-    if (!(thread = CreateThread( NULL, 0, game, (void *)(ULONG_PTR)seconds, 0, &tid )))
-        FAIL( "CreateThread: error %lu", GetLastError() );
+    if (!(thread = CreateThread( NULL, 0, game, NULL, 0, &tid ))) FAIL( "CreateThread: error %lu", GetLastError() );
+    Sleep( seconds * 1000 );
     if (on && env_is( "FEX_PROFILESTATS", "1" ))
     {
-        /* heat.c's dumper writes every 5 s, and FEX frees the thread's slot when it ends */
-        if (seconds < 12) FAIL( "FEX_PROFILESTATS needs 12 s or more" );
-        Sleep( (seconds - 3) * 1000 );
-        check_fex_stats( tid );
+        /* the thread runs on until the line came, up to two of the dumper's 5 s more */
+        unsigned int waited;
+        for (waited = 0; !fex_stats_seen( tid ); waited += 250)
+        {
+            if (waited >= 10000) FAIL( "no line of FEX's counters for thread %04lx in the heat log while it ran", tid );
+            Sleep( 250 );
+        }
     }
-    if (WaitForSingleObject( thread, (seconds + 60) * 1000 )) FAIL( "the thread didn't end" );
+    InterlockedExchange( &stop, 1 );
+    if (WaitForSingleObject( thread, 60000 )) FAIL( "the thread didn't end" );
     CloseHandle( thread );
 
     if (on)
