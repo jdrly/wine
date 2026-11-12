@@ -129,7 +129,15 @@ int main( void )
     check_parse( "0", false, 0 );
     check_parse( "-1.5", false, 0 );
     check_parse( "100.5", false, 0 );
+    check_parse( ".5", true, 0.5 );
     check_parse( "1e3", false, 0 );
+    check_parse( "1e1", false, 0 );
+    check_parse( "0x10", false, 0 );
+    check_parse( "0x1p0", false, 0 );
+    check_parse( "+1.5", false, 0 );
+    check_parse( " 1.5", false, 0 );
+    check_parse( "1.5.2", false, 0 );
+    check_parse( ".", false, 0 );
     check_parse( "1,5", false, 0 );
     check_parse( "1.5x", false, 0 );
     check_parse( "fast", false, 0 );

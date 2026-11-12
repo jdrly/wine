@@ -26,17 +26,21 @@
 
 #include <stdbool.h>
 #include <stdlib.h>
+#include <string.h>
 
 /* WINE_MACDRV_MOUSE_SCALE, read once by setup_options (macdrv_main.c); 1 when unset */
 extern double gcmouse_scale;
 
-/* <str> as a factor: a decimal number above 0 and up to 100, nothing after it. strtod reads it
-   with Wine's LC_NUMERIC, which ntdll sets to "C", so the point is always "." */
+/* <str> as a factor: a decimal number above 0 and up to 100, digits and a point only, so no sign,
+   exponent, hex, space, inf or nan. strtod reads it with Wine's LC_NUMERIC, which ntdll sets to
+   "C", so the point is always "." */
 static inline bool gcmouse_parse_scale(const char *str, double *scale)
 {
     char *end;
-    double value = strtod(str, &end);
+    double value;
 
+    if (str[strspn(str, "0123456789.")]) return false;
+    value = strtod(str, &end);
     if (end == str || *end || !(value > 0 && value <= 100)) return false;
     *scale = value;
     return true;
