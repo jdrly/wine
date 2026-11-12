@@ -786,6 +786,10 @@ def literal(m, num, addend=0):
         end = nul + 1 if nul >= 0 else stop
     elif reach >= end:  # elsewhere a literal ends at the next label
         return f"literal {s['name']} {addend} from {label}, past its label's bytes, in file {id(m):x}"
+    else:  # and holds no relocation (an asm-named l_.str with a pointer), or its bytes aren't all it is
+        lo, hi = start - s["offset"], end - s["offset"]  # the literal's offsets in its section
+        if any(lo <= struct.unpack_from("<i", m.data, s["reloff"] + 8 * k)[0] < hi for k in range(s["nreloc"])):
+            return None
     return f"literal {s['name']} {bytes(m.data[start:end])!r}"
 
 
@@ -1323,13 +1327,21 @@ def selftest(engine_dir):
     wide = lambda text, label, addend=None: with_literal(text, [(label, 0), ("l_.str.9", 12)],  # u"Hello" is 12 bytes
                                                           [(0, 0, addend), (4, 0, addend)], "__TEXT,__ustring", 0)
     hello = "Hello".encode("utf-16-le") + b"\0\0"
+
+    def with_reloc(m):  # a pointer at the start of the data section's first label: one relocation there
+        sec = m.sections[-1]
+        sec.update(reloff=len(m.data), nreloc=1)
+        m.data += struct.pack("<iI", 0, 3 << 25 | 1 << 27 | 0)  # 8 bytes, extern, ARM64_RELOC_UNSIGNED to _a
+        return m
     if function_changes(wide(hello + b"x\0\0\0", "l_.str.1"), wide(hello + b"x\0\0\0", "l_.str.2"), "x.c") != ([], [], []):
         failed.append("touched object: a wide string's label renumbered, its bytes the same")
     for what, base, head in (
             ("a wide string's text", wide(hello, "l_.str.1"), wide("Hellp".encode("utf-16-le") + b"\0\0", "l_.str.1")),
             ("another label of data than clang's string label", wide(hello, "_table"), wide(hello, "_table2")),
             ("an addend past a wide string's label", wide(hello + bytes(16), "l_.str.1", 20),
-             wide(hello + bytes(16), "l_.str.1", 20))):
+             wide(hello + bytes(16), "l_.str.1", 20)),
+            ("an l_.str label whose bytes hold a relocation, renumbered", with_reloc(wide(bytes(12), "l_.str.1")),
+             with_reloc(wide(bytes(12), "l_.str.2")))):
         if function_changes(base, head, "x.c")[0] != ["x.c: f"]:
             failed.append(f"touched object: {what}")
     for what, base, head in (
