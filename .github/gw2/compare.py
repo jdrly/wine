@@ -1,25 +1,28 @@
 #!/usr/bin/env python3
-# gw2 (jdrly/gw2-on-mac#40): compare my ntdll.so with the one in Mach9's engine. It reads files
-# and runs nothing.
+# gw2 (jdrly/gw2-on-mac#40, #57): compare my ntdll.so or winemac.so with the one in Mach9's
+# engine. It reads files and runs nothing.
 #
-#   ntdll-compare.py baseline <mine> <engine-unix-dir>
-#   ntdll-compare.py patched <mine> <engine-unix-dir> <source dir> <build dir> <base ntdll.so>
-#                            <base objects> <base make log> <make log> <base Makefile> <Makefile>
-#                            <checkout time> [<changed file>...]
-#   ntdll-compare.py selftest <engine-unix-dir>
+#   compare.py baseline <library> <mine> <engine-unix-dir>
+#   compare.py patched <library> <mine> <engine-unix-dir> <source dir> <build dir> <base file>
+#                      <base objects> <base make log> <make log> <base Makefile> <Makefile>
+#                      <checkout time> [<changed file>...]
+#   compare.py selftest <engine-unix-dir>
 #
-# <engine-unix-dir> is the engine's lib/wine/aarch64-unix. Prints a Markdown report and exits 1
-# when a check fails. Both modes check the linked file's install name, rpaths, libraries, minos,
-# pipe2, the seven names compatdb.so looks up and every symbol the engine's win32u.so, winemac.so
-# and winemetal.so import from ntdll.so.
+# <library> is ntdll.so or winemac.so (LIBRARIES), <engine-unix-dir> the engine's
+# lib/wine/aarch64-unix. Prints a Markdown report and exits 1 when a check fails. Both modes check
+# the linked file's install name, rpaths, libraries, minos and pipe2, and that it imports nothing
+# from an @rpath library that the engine's file doesn't; for ntdll.so also the seven names
+# compatdb.so looks up and every symbol the engine's win32u.so, winemac.so and winemetal.so import
+# from it.
 #
 # baseline: my build of the engine's commit. Its exports and imports are the engine's, and every
 #   section of every loaded segment, every load command and the link edit data are the engine's
 #   byte for byte (byte_gate: what it leaves out, and why, is in its report line). Where they
 #   aren't, the functions are compared with the addresses masked to list what differs. That
-#   listing (diagnose, masked) is not the gate: it never passes or fails a build.
+#   listing (diagnose, masked) is not the gate: it never passes or fails a build. A function is
+#   named by its source file, an Objective-C method or block like any other.
 # patched: my build of a later commit, made in the same tree after the baseline with every object
-#   compiled again. Its exports are a superset of the engine's. Its objects are compared with the
+#   compiled again. Its exports are the engine's (ntdll.so's may be more). Its objects are compared with the
 #   base build's (compare_objects): first that both sets are what their files linked (the link
 #   line in the make log, the debug map's paths and times) and that this build compiled each after
 #   the checkout; then every object none of whose inputs is among the files git lists as changed
@@ -44,7 +47,17 @@ import tempfile
 COMPATDB = ["prepend_dll_path", "add_load_order_override", "set_compat_dpi_awareness",
             "set_compat_large_address_aware", "set_compat_gcmouse", "set_compat_force_nx",
             "set_compat_opengl"]
-DEPENDENTS = ["win32u.so", "winemac.so", "winemetal.so"]
+# What each library is: its link target and the directory of its unix objects in the build tree
+# (a PE object is in a subdirectory, aarch64-windows/ for instance), whether a patched build may
+# export more than the engine's, what of it the engine's other modules use, and the names of
+# another module's contract it has to export.
+LIBRARIES = {
+    "ntdll.so": dict(target="dlls/ntdll/ntdll.so", objects="dlls/ntdll/unix", more_exports=True,
+                     dependents=["win32u.so", "winemac.so", "winemetal.so"], contract=("compatdb.so", COMPATDB)),
+    # macdrv_functions is DXMT's private contract, without a version field (Mach9's docs/maintenance.md)
+    "winemac.so": dict(target="dlls/winemac.drv/winemac.so", objects="dlls/winemac.drv", more_exports=False,
+                       dependents=[], contract=None),
+}
 
 LC_REQ_DYLD = 0x80000000
 LC_SEGMENT_64, LC_SYMTAB, LC_DYSYMTAB = 0x19, 0x2, 0xb
@@ -148,11 +161,12 @@ class MachO:
         raise SystemExit(f"{self.path}: no bytes at {addr:#x}")
 
     def functions(self):
-        """{(object, name): (address, size)} from the debug map"""
+        """{(source file, name): (address, size)} from the debug map: an object's N_SO entries
+        name its directory and then its source file (window.c, cocoa_window.m)"""
         funcs, obj, pending = {}, None, None
         for n, t, _, _, value in self.syms:
-            if t == N_OSO:
-                obj = os.path.splitext(os.path.basename(n))[0]
+            if t == N_SO and n and not n.endswith("/"):
+                obj = os.path.basename(n)
             elif t == N_SO and not n:
                 obj = None
             elif t == N_FUN:
@@ -703,9 +717,9 @@ def function_changes(base, head, label):
     return changed, new, removed
 
 
-def build_commands(log):
-    """from a make log: object -> its compile command, and ntdll.so's link as (its .o arguments in
-    order, the rest of its words)"""
+def build_commands(log, lib):
+    """from a make log: object -> its compile command, for the library's unix objects, and the
+    library's link as (its .o arguments in order, the rest of its words)"""
     lines, cur = [], ""
     for line in open(log, errors="replace"):
         line = line.rstrip("\n")
@@ -719,9 +733,9 @@ def build_commands(log):
         words = line.split()
         if "-c" in words and "-o" in words:
             target = words[words.index("-o") + 1]
-            if target.startswith("dlls/ntdll/unix/") and target.endswith(".o"):
+            if os.path.dirname(target) == LIBRARIES[lib]["objects"] and target.endswith(".o"):
                 compiles[os.path.basename(target)] = " ".join(words)
-        elif "-o" in words and words[words.index("-o") + 1] == "dlls/ntdll/ntdll.so":
+        elif "-o" in words and words[words.index("-o") + 1] == LIBRARIES[lib]["target"]:
             link = ([w for w in words if w.endswith(".o")], [w for w in words if not w.endswith(".o")])
     return compiles, link
 
@@ -761,23 +775,23 @@ def adds_nothing(m):
             and not any(sec["size"] for sec in m.sections if not sec["name"].startswith("__DWARF,")))
 
 
-def compare_objects(r, src_dir, build_dir, base_file, base_dir, head_file, base_log, head_log, base_makefile,
+def compare_objects(r, lib, src_dir, build_dir, base_file, base_dir, head_file, base_log, head_log, base_makefile,
                     head_makefile, since, touched):
     """the patched build's objects against my base build's: proof that both sets are what their
     files linked, then every object none of whose inputs changed equal through its relocations, and
     the functions of the touched ones listed. The base build's objects are copies in <base_dir> of
-    the ones it linked from <build_dir>/dlls/ntdll/unix; this build's are there still. An object's
-    inputs are what makedep's rule for it names, in either build's Makefile."""
-    unix = os.path.join(build_dir, "dlls/ntdll/unix")
+    the ones it linked from the library's objects directory in <build_dir>; this build's are there
+    still. An object's inputs are what makedep's rule for it names, in either build's Makefile."""
+    unix = os.path.join(build_dir, LIBRARIES[lib]["objects"])
     base_objs = {f: os.path.join(base_dir, f) for f in os.listdir(base_dir) if f.endswith(".o")}
     head_objs = {f: os.path.join(unix, f) for f in os.listdir(unix) if f.endswith(".o")}
-    base_cc, base_link = build_commands(base_log)
-    head_cc, head_link = build_commands(head_log)
+    base_cc, base_link = build_commands(base_log, lib)
+    head_cc, head_link = build_commands(head_log, lib)
     for label, objs, file, link, cc in (("my base build", base_objs, base_file, base_link, base_cc),
                                        ("this build", head_objs, head_file, head_link, head_cc)):
         compared = {os.path.normpath(os.path.join(unix, f)): p for f, p in objs.items()}
         empty = {path for path, p in compared.items() if adds_nothing(MachO(p))}
-        problems = (["no link of ntdll.so in its make log"] if link is None else
+        problems = ([f"no link of {lib} in its make log"] if link is None else
                     link_proof(link[0], linked_objects(MachO(file)), compared, build_dir, empty))
         r.check(not problems, f"{label}: the {len(objs)} objects compared are the ones its link line names and its "
                               f"debug map lists, by path and in order, with the times the link saw",
@@ -786,14 +800,14 @@ def compare_objects(r, src_dir, build_dir, base_file, base_dir, head_file, base_
         r.check(not missing, f"{label}: the make log has the compile command of every object",
                 f"{label}: no compile command in the make log for {listing(missing)}")
     r.check(bool(base_link and head_link and base_link[1] == head_link[1]),
-            "both builds linked ntdll.so with the same command, objects aside",
-            "the two builds linked ntdll.so with different commands, objects aside")
+            f"both builds linked {lib} with the same command, objects aside",
+            f"the two builds linked {lib} with different commands, objects aside")
     old = [f for f, p in head_objs.items() if os.stat(p).st_mtime < since]
     r.check(not old, "this build compiled every object after the checkout",
             f"objects older than the checkout, so not rebuilt: {listing(old)}")
 
-    inputs = makefile_inputs(base_makefile, src_dir)
-    for obj, deps in makefile_inputs(head_makefile, src_dir).items():
+    inputs = makefile_inputs(base_makefile, src_dir, LIBRARIES[lib]["objects"])
+    for obj, deps in makefile_inputs(head_makefile, src_dir, LIBRARIES[lib]["objects"]).items():
         inputs.setdefault(obj, set()).update(deps)
     bad, changed, new, removed, through = sort_objects(base_objs, head_objs, inputs, set(touched), base_cc, head_cc)
     r.check(not bad, "every object none of whose inputs this commit changes is my base build's: its compile "
@@ -808,10 +822,10 @@ def compare_objects(r, src_dir, build_dir, base_file, base_dir, head_file, base_
 GENERATED_INPUTS_HELD = ("build:include/",)  # the workflow holds config.h and the generated headers equal
 
 
-def makefile_inputs(makefile, src_dir):
-    """object basename -> its inputs, from the rules makedep wrote into the generated Makefile
-    (dlls/ntdll/unix/<file>.o: <every file it includes>): a file of the source tree as git names
-    it, anything else as "build:<path in the build tree>" """
+def makefile_inputs(makefile, src_dir, objects):
+    """object basename -> its inputs, from the rules makedep wrote into the generated Makefile for
+    the objects in the directory <objects> (dlls/ntdll/unix/<file>.o: <every file it includes>): a
+    file of the source tree as git names it, anything else as "build:<path in the build tree>" """
     text = open(makefile, errors="replace").read().replace("\\\n", " ")
     src = os.path.normpath(src_dir) + "/"
     out = {}
@@ -819,7 +833,7 @@ def makefile_inputs(makefile, src_dir):
         if ":" not in line or "=" in line.split(":", 1)[0]:
             continue
         targets, deps = line.split(":", 1)
-        objs = [t for t in targets.split() if t.startswith("dlls/ntdll/unix/") and t.endswith(".o")]
+        objs = [t for t in targets.split() if os.path.dirname(t) == objects and t.endswith(".o")]
         for t in objs:
             for d in deps.split():
                 d = os.path.normpath(d)
@@ -859,11 +873,22 @@ def sort_objects(base_objs, head_objs, inputs, touched, base_cc, head_cc, load=M
             elif canonical(load(base_objs[f])) != canonical(load(head_objs[f])):
                 bad.append(f"{f}: code, data, relocations or symbols")
         else:
-            c, n, g = function_changes(load(base_objs[f]), load(head_objs[f]), f[:-2] + ".c")
+            # named by its source, as the debug map names the baseline's functions
+            source = next((os.path.basename(d) for d in sorted(deps)
+                           if os.path.splitext(os.path.basename(d)) in ((f[:-2], ".c"), (f[:-2], ".m"))), f[:-2] + ".c")
+            c, n, g = function_changes(load(base_objs[f]), load(head_objs[f]), source)
             changed += c
             new += n
             removed += g
     return bad, changed, new, removed, through
+
+
+def rpath_imports(mine, theirs):
+    """what my file imports from the engine's own modules (@rpath/ntdll.so, @rpath/win32u.so), and
+    of that what the engine's file doesn't import from the same one. The engine's modules export
+    what their files import from each other, so my file loads next to theirs only without the second."""
+    rpath = {n: where for n, where in mine.items() if where.startswith("@rpath/")}
+    return rpath, sorted(f"{n} ({where})" for n, where in rpath.items() if theirs.get(n) != where)
 
 
 class Report:
@@ -1085,7 +1110,7 @@ def selftest(engine_dir):
                     "dlls/ntdll/unix/serial.o: /src/dlls/ntdll/unix/serial.c include/config.h \\\n"
                     "  /src/dlls/ntdll/unix/unix_private.h\n"
                     "dlls/ntdll/unix/tape.o: /src/dlls/ntdll/unix/tape.c dlls/ntdll/unix/made.h\n")
-        inputs = makefile_inputs(makefile, "/src")
+        inputs = makefile_inputs(makefile, "/src", "dlls/ntdll/unix")
     if inputs != {"serial.o": {"dlls/ntdll/unix/serial.c", "build:include/config.h", "dlls/ntdll/unix/unix_private.h"},
                   "tape.o": {"dlls/ntdll/unix/tape.c", "build:dlls/ntdll/unix/made.h"}}:
         failed.append(f"Makefile inputs: read {inputs}")
@@ -1100,6 +1125,52 @@ def selftest(engine_dir):
     if not sort_objects({"tape.o": "base"}, {"tape.o": "base"}, inputs, set(), {"tape.o": "cc"},
                         {"tape.o": "cc"}, load=objects.get)[0]:
         failed.append("objects: an input outside the source tree that isn't held equal passed")
+
+    # winemac.so: its unix objects are dlls/winemac.drv/*.o, Objective-C ones among them, and its PE
+    # objects are in a subdirectory; a touched .m file's functions are named by it; the debug map
+    # names a function by its source, an Objective-C method too
+    with tempfile.TemporaryDirectory() as tmp:
+        makefile, log = os.path.join(tmp, "Makefile"), os.path.join(tmp, "make.log")
+        with open(makefile, "w") as f:
+            f.write("dlls/winemac.drv/cocoa_window.o: /src/dlls/winemac.drv/cocoa_window.m include/config.h \\\n"
+                    "  /src/dlls/winemac.drv/macdrv_cocoa.h\n"
+                    "dlls/winemac.drv/aarch64-windows/dllmain.o: /src/dlls/winemac.drv/dllmain.c\n"
+                    "dlls/ntdll/unix/sync.o: /src/dlls/ntdll/unix/sync.c\n")
+        with open(log, "w") as f:
+            f.write("clang -arch arm64 -std=gnu23 -c -o dlls/winemac.drv/cocoa_window.o ../src/dlls/winemac.drv/cocoa_window.m\n"
+                    "aarch64-w64-mingw32-clang -c -o dlls/winemac.drv/aarch64-windows/dllmain.o dllmain.c\n"
+                    "clang -c -o dlls/ntdll/unix/sync.o sync.c\n"
+                    "clang -o dlls/ntdll/ntdll.so dlls/ntdll/unix/sync.o\n"
+                    "clang -arch arm64 -o dlls/winemac.drv/winemac.so -dynamiclib \\\n"
+                    "  dlls/winemac.drv/cocoa_window.o dlls/ntdll/ntdll.so dlls/win32u/win32u.so -framework AppKit\n")
+        inputs = makefile_inputs(makefile, "/src", "dlls/winemac.drv")
+        compiles, link = build_commands(log, "winemac.so")
+    if inputs != {"cocoa_window.o": {"dlls/winemac.drv/cocoa_window.m", "build:include/config.h",
+                                     "dlls/winemac.drv/macdrv_cocoa.h"}}:
+        failed.append(f"winemac.so: Makefile inputs read {inputs}")
+    if list(compiles) != ["cocoa_window.o"] or not link or link[0] != ["dlls/winemac.drv/cocoa_window.o"] \
+            or "dlls/win32u/win32u.so" not in link[1]:
+        failed.append(f"winemac.so: make log read {compiles} {link}")
+    bad, changed, _, _, _ = sort_objects({"cocoa_window.o": "base"}, {"cocoa_window.o": "head"}, inputs,
+                                         {"dlls/winemac.drv/macdrv_cocoa.h"}, {}, {}, load=lambda o: {
+                                             "base": fake_object(four, rel(0), b"", functions=(("-[WineWindow a]", 0),)),
+                                             "head": fake_object(four, rel(1), b"", functions=(("-[WineWindow a]", 0),))}[o])
+    if bad or changed != ["cocoa_window.m: -[WineWindow a]"]:
+        failed.append(f"winemac.so: a touched .m file's method, not {bad} {changed}")
+    objc = MachO.__new__(MachO)
+    objc.syms = [("", N_SO, 0, 0, 0), ("/src/dlls/winemac.drv/", N_SO, 0, 0, 0), ("cocoa_window.m", N_SO, 0, 0, 0),
+                 ("/build/dlls/winemac.drv/cocoa_window.o", N_OSO, 0, 0, 0), ("-[WineWindow a]", N_FUN, 1, 0, 0x100),
+                 ("", N_FUN, 0, 0, 8), ("", N_SO, 1, 0, 0)]
+    if objc.functions() != {("cocoa_window.m", "-[WineWindow a]"): (0x100, 8)}:
+        failed.append(f"debug map: a method named by its source, not {objc.functions()}")
+
+    # an import from the engine's ntdll.so or win32u.so: the engine's own, or one it doesn't have
+    theirs = {"NtClose": "@rpath/ntdll.so", "window_surface_create": "@rpath/win32u.so", "malloc": "/usr/lib/libSystem.B.dylib"}
+    if rpath_imports(theirs, theirs)[1] or rpath_imports(dict(theirs, calloc="/usr/lib/libSystem.B.dylib"), theirs)[1]:
+        failed.append("imports: the engine's own, or a new one from the system, failed")
+    for new in (dict(theirs, NtYieldExecution="@rpath/ntdll.so"), dict(theirs, NtClose="@rpath/win32u.so")):
+        if not rpath_imports(new, theirs)[1]:
+            failed.append(f"imports: one the engine's file doesn't have passed: {new}")
 
     # the link proof: an object of the same name from another directory, and one linked twice
     with tempfile.TemporaryDirectory() as tmp:
@@ -1133,21 +1204,24 @@ def main():
     args = sys.argv[1:]
     if len(args) == 2 and args[0] == "selftest":
         return selftest(args[1])
-    if not ((len(args) == 3 and args[0] == "baseline") or (len(args) >= 12 and args[0] == "patched")):
-        print("usage: ntdll-compare.py baseline <mine> <engine-unix-dir>\n"
-              "       ntdll-compare.py patched <mine> <engine-unix-dir> <source dir> <build dir> <base ntdll.so> "
+    if not ((len(args) == 4 and args[0] == "baseline") or (len(args) >= 13 and args[0] == "patched")) \
+            or args[1] not in LIBRARIES:
+        print("usage: compare.py baseline <library> <mine> <engine-unix-dir>\n"
+              "       compare.py patched <library> <mine> <engine-unix-dir> <source dir> <build dir> <base file> "
               "<base objects> <base make log> <make log> <base Makefile> <Makefile> <checkout time> "
               "[<changed file>...]\n"
-              "       ntdll-compare.py selftest <engine-unix-dir>", file=sys.stderr)
+              "       compare.py selftest <engine-unix-dir>\n"
+              f"<library> is one of {', '.join(LIBRARIES)}", file=sys.stderr)
         return 2
-    mode, mine_path, engine_dir = args[:3]
+    mode, lib, mine_path, engine_dir = args[:4]
     if mode == "patched":
-        src_dir, build_dir, base_file, base_objs, base_log, head_log, base_mk, head_mk, since = args[3:12]
-        since, touched = float(since), args[12:]
-    mine, theirs = MachO(mine_path), MachO(os.path.join(engine_dir, "ntdll.so"))
+        src_dir, build_dir, base_file, base_objs, base_log, head_log, base_mk, head_mk, since = args[4:13]
+        since, touched = float(since), args[13:]
+    mine, theirs = MachO(mine_path), MachO(os.path.join(engine_dir, lib))
+    spec = LIBRARIES[lib]
     r = Report()
 
-    print(f"### ntdll.so compare ({mode})\n")
+    print(f"### {lib} compare ({mode})\n")
     print(f"- mine: {os.path.getsize(mine_path)} bytes, sha256 `{sha256(mine_path)}`")
     print(f"- the engine's: {os.path.getsize(theirs.path)} bytes, sha256 `{sha256(theirs.path)}`")
 
@@ -1164,20 +1238,26 @@ def main():
 
     mine_exp, theirs_exp = set(mine.exports), set(theirs.exports)
     missing, extra = theirs_exp - mine_exp, mine_exp - theirs_exp
-    if mode == "baseline":
-        r.check(not missing and not extra, f"exports the engine's {len(theirs_exp)} symbols, no more",
+    if mode == "baseline" or not spec["more_exports"]:
+        r.check(not missing and not extra, f"exports the engine's {len(theirs_exp)} symbols, no more: {listing(theirs_exp, 3)}",
                 f"exports differ: missing {listing(missing)}; extra {listing(extra)}")
     else:
         r.check(not missing, f"exports all {len(theirs_exp)} of the engine's symbols, {len(extra)} more"
                 + (f": {listing(extra)}" if extra else ""), f"lacks exports of the engine's: {listing(missing)}")
-    absent = [n for n in COMPATDB if n not in mine_exp]
-    r.check(not absent, "exports the seven names compatdb.so looks up", f"lacks compatdb's {listing(absent)}")
-    for dep in DEPENDENTS:
+    if spec["contract"]:
+        user, names = spec["contract"]
+        absent = [n for n in names if n not in mine_exp]
+        r.check(not absent, f"exports the {len(names)} names {user} looks up", f"lacks {user}'s {listing(absent)}")
+    for dep in spec["dependents"]:
         d = MachO(os.path.join(engine_dir, dep))
-        wanted = {n for n, lib in d.imports.items() if lib == "@rpath/ntdll.so"}
+        wanted = {n for n, where in d.imports.items() if where == f"@rpath/{lib}"}
         absent = wanted - mine_exp
         r.check(wanted and not absent, f"exports all {len(wanted)} symbols the engine's {dep} imports from it",
-                f"{dep}: lacks {listing(absent)}" if absent else f"{dep} imports nothing from @rpath/ntdll.so")
+                f"{dep}: lacks {listing(absent)}" if absent else f"{dep} imports nothing from @rpath/{lib}")
+    rpath, unknown = rpath_imports(mine.imports, theirs.imports)
+    r.check(not unknown, f"imports nothing from an @rpath library that the engine's file doesn't "
+                         f"({len(rpath)} symbols" + (f", from {listing(set(rpath.values()))})" if rpath else ")"),
+            f"imports from an @rpath library what the engine's file doesn't: {listing(unknown)}")
 
     if mine.imports == theirs.imports:
         r.ok(f"imports the engine's {len(theirs.imports)} symbols from the same libraries")
@@ -1191,7 +1271,7 @@ def main():
         if not byte_gate(mine, theirs, r):
             diagnose(mine, theirs)
     else:
-        changed, new, removed, through = compare_objects(r, src_dir, build_dir, base_file, base_objs, mine_path,
+        changed, new, removed, through = compare_objects(r, lib, src_dir, build_dir, base_file, base_objs, mine_path,
                                                          base_log, head_log, base_mk, head_mk, since, touched)
         print("\n#### Changed by this branch\n")
         print("Objects compared function by function, and the changed inputs that made them so:\n")
@@ -1216,7 +1296,7 @@ def diagnose(mine, theirs):
         return
     fm, ft = mine.functions(), theirs.functions()
     rm, rt = mine.resolver(), theirs.resolver()
-    differ = [f"{obj}.c: {name[1:] if name.startswith('_') else name}"
+    differ = [f"{obj}: {name[1:] if name.startswith('_') else name}"
               + ("" if (obj, name) in fm and (obj, name) in ft else " (only in one)")
               for obj, name in sorted(set(fm) | set(ft), key=lambda k: (k[0] or "", k[1]))
               if (obj, name) not in fm or (obj, name) not in ft
