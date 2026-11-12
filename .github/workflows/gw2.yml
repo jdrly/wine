@@ -21,7 +21,9 @@
 #   The per-function listing with masked addresses that follows a failed byte gate only names
 #   what differs; it is not the gate and never passes or fails a build.
 #   Artifacts ntdll-mach9-<commit> and macdrv-mach9-<commit>: ntdll.so or winemac.so, VERSION,
-#   COPYING.LIB, LICENSE, kept 7 days.
+#   COPYING.LIB, LICENSE, kept 7 days. VERSION's line "switches: …" names every WINE_HEAT_*
+#   (ntdll.so) or WINE_MACDRV_* (winemac.so) variable the file reads, from the sources, and the
+#   step fails unless those are exactly that kind of string in the file (.github/gw2/switches.zsh).
 # tests: tests/gw2/*.c built for Win64 x86_64 with llvm-mingw. On a pull request, window.exe under
 #   the engine with my winemac.so says whether the Mac driver starts on the runner;
 #   tests/gw2/native/frames.c, built natively, tests the driver's frame decision; layered.exe under
@@ -328,10 +330,20 @@ jobs:
           cp "$BUILD/dlls/winemac.drv/winemac.so" "$SRC/COPYING.LIB" "$SRC/LICENSE" dist/macdrv/
           for lib in ntdll winemac; do
             dir=dist/ntdll
-            [[ $lib == ntdll ]] || dir=dist/macdrv
+            prefix=WINE_HEAT
+            sources=("$SRC"/dlls/ntdll/unix/*.[ch])
+            if [[ $lib != ntdll ]]; then
+              dir=dist/macdrv
+              prefix=WINE_MACDRV
+              sources=("$SRC"/dlls/winemac.drv/*.[chm])
+            fi
+            # "switches: …": the variables with the prefix that this commit's sources read, which
+            # have to be the file's strings with it (the app reads ntdll.so's line, jdrly/gw2-on-mac#80)
+            switches=$("$GW2/switches.zsh" "$prefix" "$dir/$lib.so" "${sources[@]}") || exit 1
             {
               strings -a dist/ntdll/ntdll.so | grep -oE 'wine-[0-9]+\.[0-9]+-[0-9]+-g[0-9a-f]+'
               echo "commit: $COMMIT"
+              echo "$switches"
               echo "base: $BASE_COMMIT ($(git -C "$SRC" describe "$BASE_COMMIT"))"
               echo "engine: Mach9 $MACH9_VERSION (wine-$MACH9_VERSION-macos-arm64.tar.xz, sha256 $MACH9_SHA256)"
               echo "toolchain: Xcode $(xcodebuild -version | sed -n 's/^Xcode //p') (macOS SDK $(xcrun -sdk macosx --show-sdk-version)), $(clang --version | sed -n 1p), llvm-mingw $LLVM_MINGW_VERSION, macOS $MACOSX_DEPLOYMENT_TARGET"
