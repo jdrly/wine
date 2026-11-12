@@ -4,10 +4,14 @@
  * The main thread takes PEEKS empty PeekMessage calls (PM_REMOVE on an empty queue) and then posts
  * itself one message and takes it, so that the queue still works. With WINE_HEAT_COUNT=1 and
  * WINE_HEAT_EXE=peekyield.exe my ntdll.so counts each NtYieldExecution in the thread's row of
- * heat-<pid>.log, which the dumper rewrites every 5 s: the program waits for two rewrites after the
- * calls and reads its row. Wine yields once per empty peek, so the row has at least PEEKS yields;
- * with GW2_TEST_PEEK_NO_YIELD=1, for my win32u.so with WINE_WIN32U_PEEK_YIELD=off, it has fewer
- * than 10 (none of them the peeks'). Without counting it only makes the calls.
+ * heat-<pid>.log, which the dumper rewrites every 5 s. The program reads its row before the calls
+ * and after them, each time after two rewrites, and counts the yields in between. The thread
+ * yields about 110 times besides the peeks (run 43319561356: 116 in all with the yield off, 1,107
+ * to 1,115 with it), so the yields between the two readings are the peeks' and whatever else the
+ * thread does meanwhile. Wine yields once
+ * per empty peek, so there are at least PEEKS; with GW2_TEST_PEEK_NO_YIELD=1, for my win32u.so with
+ * WINE_WIN32U_PEEK_YIELD=off, fewer than half of PEEKS, so the peeks' yields are gone whatever the
+ * thread's other yields are. Without counting it only makes the calls.
  *
  * Prints "gw2 test peekyield: passed" and exits 0, or names what failed and exits 1. */
 #include <stdio.h>
@@ -76,18 +80,36 @@ static long long yields(void)
     return -1;
 }
 
+/* this thread's yields once the dumper has rewritten heat-<pid>.log twice from now (the first may
+ * have begun before), or -1 without a row of this thread with a yield count */
+static long long yields_now(void)
+{
+    static char before[sizeof(text)];
+    DWORD start;
+    int rewrites;
+
+    for (start = GetTickCount(); !read_log(); Sleep( 50 ))
+        if (GetTickCount() - start > 15000) FAIL( "the dumper wrote no heat-<pid>.log in 15 s" );
+    for (rewrites = 0; rewrites < 2; rewrites++)
+    {
+        memcpy( before, text, sizeof(text) );
+        for (start = GetTickCount(); !read_log() || !strcmp( before, text ); Sleep( 50 ))
+            if (GetTickCount() - start > 15000) FAIL( "heat-<pid>.log wasn't rewritten in 15 s" );
+    }
+    return yields();
+}
+
 int main(void)
 {
     BOOL counting = env_is( "WINE_HEAT_COUNT", "1" ) && env_is( "WINE_HEAT_EXE", "peekyield.exe" );
     BOOL no_yield = env_is( "GW2_TEST_PEEK_NO_YIELD", "1" );
-    static char before[sizeof(text)];
-    long long n;
-    DWORD start;
+    long long n0 = 0, n;
     MSG msg;
-    int i, rewrites;
+    int i;
 
     setvbuf( stdout, NULL, _IONBF, 0 );
     PeekMessageW( &msg, NULL, 0, 0, PM_NOREMOVE );  /* this thread's queue */
+    if (counting && (n0 = yields_now()) < 0) n0 = 0;  /* no row yet: no yield counted yet */
 
     for (i = 0; i < PEEKS; i++)
         if (PeekMessageW( &msg, NULL, 0, 0, PM_REMOVE )) FAIL( "peek %d found message %#x", i, msg.message );
@@ -98,19 +120,11 @@ int main(void)
 
     if (counting)
     {
-        /* two rewrites after the calls: the first may have begun during them */
-        for (start = GetTickCount(); !read_log(); Sleep( 50 ))
-            if (GetTickCount() - start > 15000) FAIL( "the dumper wrote no heat-<pid>.log in 15 s" );
-        for (rewrites = 0; rewrites < 2; rewrites++)
-        {
-            memcpy( before, text, sizeof(text) );
-            for (start = GetTickCount(); !read_log() || !strcmp( before, text ); Sleep( 50 ))
-                if (GetTickCount() - start > 15000) FAIL( "heat-<pid>.log wasn't rewritten in 15 s" );
-        }
-        if ((n = yields()) < 0) FAIL( "no row of this thread with a yield count in heat-<pid>.log" );
-        printf( "gw2 test peekyield: %lld yields on this thread\n", n );
-        if (no_yield ? n >= 10 : n < PEEKS)
-            FAIL( "%lld yields, %s", n, no_yield ? "not under 10" : "fewer than the empty peeks" );
+        if ((n = yields_now()) < 0) FAIL( "no row of this thread with a yield count in heat-<pid>.log" );
+        printf( "gw2 test peekyield: %lld yields on this thread, %lld of them before the peeks\n", n, n0 );
+        n -= n0;
+        if (no_yield ? n >= PEEKS / 2 : n < PEEKS)
+            FAIL( "%lld yields during the peeks, %s", n, no_yield ? "not under half the empty peeks" : "fewer than the empty peeks" );
     }
     printf( "gw2 test peekyield: passed\n" );
     return 0;
