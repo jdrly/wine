@@ -45,10 +45,11 @@
 #   step fails unless those are exactly that kind of string in the file (.github/gw2/switches.zsh).
 # tests: tests/gw2/*.c built for Win64 x86_64 with llvm-mingw. On a pull request, window.exe under
 #   the engine with my winemac.so says whether the Mac driver starts on the runner;
-#   tests/gw2/native/frames.c, built natively, tests the driver's frame decision; layered.exe under
-#   the engine with my winemac.so counts the frames WINE_MACDRV_SURFACE skips, where the driver
-#   starts; and tests/gw2/matrix.zsh runs them all under the engine from the release tarball: with
-#   its own ntdll.so, and with mine in each WINE_HEAT_WAKE mode, with no WINE_HEAT_* variable and
+#   tests/gw2/native/frames.c and mouse_scale.c, built natively, test the driver's frame decision
+#   and its mouse speed factor (WINE_MACDRV_MOUSE_SCALE); layered.exe under the engine with my
+#   winemac.so counts the frames WINE_MACDRV_SURFACE skips, where the driver starts; and
+#   tests/gw2/matrix.zsh runs them all under the engine from the release tarball: with its own
+#   ntdll.so, and with mine in each WINE_HEAT_WAKE mode, with no WINE_HEAT_* variable and
 #   with them set for another program. A push to gw2-on-mac runs only the prefix boot and
 #   smoke.exe, under the engine's ntdll.so and under mine: its tree is a merged pull request's head,
 #   which went through all of that in that pull request's run, and Publish names that run.
@@ -436,7 +437,7 @@ jobs:
             echo '```'
           } | tee -a "$GITHUB_STEP_SUMMARY"
       # only the scripts and the test programs, not the whole Wine tree; the Mac driver's sources for
-      # the header tests/gw2/native/frames.c builds
+      # the headers tests/gw2/native/*.c build
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ env.COMMIT }}
@@ -521,6 +522,14 @@ jobs:
         run: |
           clang -std=gnu23 -O2 -Wall -Werror -o "$RUNNER_TEMP/frames" tests/gw2/native/frames.c
           "$RUNNER_TEMP/frames"
+      # test 5 of jdrly/gw2-on-mac#59: WINE_MACDRV_MOUSE_SCALE's arithmetic, built natively from
+      # dlls/winemac.drv/gcmouse_scale.h. 1,000 reports of 0.3 at 1.5 post 450 counts, the sums at 1
+      # are the engine's, and the parse takes only a number above 0 and up to 100
+      - name: The mouse's speed factor, natively
+        if: github.event_name == 'pull_request'
+        run: |
+          clang -std=gnu23 -O2 -Wall -Werror -o "$RUNNER_TEMP/mouse_scale" tests/gw2/native/mouse_scale.c
+          "$RUNNER_TEMP/mouse_scale"
       # test 12: layered.exe's 600 frames, every third new, under the engine with my winemac.so and
       # the macsurface channel on. The driver's line at the 600th flush has to say 400 skipped with
       # WINE_MACDRV_SURFACE=copy,skip, and 0 with copy and unset. Only where the Mac driver starts,
