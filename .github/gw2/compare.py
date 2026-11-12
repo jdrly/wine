@@ -752,17 +752,20 @@ def byte_gate(mine, theirs, r):
 
 def literal(m, num, addend=0):
     """symbol <num>, at <addend> from it, as the string literal it labels: its section and every
-    byte from the label to the next label in the section, and on to the NUL that ends the string
-    the reference reaches (or the section's end). None for any other symbol. An addend that leaves
-    the section, or goes before the label, gives a name no other file's relocation has, so the
-    function counts as changed. The compiler numbers the labels (l_.str.12) in the order it makes
-    the literals, so a string added to one function renames those of every function made after
-    it; the section and the bytes are what the code uses."""
-    _, t, sect, _, value = m.syms[num]
+    byte from the label to the next label in the section, and in a section of C strings on to the
+    NUL that ends the string the reference reaches (or the section's end). A literal is any label
+    in a section of C strings, and clang's label of a literal anywhere else (l_.str, l_.str.12):
+    a wide string (u"…", L"…") is one, in __TEXT,__ustring or __TEXT,__const. None for any other
+    symbol. An addend that leaves the section, or goes before the label, gives a name no other
+    file's relocation has, so the function counts as changed. The compiler numbers the labels in
+    the order it makes the literals, so a string added to one function renames those of every
+    function made after it; the section and the bytes are what the code uses."""
+    label, t, sect, _, value = m.syms[num]
     if t & (N_STAB | N_EXT) or not 0 < sect <= len(m.sections):
         return None
     s = m.sections[sect - 1]
-    if s["type"] != S_CSTRING_LITERALS or not s["addr"] <= value < s["addr"] + s["size"]:
+    c_strings = s["type"] == S_CSTRING_LITERALS
+    if not (c_strings or re.fullmatch(r"l_\.str(\.\d+)?", label)) or not s["addr"] <= value < s["addr"] + s["size"]:
         return None
     if "_labels" not in m.__dict__:  # each section's label addresses, sorted, once per file
         m._labels = {}
@@ -778,9 +781,11 @@ def literal(m, num, addend=0):
     reach = start + addend
     if not start <= reach < stop:  # fails closed: unequal to every other file's
         return f"literal {s['name']} {addend} from {m.syms[num][0]}, outside the literals, in file {id(m):x}"
-    # a read runs on to the first NUL, past the next label if it must
-    nul = m.data.find(b"\0", max(end - 1, reach), stop)
-    end = nul + 1 if nul >= 0 else stop
+    if c_strings:  # a read runs on to the first NUL, past the next label if it must
+        nul = m.data.find(b"\0", max(end - 1, reach), stop)
+        end = nul + 1 if nul >= 0 else stop
+    elif reach >= end:  # elsewhere a literal ends at the next label
+        return f"literal {s['name']} {addend} from {label}, past its label's bytes, in file {id(m):x}"
     return f"literal {s['name']} {bytes(m.data[start:end])!r}"
 
 
@@ -859,8 +864,13 @@ def object_functions(m):
     return out
 
 
+CHANGED_HOW = {}  # a changed function's listing -> how it changed, for the report
+
+
 def function_changes(base, head, label):
-    """the functions of a touched object, by bytes and relocations: changed, new and gone"""
+    """the functions of a touched object, by bytes and relocations: changed, new and gone. How each
+    changed one differs goes into CHANGED_HOW: other code, or the same code with other relocation
+    targets (those only the base's, and those only this build's) or the same targets elsewhere."""
     fb, fh = object_functions(base), object_functions(head)
     changed, new, removed = [], [], []
     for name in sorted(set(fb) | set(fh)):
@@ -871,6 +881,12 @@ def function_changes(base, head, label):
             removed.append(short + " (gone)")
         elif fb[name] != fh[name]:
             changed.append(short)
+            (cb, rb), (ch, rh) = fb[name], fh[name]
+            tb, th = {r[-1] for r in rb}, {r[-1] for r in rh}
+            cut = lambda ts: ", ".join(sorted(t[:60] for t in ts)[:3]) + (" …" if len(ts) > 3 else "") or "none"
+            CHANGED_HOW[short] = (f"other code, {len(cb)} / {len(ch)} bytes" if cb != ch else
+                                  f"the same code; relocation targets only the base's: {cut(tb - th)}; only mine: {cut(th - tb)}"
+                                  if tb != th else "the same code and targets, relocated at other places")
     return changed, new, removed
 
 
@@ -1269,9 +1285,9 @@ def selftest(engine_dir):
     # other bytes past the first NUL or past the next label that an addend reaches, an addend that
     # leaves the section (even with the same label) and an addend that would carry over to the next
     # relocation are changes.
-    def with_literal(text, labels, relocs, name="__TEXT,__cstring"):
+    def with_literal(text, labels, relocs, name="__TEXT,__cstring", kind=S_CSTRING_LITERALS):
         """__text's two words relocated by <relocs> [(address, label index, addend or None)] to
-        <labels> [(name, offset)] in a cstring section of <text>"""
+        <labels> [(name, offset)] in a section of <text>, of C strings unless <kind> says otherwise"""
         rel = []
         for address, label, addend in relocs:
             if addend is not None:  # ARM64_RELOC_ADDEND, right before the one it adds to
@@ -1279,7 +1295,7 @@ def selftest(engine_dir):
             rel.append((address, (page if address == 0 else off) | 3 + label))
         m = fake_object(code, rel, b"")
         m.sections.append(dict(name=name, addr=0x2000, offset=len(m.data), size=len(text), align=0,
-                               flags=S_CSTRING_LITERALS, type=S_CSTRING_LITERALS, reloff=0, nreloc=0,
+                               flags=kind, type=kind, reloff=0, nreloc=0,
                                reserved1=0, reserved2=0))
         m.data += text
         m.syms += [(n, N_SECT, len(m.sections), 0, 0x2000 + o) for n, o in labels]
@@ -1302,6 +1318,20 @@ def selftest(engine_dir):
                                    [(0, 1, 5), (4, 0, None)])
     if function_changes(carry(1), carry(2), "x.c") != ([], [], []):
         failed.append("touched object: renumbered labels, one with an addend and one without")
+    # a wide string, in a section that isn't one of C strings (u"Hello" in __TEXT,__ustring), goes by
+    # its bytes up to the next label when clang labelled it (l_.str.N), and by its label otherwise
+    wide = lambda text, label, addend=None: with_literal(text, [(label, 0), ("l_.str.9", 12)],  # u"Hello" is 12 bytes
+                                                          [(0, 0, addend), (4, 0, addend)], "__TEXT,__ustring", 0)
+    hello = "Hello".encode("utf-16-le") + b"\0\0"
+    if function_changes(wide(hello + b"x\0\0\0", "l_.str.1"), wide(hello + b"x\0\0\0", "l_.str.2"), "x.c") != ([], [], []):
+        failed.append("touched object: a wide string's label renumbered, its bytes the same")
+    for what, base, head in (
+            ("a wide string's text", wide(hello, "l_.str.1"), wide("Hellp".encode("utf-16-le") + b"\0\0", "l_.str.1")),
+            ("another label of data than clang's string label", wide(hello, "_table"), wide(hello, "_table2")),
+            ("an addend past a wide string's label", wide(hello + bytes(16), "l_.str.1", 20),
+             wide(hello + bytes(16), "l_.str.1", 20))):
+        if function_changes(base, head, "x.c")[0] != ["x.c: f"]:
+            failed.append(f"touched object: {what}")
     for what, base, head in (
             ("its text", one(b"text\0"), one(b"other\0")),
             ("its section", one(b"text\0"), one(b"text\0", "l_.str.2", "__DATA,__cstring")),
@@ -1655,7 +1685,7 @@ def main():
         for title, items in (("changed", changed), ("new", new), ("removed", removed)):
             print(f"- {title}: {len(items)}")
             for item in items:
-                print(f"  - `{item}`")
+                print(f"  - `{item}`" + (f" ({CHANGED_HOW[item]})" if item in CHANGED_HOW else ""))
 
     if mode == "baseline" and not r.failed:
         print(f"\nbaseline: {lib} {held}")
