@@ -344,7 +344,7 @@ void heat_prof_thread_gone( struct thread_data *data )
 static void heat_prof_retarget(void)
 {
     enum { KIND_OTHER, KIND_RENDER, KIND_EXE };
-    static struct { int entry, kind; struct thread_data *data; pthread_t thread; unsigned long long utid, cpu; DWORD tid; }
+    static struct { int entry, kind; struct thread_data *data; pthread_t thread; unsigned long long utid, cpu, d; DWORD tid; }
         seen[HEAT_PROF_THREADS];
     unsigned long long best_d[HEAT_PROF_TARGETS] = { 0 };
     int best[HEAT_PROF_TARGETS] = { -1, -1, -1 };
@@ -392,9 +392,10 @@ static void heat_prof_retarget(void)
 
         if (seen[i].entry == -1) continue;
         e = &heat_prof_threads[seen[i].entry];
+        seen[i].d = 0;
         /* it may have exited, and its entry gone to another thread, since the scan */
         if (e->data != seen[i].data || e->thread != seen[i].thread) continue;
-        d = seen[i].cpu - e->cpu;
+        d = seen[i].d = seen[i].cpu - e->cpu;
         e->cpu = seen[i].cpu;
         if (seen[i].kind == KIND_RENDER)
         {
@@ -419,7 +420,6 @@ static void heat_prof_retarget(void)
         struct heat_prof_target *t = &heat_prof_targets[k];
 
         if (!(heat_prof_want & (1 << k)) || best[k] == -1) continue;
-        t->cpu_ms = best_d[k] / 1000000;
         if (t->entry == seen[best[k]].entry) continue;
         /* a thread is one target's at a time, so two targets never swap threads: each keeps its
          * own until it ends or a third thread leads */
@@ -434,6 +434,13 @@ static void heat_prof_retarget(void)
         __atomic_store_n( &t->pending, (pthread_t)0, __ATOMIC_RELEASE );
         __atomic_store_n( &t->thread, seen[best[k]].thread, __ATOMIC_RELEASE );
         __atomic_store_n( &t->busy, 0, __ATOMIC_RELEASE );
+    }
+    /* each target's own thread's CPU time, whether or not it changed thread */
+    for (k = 0; k < HEAT_PROF_TARGETS; k++)
+    {
+        heat_prof_targets[k].cpu_ms = 0;
+        for (i = 0; i < n && heat_prof_targets[k].entry != -1; i++)
+            if (seen[i].entry == heat_prof_targets[k].entry) heat_prof_targets[k].cpu_ms = seen[i].d / 1000000;
     }
     pthread_mutex_unlock( &heat_prof_lock );
 }
