@@ -12,9 +12,9 @@
  *   - none was lost: every signal sent made a sample, the ring dropped none, and the file holds
  *     each one
  *   - at least 90% of the samples in translated code name an x86 address inside this program's
- *     functions (their .pdata ranges), both hot functions have samples, and hot_a's share of the
- *     two is between 50% and 70%; the share is printed, but a 3-CPU virtual runner is no place to
- *     hold it to a point
+ *     functions (their .pdata ranges), and hot_a has at least 1.2 times hot_b's samples: it has
+ *     1.5 times the turns, and a sampler that mixed up the two functions would give it fewer. How
+ *     FEX's code splits the time between them isn't the sampler's, so the share is only printed.
  *   - samples in Wine's unix side name sys_caller as the x86 caller (the call and return stack's
  *     last return address, or the first return address of this program on the guest stack), and
  *     others waiter: the system call under its caller, and the wait
@@ -215,7 +215,7 @@ static void check_samples( DWORD tid, unsigned int seconds )
     unsigned long long hot[2] = { 0 }, sys = 0, wait = 0, wait_in_unix = 0;
     unsigned int version = 0, size = 0, max_stack = 0, hz = 0, numer, denom;
     unsigned char stack[4096];
-    char line[4096], want[64];
+    char line[4096], want[64], turns[256] = "";
     BOOL pinned = FALSE, counted = FALSE;
     struct rec r;
     double share;
@@ -232,12 +232,15 @@ static void check_samples( DWORD tid, unsigned int seconds )
             printf( "gw2 test prof: %s", line );
             pinned = strstr( line, " pinned" ) != NULL;
         }
+        else if (line[0] == 'T') snprintf( turns, sizeof(turns), "%s", line );
         else if (line[0] == 'C' && strstr( line, want ) &&
                  sscanf( strstr( line, " sent " ), " sent %llu recorded %llu skipped %llu dropped %llu late %llu",
                          &sent, &recorded, &skipped, &dropped, &late ) == 5)
             counted = TRUE;
     }
     fclose( f );
+    /* the sampler's loop: whether a short sample count is its timer or its work */
+    if (turns[0]) printf( "gw2 test prof: %s", turns );
     if (!pinned) FAIL( "the sampler didn't find the pinned FEX" );
     if (!counted) FAIL( "no counts for thread %04lx", tid );
 
@@ -294,7 +297,7 @@ static void check_samples( DWORD tid, unsigned int seconds )
     if (!with_stack) FAIL( "no sample holds the guest's stack" );
     if (!hot[0] || !hot[1]) FAIL( "a hot function has no sample" );
     if (known * 10 < x86 * 9) FAIL( "%llu of %llu translated samples outside this program's functions", x86 - known, x86 );
-    if (share < 0.5 || share > 0.7) FAIL( "hot_a's share %.1f%%, not between 50%% and 70%%", share * 100 );
+    if (hot[0] * 5 < hot[1] * 6) FAIL( "hot_a %llu samples, hot_b %llu: hot_a needs 1.2 times hot_b's", hot[0], hot[1] );
     if (sys < 5) FAIL( "%llu samples of the system call under sys_caller", sys );
     if (wait < 5) FAIL( "%llu samples of the wait under waiter", wait );
 }

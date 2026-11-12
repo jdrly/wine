@@ -30,6 +30,10 @@
  *   U <addr> <image base> <image> <symbol> <symbol addr> a unix address, named once by dladdr
  *   C <s> <target> <tid> sent <n> recorded <n> skipped <n> dropped <n> late <n> cpu_ms <n>
  *                                                       each target's counts, every second and at exit
+ *   T <s> turns <n> work_ms <n> asked_ms <n> waited_ms <n>
+ *                                                       the sampler's loop since it started: turns, time
+ *                                                       working, wait asked for and wait it got, with
+ *                                                       the C lines
  *
  * <s> is seconds of mach_absolute_time(). sent: signals sent. skipped: ticks without a signal, as
  * the last one wasn't handled yet (the thread didn't run). recorded: samples in the ring. dropped:
@@ -129,6 +133,8 @@ static pthread_mutex_t heat_prof_lock = PTHREAD_MUTEX_INITIALIZER;  /* the list 
 static pthread_mutex_t heat_prof_file_lock = PTHREAD_MUTEX_INITIALIZER;
 static struct heat_prof_target heat_prof_targets[HEAT_PROF_TARGETS];
 static unsigned int heat_prof_late;
+/* the sampler's own loop: turns, ns of work, ns of wait asked for, ns waited */
+static unsigned long long heat_prof_turns, heat_prof_work, heat_prof_asked, heat_prof_waited;
 static unsigned int heat_prof_want = 1;  /* a bit per target */
 static unsigned int heat_prof_hz = 1000;
 static int heat_prof_own[2];             /* the sampler thread's pipe, after atexit() with heat_prof_file_lock */
@@ -789,6 +795,8 @@ static void heat_prof_counts(void)
                  __atomic_load_n( &t->dropped, __ATOMIC_RELAXED ), __atomic_load_n( &heat_prof_late, __ATOMIC_RELAXED ),
                  t->cpu_ms );
     }
+    fprintf( heat_prof_txt, "T %.3f turns %llu work_ms %.1f asked_ms %.1f waited_ms %.1f\n", heat_prof_seconds(),
+             heat_prof_turns, heat_prof_work / 1e6, heat_prof_asked / 1e6, heat_prof_waited / 1e6 );
     fflush( heat_prof_bin );
     fflush( heat_prof_txt );
     pthread_mutex_unlock( &heat_prof_file_lock );
@@ -810,7 +818,7 @@ static void heat_prof_wait( int kq, unsigned long long ns )
     struct timespec ts;
 
     EV_SET( &change, 1, EVFILT_TIMER, EV_ADD | EV_ONESHOT, NOTE_NSECONDS | NOTE_CRITICAL, ns, NULL );
-    if (kq != -1 && kevent( kq, &change, 1, &event, 1, NULL ) == 1) return;
+    if (kq != -1 && kevent( kq, &change, 1, &event, 1, NULL ) == 1 && !(event.flags & EV_ERROR)) return;
     ts.tv_sec = ns / 1000000000;
     ts.tv_nsec = ns % 1000000000;
     nanosleep( &ts, NULL );
@@ -819,7 +827,7 @@ static void heat_prof_wait( int kq, unsigned long long ns )
 static void *heat_prof_main( void *arg )
 {
     const unsigned long long tick = 1000000000ull / heat_prof_hz;
-    unsigned long long second = 0, rnd = mach_absolute_time() | 1;
+    unsigned long long second = 0, rnd = mach_absolute_time() | 1, wait, before;
     int kq = kqueue();
     struct sigaction sa;
     ULONG_PTR fex;
@@ -881,7 +889,13 @@ static void *heat_prof_main( void *arg )
         rnd ^= rnd << 13;
         rnd ^= rnd >> 7;
         rnd ^= rnd << 17;
-        heat_prof_wait( kq, tick / 2 + rnd % tick );
+        wait = tick / 2 + rnd % tick;
+        before = heat_now();
+        heat_prof_wait( kq, wait );
+        heat_prof_turns++;
+        heat_prof_work += before - now;
+        heat_prof_asked += wait;
+        heat_prof_waited += heat_now() - before;
     }
     return NULL;
 }
