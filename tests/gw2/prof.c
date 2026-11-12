@@ -63,12 +63,12 @@ struct rec
         exit( 1 ); \
     } while (0)
 
-static volatile unsigned int sink;
+static volatile unsigned int sink, calls;
 static volatile LONG stop;
 static HANDLE never;
 static LONG (WINAPI *pNtYieldExecution)(void);
 
-/* every function below calls one, so each has a frame and a .pdata entry */
+/* a leaf, without a .pdata entry */
 static __attribute__((noinline)) void keep( unsigned int x )
 {
     sink = x;
@@ -79,6 +79,7 @@ static __attribute__((noinline)) void hot_a(void)
     unsigned int x = 0x12345678, i;
     for (i = 0; i < HOT_A; i++) { x ^= x << 13; x ^= x >> 17; x ^= x << 5; }
     keep( x );
+    calls++;  /* after the call, so it is no tail jump: a function that calls gets a frame and a .pdata entry */
 }
 
 static __attribute__((noinline)) void hot_b(void)
@@ -86,6 +87,7 @@ static __attribute__((noinline)) void hot_b(void)
     unsigned int x = 0x87654321, i;
     for (i = 0; i < HOT_B; i++) { x ^= x << 13; x ^= x >> 17; x ^= x << 5; }
     keep( x );
+    calls++;
 }
 
 static __attribute__((noinline)) void sys_caller(void)
@@ -93,11 +95,13 @@ static __attribute__((noinline)) void sys_caller(void)
     unsigned int i;
     for (i = 0; i < YIELDS; i++) pNtYieldExecution();
     keep( i );
+    calls++;
 }
 
 static __attribute__((noinline)) void waiter(void)
 {
     keep( WaitForSingleObject( never, 1 ) );
+    calls++;
 }
 
 static DWORD WINAPI game( void *arg )
@@ -113,7 +117,7 @@ static DWORD WINAPI game( void *arg )
 }
 
 struct range { const char *name; ULONG_PTR lo, hi; };
-enum { R_HOT_A, R_HOT_B, R_SYS, R_WAIT, R_KEEP, R_GAME, R_NB };
+enum { R_HOT_A, R_HOT_B, R_SYS, R_WAIT, R_GAME, R_NB };
 static struct range ranges[R_NB];
 
 static void range( int i, const char *name, void *func )
@@ -314,7 +318,6 @@ int main(void)
     range( R_HOT_B, "hot_b", hot_b );
     range( R_SYS, "sys_caller", sys_caller );
     range( R_WAIT, "waiter", waiter );
-    range( R_KEEP, "keep", keep );
     range( R_GAME, "game", game );
 
     if (!(thread = CreateThread( NULL, 0, game, NULL, 0, &tid ))) FAIL( "CreateThread: error %lu", GetLastError() );
