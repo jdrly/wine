@@ -22,6 +22,10 @@
  * while it runs: heat.c's dumper writes every 5 s, and FEX frees the thread's slot when it ends,
  * so the thread runs on after its time until the line came, 10 s more at most.
  *
+ * With GW2_TEST_PROF_REFUSED=1 (jdrly/gw2-on-mac#111) the sampler must refuse the FEX it finds:
+ * the program runs its thread for a second, waits for the F line, and passes when it says refused
+ * and the sample file holds no sample.
+ *
  * Without the sampler for it, the program runs its thread for a second and passes: matrix.zsh
  * runs it under the engine's ntdll.so and under mine with the variables unset or set for another
  * program, where no file may appear. Prints "gw2 test prof: passed" and exits 0, or names what
@@ -302,9 +306,37 @@ static void check_samples( DWORD tid, unsigned int seconds )
     if (wait < 5) FAIL( "%llu samples of the wait under waiter", wait );
 }
 
+/* GW2_TEST_PROF_REFUSED=1: the F line says refused, once the sampler wrote it, and no sample came */
+static void check_refused(void)
+{
+    char line[4096] = "";
+    unsigned int waited;
+    BOOL seen = FALSE;
+    FILE *f;
+
+    for (waited = 0; !seen; waited += 250)
+    {
+        if (waited >= 30000) FAIL( "no F line in heat-prof-*.txt in 30 s" );
+        if ((f = find_one( "heat-prof-*.txt", "r" )))
+        {
+            while (!seen && fgets( line, sizeof(line), f )) seen = line[0] == 'F';
+            fclose( f );
+        }
+        if (!seen) Sleep( 250 );
+    }
+    printf( "gw2 test prof: %s", line );
+    if (!strstr( line, " refused" )) FAIL( "the sampler took a FEX it should have refused" );
+    /* the sampler thread ends without flushing its first line, so the file may still be empty */
+    f = open_one( "heat-prof-*.bin", "rb" );
+    if (fgets( line, sizeof(line), f ) && (strncmp( line, "HEATPROF ", 9 ) || fgetc( f ) != EOF))
+        FAIL( "samples after a refused FEX: %s", line );
+    fclose( f );
+}
+
 int main(void)
 {
     BOOL on = env_is( "WINE_HEAT_PROF", "1" ) && env_is( "WINE_HEAT_EXE", "prof.exe" );
+    BOOL refused = on && env_is( "GW2_TEST_PROF_REFUSED", "1" );
     unsigned int seconds = 1;
     ULONGLONG start;
     char buf[32];
@@ -312,8 +344,8 @@ int main(void)
     DWORD tid;
 
     setvbuf( stdout, NULL, _IONBF, 0 );
-    if (on && GetEnvironmentVariableA( "GW2_TEST_PROF_SECONDS", buf, sizeof(buf) )) seconds = atoi( buf );
-    else if (on) seconds = 8;
+    if (on && !refused && GetEnvironmentVariableA( "GW2_TEST_PROF_SECONDS", buf, sizeof(buf) )) seconds = atoi( buf );
+    else if (on && !refused) seconds = 8;
     if (!(pNtYieldExecution = (void *)GetProcAddress( GetModuleHandleA( "ntdll.dll" ), "NtYieldExecution" )))
         FAIL( "no NtYieldExecution" );
     if (!(never = CreateEventA( NULL, TRUE, FALSE, NULL ))) FAIL( "CreateEvent: error %lu", GetLastError() );
@@ -326,7 +358,7 @@ int main(void)
     if (!(thread = CreateThread( NULL, 0, game, NULL, 0, &tid ))) FAIL( "CreateThread: error %lu", GetLastError() );
     start = GetTickCount64();
     Sleep( seconds * 1000 );
-    if (on && env_is( "FEX_PROFILESTATS", "1" ))
+    if (on && !refused && env_is( "FEX_PROFILESTATS", "1" ))
     {
         /* the thread runs on until the line came, up to two of the dumper's 5 s more */
         unsigned int waited;
@@ -341,7 +373,8 @@ int main(void)
     if (WaitForSingleObject( thread, 60000 )) FAIL( "the thread didn't end" );
     CloseHandle( thread );
 
-    if (on)
+    if (refused) check_refused();
+    else if (on)
     {
         Sleep( 2500 );  /* the sampler writes each second */
         check_samples( tid, seconds );

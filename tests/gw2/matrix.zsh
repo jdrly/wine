@@ -23,9 +23,13 @@
 #    spin against the wake skip's sleeper count), and every kind on with a scope of its own.
 # 5. (jdrly/gw2-on-mac#43) prof.exe under mine as WINE_HEAT_EXE with WINE_HEAT_PROF=1 and
 #    FEX_PROFILESTATS=1, once, 8 seconds. Block 2 runs it for a second with the sampler unset and set
-#    for another program, where no file of the sampler's may appear either.
-# 6. (jdrly/gw2-on-mac#60) requests three runs under mine with counting. Beside it,
-#    (jdrly/gw2-on-mac#99) timers three runs under mine with counting.
+#    for another program, where no file of the sampler's may appear either. (jdrly/gw2-on-mac#111)
+#    Then once more under a clone of my tree whose FEX has another build id (one byte of the engine's
+#    changed), named in WINE_HEAT_PROF_FEX: the sampler has to take it.
+# 6. (jdrly/gw2-on-mac#60) requests three runs under mine with counting, the first two with
+#    FEX_PROFILESTATS=1 (jdrly/gw2-on-mac#111). Beside it, (jdrly/gw2-on-mac#99) timers three runs
+#    under mine with counting, and (jdrly/gw2-on-mac#111) prof under that clone with the sampler and
+#    no WINE_HEAT_PROF_FEX, where the sampler has to refuse the FEX.
 # 7. (jdrly/gw2-on-mac#61) with <win32u-wine>: setcursor, then requests and peekyield with
 #    counting, under the engine's win32u.so with WINE_WIN32U_SETCURSOR=shm and
 #    WINE_WIN32U_PEEK_YIELD=off, and under mine with neither, with only the first and with only the
@@ -124,7 +128,8 @@ collect
 side engine quiet engine "$engine" "$work/log-engine" WINE_HEAT_LOG=$work/log-engine
 side unset quiet unset "$mine" "$work/log-unset"
 side other quiet other "$mine" "$work/log-other" WINE_HEAT_EXE=other.exe WINE_HEAT_COUNT=1 \
-  WINE_HEAT_WAKE=one,skip WINE_HEAT_EVPOOL=1 WINE_HEAT_SPIN=lock=20,event=30,sem=5 WINE_HEAT_PROF=1 WINE_HEAT_LOG=$work/log-other
+  WINE_HEAT_WAKE=one,skip WINE_HEAT_EVPOOL=1 WINE_HEAT_SPIN=lock=20,event=30,sem=5 WINE_HEAT_PROF=1 FEX_PROFILESTATS=1 \
+  WINE_HEAT_LOG=$work/log-other
 collect
 
 # 3. jdrly/gw2-on-mac#44
@@ -206,18 +211,64 @@ side prof env -u WINE_HEAT_COUNT -u WINE_HEAT_WAKE -u WINE_HEAT_EVPOOL -u WINE_H
   "$run" "$mine" "$work/prefix-prof" "$exes/prof.exe"
 collect
 
+# jdrly/gw2-on-mac#111: a FEX the sampler doesn't know, in an APFS clone of my tree: the engine's,
+# with the first byte of its build id (the CodeView GUID) flipped in both names Mach9 installs it
+# under. Prints the value WINE_HEAT_PROF_FEX takes for it.
+mkdir -p "$work/fexid"
+cp -Rc "$mine" "$work/fexid/"
+other_fex=$work/fexid/${mine:t}
+named=$(python3 -I - "$other_fex/lib/wine/aarch64-windows" <<'EOF'
+import os, struct, sys
+d = os.path.realpath(sys.argv[1])
+old = bytes.fromhex("656ee1a27027233b4c4c44205044422e")  # heatprof.h's HEAT_FEX_PIN_GUID
+new = bytes([old[0] ^ 0xff]) + old[1:]
+done, out = set(), None
+for name in ("xtajit64.dll", "libarm64ecfex.dll"):
+    path = os.path.realpath(os.path.join(d, name))
+    if os.path.dirname(path) != d:
+        sys.exit(f"{name} leads out of the clone: {path}")
+    if path in done:
+        continue
+    done.add(path)
+    data = bytearray(open(path, "rb").read())
+    at = data.find(b"RSDS" + old)
+    if at < 0 or data.find(b"RSDS" + old, at + 1) >= 0:
+        sys.exit(f"{name}: the engine's build id isn't there exactly once")
+    data[at + 4:at + 20] = new
+    age = struct.unpack_from("<I", data, at + 20)[0]
+    pe = struct.unpack_from("<I", data, 0x3C)[0]
+    image = struct.unpack_from("<I", data, pe + 24 + 56)[0]  # SizeOfImage
+    with open(path + ".new", "wb") as f:
+        f.write(data)
+    os.replace(path + ".new", path)
+    out = f"{new.hex()}:{age}:{image:#x}"
+print(out)
+EOF
+)
+print "WINE_HEAT_PROF_FEX=$named"
+
+mkdir -p "$work/log-prof-named"
+side prof-named env -u WINE_HEAT_COUNT -u WINE_HEAT_WAKE -u WINE_HEAT_EVPOOL -u WINE_HEAT_SPIN WINE_HEAT_EXE=prof.exe \
+  WINE_HEAT_PROF=1 WINE_HEAT_PROF_FEX=$named FEX_PROFILESTATS=1 WINE_HEAT_LOG=$work/log-prof-named GW2_TEST_SECONDS=300 \
+  "$run" "$other_fex" "$work/prefix-prof-named" "$exes/prof.exe"
+collect
+
 # 6. jdrly/gw2-on-mac#60: requests three runs under mine with counting, each with a log folder of
 # its own, so each finds its own heat-requests-<pid>.log. After block 5, not beside it: prof
 # asserts a sample rate and an attribution ratio. Block 2 ran it without counting.
 requests() {
   local n log
+  local -a fex
   for n in 1 2 3; do
     print -r -- "run $n"
     log=$work/log-requests-$n
     mkdir -p "$log"
+    # jdrly/gw2-on-mac#111: FEX's line in each block in runs 1 and 2, and none in run 3
+    fex=()
+    if (( n < 3 )); then fex=(FEX_PROFILESTATS=1); fi
     env -u WINE_HEAT_WAKE -u WINE_HEAT_EVPOOL -u WINE_HEAT_SPIN -u WINE_HEAT_PROF \
       -u WINE_WIN32U_SETCURSOR -u WINE_WIN32U_PEEK_YIELD -u GW2_TEST_SETCURSOR_SKIPS -u GW2_TEST_PEEK_NO_YIELD \
-      WINE_HEAT_EXE=requests.exe WINE_HEAT_COUNT=1 WINE_HEAT_LOG=$log \
+      -u FEX_PROFILESTATS WINE_HEAT_EXE=requests.exe WINE_HEAT_COUNT=1 WINE_HEAT_LOG=$log $fex \
       GW2_TEST_SECONDS=300 "$run" "$mine" "$work/prefix-requests" "$exes/requests.exe"
   done
 }
@@ -238,6 +289,10 @@ timers() {
 
 side requests requests
 side timers timers
+mkdir -p "$work/log-prof-refused"
+side prof-refused env -u WINE_HEAT_COUNT -u WINE_HEAT_WAKE -u WINE_HEAT_EVPOOL -u WINE_HEAT_SPIN -u WINE_HEAT_PROF_FEX \
+  WINE_HEAT_EXE=prof.exe WINE_HEAT_PROF=1 GW2_TEST_PROF_REFUSED=1 WINE_HEAT_LOG=$work/log-prof-refused GW2_TEST_SECONDS=300 \
+  "$run" "$other_fex" "$work/prefix-prof-refused" "$exes/prof.exe"
 collect
 
 # 7. jdrly/gw2-on-mac#61
