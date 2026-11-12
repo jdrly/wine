@@ -2,6 +2,7 @@
  * for macOS and run without Wine. The events go into the HID stream (CGEventPost), so the window
  * server and AppKit see them as a hand's.
  *
+ *   pointer check             only whether this process may post events
  *   pointer move <x> <y>      moves the pointer to the point
  *   pointer click <x> <y>     moves to the point, then a left click there
  *   pointer rclick <x> <y>    a right click at the point
@@ -36,9 +37,10 @@ int main( int argc, char **argv )
 {
     CGPoint point;
 
-    if (argc != 4 || (strcmp( argv[1], "move" ) && strcmp( argv[1], "click" ) && strcmp( argv[1], "rclick" )))
+    if ((argc != 2 || strcmp( argv[1], "check" )) &&
+        (argc != 4 || (strcmp( argv[1], "move" ) && strcmp( argv[1], "click" ) && strcmp( argv[1], "rclick" ))))
     {
-        fprintf( stderr, "usage: pointer move|click|rclick <x> <y>\n" );
+        fprintf( stderr, "usage: pointer check | pointer move|click|rclick <x> <y>\n" );
         return 2;
     }
     if (!CGPreflightPostEventAccess())
@@ -46,6 +48,7 @@ int main( int argc, char **argv )
         printf( "pointer: this process may not post events (CGPreflightPostEventAccess)\n" );
         return 1;
     }
+    if (argc == 2) return 0;
     point = CGPointMake( atof( argv[2] ), atof( argv[3] ) );
     if (!strcmp( argv[1], "rclick" ))
         click( point, kCGEventRightMouseDown, kCGEventRightMouseUp, kCGMouseButtonRight );

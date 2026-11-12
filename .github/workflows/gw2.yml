@@ -506,6 +506,8 @@ jobs:
             exit 0
           fi
           clang -std=gnu23 -O2 -Wall -Werror -framework CoreGraphics -o "$RUNNER_TEMP/pointer" tests/gw2/native/pointer.c
+          # before any Wine process, so a runner that may not post events fails at once
+          "$RUNNER_TEMP/pointer" check
           prefix=$RUNNER_TEMP/assist-prefix log=$RUNNER_TEMP/assist-prefix/assist.log
           on='pointer on a Wine window' off='pointer off a Wine window' change='a Wine window, options [0-9a-fx]* -> '
           # count <pattern>: the driver's lines with it
