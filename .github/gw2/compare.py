@@ -73,7 +73,36 @@ LIBRARIES = {
     # macdrv_functions is DXMT's private contract, without a version field (Mach9's docs/maintenance.md)
     "winemac.so": dict(target="dlls/winemac.drv/winemac.so", objects="dlls/winemac.drv", more_exports=False,
                        dependents=[], contract=None, per_commit=None),
+    # win32u's unix objects are in dlls/win32u and dlls/win32u/dibdrv, where bitblt.o and dc.o are
+    # other files of the same name
+    "win32u.so": dict(target="dlls/win32u/win32u.so", objects="dlls/win32u", subdirs=("dibdrv",), more_exports=False,
+                      dependents=["opengl32.so", "winemac.so", "wineps.so", "winevulkan.so"], contract=None,
+                      per_commit=None),
 }
+
+
+def object_key(path, objects, subdirs=()):
+    """what a library's unix object goes by: its path below the library's objects directory
+    <objects> (sync.o, dibdrv/bitblt.o), or None for any other file, a PE object in
+    aarch64-windows/ for instance"""
+    d, name = os.path.split(os.path.normpath(path))
+    if not name.endswith(".o"):
+        return None
+    if d == objects:
+        return name
+    sub = d[len(objects) + 1:] if d.startswith(objects + "/") else None
+    return f"{sub}/{name}" if sub in subdirs else None
+
+
+def object_files(directory, subdirs=()):
+    """object key -> path, for the .o files in <directory> and its <subdirs>"""
+    out = {}
+    for sub in ("", *subdirs):
+        d = os.path.join(directory, sub)
+        for f in sorted(os.listdir(d)) if os.path.isdir(d) else ():
+            if f.endswith(".o"):
+                out[os.path.join(sub, f)] = os.path.join(d, f)
+    return out
 
 LC_REQ_DYLD = 0x80000000
 LC_SEGMENT_64, LC_SYMTAB, LC_DYSYMTAB = 0x19, 0x2, 0xb
@@ -86,7 +115,7 @@ N_STAB, N_PEXT, N_TYPE, N_EXT, N_UNDF, N_SECT = 0xe0, 0x10, 0x0e, 0x01, 0x0, 0xe
 N_WEAK_DEF = 0x0080
 S_ATTR_PURE_INSTRUCTIONS, S_ATTR_SOME_INSTRUCTIONS = 0x80000000, 0x00000400
 N_FUN, N_STSYM, N_SO, N_OSO = 0x24, 0x26, 0x64, 0x66
-S_NON_LAZY_SYMBOL_POINTERS, S_LAZY_SYMBOL_POINTERS, S_SYMBOL_STUBS = 0x6, 0x7, 0x8
+S_CSTRING_LITERALS, S_NON_LAZY_SYMBOL_POINTERS, S_LAZY_SYMBOL_POINTERS, S_SYMBOL_STUBS = 0x2, 0x6, 0x7, 0x8
 INDIRECT_SYMBOL_LOCAL, INDIRECT_SYMBOL_ABS = 0x80000000, 0x40000000
 
 
@@ -234,12 +263,20 @@ class MachO:
 
     def functions(self):
         """{(source file, name): (address, size)} from the debug map: an object's N_SO entries
-        name its directory and then its source file (window.c, cocoa_window.m)"""
-        funcs, obj, pending = {}, None, None
+        name its directory and then its source file (window.c, cocoa_window.m). A file in a
+        subdirectory of the shortest directory is named with it (win32u's dibdrv/bitblt.c, which
+        isn't its bitblt.c)."""
+        dirs = [os.path.normpath(n) for n, t, _, _, _ in self.syms if t == N_SO and n.endswith("/")]
+        root = min(dirs, key=len) if dirs else None
+        funcs, obj, pending, where = {}, None, None, None
         for n, t, _, _, value in self.syms:
-            if t == N_SO and n and not n.endswith("/"):
-                obj = os.path.basename(n)
+            if t == N_SO and n.endswith("/"):
+                where = os.path.normpath(n)
+            elif t == N_SO and n:
+                rel = os.path.relpath(os.path.join(where, n), root) if where and root else ""
+                obj = os.path.basename(n) if not rel or rel.startswith("..") else rel
             elif t == N_SO and not n:
+                where = None
                 obj = None
             elif t == N_FUN:
                 if n:
@@ -713,9 +750,25 @@ def byte_gate(mine, theirs, r):
 
 # objects: the patched build against my build of the engine's commit, per object file
 
+def literal(m, num):
+    """symbol <num> as the text of the string literal it labels, or None for any other symbol. The
+    compiler numbers the labels (l_.str.12) in the order it makes the literals, so a string added
+    to one function renames those of every function made after it; the text is what the code uses."""
+    _, t, sect, _, value = m.syms[num]
+    if t & (N_STAB | N_EXT) or not 0 < sect <= len(m.sections):
+        return None
+    s = m.sections[sect - 1]
+    if s["type"] != S_CSTRING_LITERALS or not s["addr"] <= value < s["addr"] + s["size"]:
+        return None
+    start, stop = s["offset"] + value - s["addr"], s["offset"] + s["size"]
+    end = m.data.find(b"\0", start, stop)
+    return f"literal {bytes(m.data[start:end if end >= 0 else stop])!r}"
+
+
 def relocations(m, sec):
     """a section's relocations as (offset, type, pc-relative, length, target): the target by symbol
-    name, or by section name for one within the file, or the addend of an ARM64_RELOC_ADDEND"""
+    name, a string literal by its text (literal), or by section name for one within the file, or
+    the addend of an ARM64_RELOC_ADDEND"""
     out = []
     for k in range(sec["nreloc"]):
         address, info = struct.unpack_from("<iI", m.data, sec["reloff"] + 8 * k)
@@ -723,7 +776,7 @@ def relocations(m, sec):
         if rtype == 10:
             target = f"addend {sext(num, 24)}"
         elif ext:
-            target = m.syms[num][0]
+            target = literal(m, num) or m.syms[num][0]
         else:
             target = m.sections[num - 1]["name"] if 0 < num <= len(m.sections) else f"section {num}"
         out.append((address, rtype, pcrel, length, target))
@@ -809,13 +862,14 @@ def build_commands(log, lib):
             continue
         lines.append(cur + line)
         cur = ""
+    spec = LIBRARIES[lib]
     compiles, link = {}, None
     for line in lines:
         words = line.split()
         if "-c" in words and "-o" in words:
-            target = words[words.index("-o") + 1]
-            if os.path.dirname(target) == LIBRARIES[lib]["objects"] and target.endswith(".o"):
-                compiles[os.path.basename(target)] = " ".join(words)
+            key = object_key(words[words.index("-o") + 1], spec["objects"], spec.get("subdirs", ()))
+            if key:
+                compiles[key] = " ".join(words)
         elif "-o" in words and words[words.index("-o") + 1] == LIBRARIES[lib]["target"]:
             link = ([w for w in words if w.endswith(".o")], [w for w in words if not w.endswith(".o")])
     return compiles, link
@@ -863,9 +917,10 @@ def compare_objects(r, lib, src_dir, build_dir, base_file, base_dir, head_file, 
     the functions of the touched ones listed. The base build's objects are copies in <base_dir> of
     the ones it linked from the library's objects directory in <build_dir>; this build's are there
     still. An object's inputs are what makedep's rule for it names, in either build's Makefile."""
-    unix = os.path.join(build_dir, LIBRARIES[lib]["objects"])
-    base_objs = {f: os.path.join(base_dir, f) for f in os.listdir(base_dir) if f.endswith(".o")}
-    head_objs = {f: os.path.join(unix, f) for f in os.listdir(unix) if f.endswith(".o")}
+    spec = LIBRARIES[lib]
+    subdirs = spec.get("subdirs", ())
+    unix = os.path.join(build_dir, spec["objects"])
+    base_objs, head_objs = object_files(base_dir, subdirs), object_files(unix, subdirs)
     base_cc, base_link = build_commands(base_log, lib)
     head_cc, head_link = build_commands(head_log, lib)
     for label, objs, file, link, cc in (("my base build", base_objs, base_file, base_link, base_cc),
@@ -887,11 +942,11 @@ def compare_objects(r, lib, src_dir, build_dir, base_file, base_dir, head_file, 
     r.check(not old, "this build compiled every object after the checkout",
             f"objects older than the checkout, so not rebuilt: {listing(old)}")
 
-    inputs = makefile_inputs(base_makefile, src_dir, LIBRARIES[lib]["objects"])
-    for obj, deps in makefile_inputs(head_makefile, src_dir, LIBRARIES[lib]["objects"]).items():
+    inputs = makefile_inputs(base_makefile, src_dir, spec["objects"], subdirs)
+    for obj, deps in makefile_inputs(head_makefile, src_dir, spec["objects"], subdirs).items():
         inputs.setdefault(obj, set()).update(deps)
     bad, changed, new, removed, through = sort_objects(base_objs, head_objs, inputs, set(touched), base_cc, head_cc,
-                                                       LIBRARIES[lib]["per_commit"])
+                                                       spec["per_commit"])
     r.check(not bad, "every object none of whose inputs this commit changes is my base build's: its compile "
                      "command, and its code, data, relocations and symbols",
             f"{len(bad)} objects none of whose inputs this commit changes differ from my base build's, "
@@ -904,10 +959,11 @@ def compare_objects(r, lib, src_dir, build_dir, base_file, base_dir, head_file, 
 GENERATED_INPUTS_HELD = ("build:include/",)  # the workflow holds config.h and the generated headers equal
 
 
-def makefile_inputs(makefile, src_dir, objects):
-    """object basename -> its inputs, from the rules makedep wrote into the generated Makefile for
-    the objects in the directory <objects> (dlls/ntdll/unix/<file>.o: <every file it includes>): a
-    file of the source tree as git names it, anything else as "build:<path in the build tree>" """
+def makefile_inputs(makefile, src_dir, objects, subdirs=()):
+    """object key (object_key) -> its inputs, from the rules makedep wrote into the generated
+    Makefile for the objects in the directory <objects> and its <subdirs>
+    (dlls/ntdll/unix/<file>.o: <every file it includes>): a file of the source tree as git names it,
+    anything else as "build:<path in the build tree>" """
     text = open(makefile, errors="replace").read().replace("\\\n", " ")
     src = os.path.normpath(src_dir) + "/"
     out = {}
@@ -915,11 +971,11 @@ def makefile_inputs(makefile, src_dir, objects):
         if ":" not in line or "=" in line.split(":", 1)[0]:
             continue
         targets, deps = line.split(":", 1)
-        objs = [t for t in targets.split() if os.path.dirname(t) == objects and t.endswith(".o")]
-        for t in objs:
+        keys = [k for k in (object_key(t, objects, subdirs) for t in targets.split()) if k]
+        for k in keys:
             for d in deps.split():
                 d = os.path.normpath(d)
-                out.setdefault(os.path.basename(t), set()).add(d[len(src):] if d.startswith(src) else f"build:{d}")
+                out.setdefault(k, set()).add(d[len(src):] if d.startswith(src) else f"build:{d}")
     return out
 
 
@@ -1184,6 +1240,21 @@ def selftest(engine_dir):
     if got != ([], [], []):
         failed.append(f"touched object: __text at another address with the same functions, not {got}")
 
+    # a string literal by its text: a string added before it renames its label (l_.str.1 to
+    # l_.str.2), which leaves the function as it is; other text is a change
+    def with_literal(label, text):
+        m = fake_object(code, [(0, page | 3), (4, off | 3)], b"")
+        m.sections.append(dict(name="__TEXT,__cstring", addr=0x2000, offset=len(m.data), size=len(text) + 1, align=0,
+                               flags=S_CSTRING_LITERALS, type=S_CSTRING_LITERALS, reloff=0, nreloc=0,
+                               reserved1=0, reserved2=0))
+        m.data += text + b"\0"
+        m.syms.append((label, N_SECT, len(m.sections), 0, 0x2000))
+        return m
+    if function_changes(with_literal("l_.str.1", b"text"), with_literal("l_.str.2", b"text"), "x.c") != ([], [], []):
+        failed.append("touched object: a string literal's label renumbered, its text the same")
+    if function_changes(with_literal("l_.str.1", b"text"), with_literal("l_.str.1", b"other"), "x.c")[0] != ["x.c: f"]:
+        failed.append("touched object: a string literal's text")
+
     # an object's inputs, from makedep's rules: a header change that alters an object whose .c
     # didn't change makes it a touched one (listed, passes); a difference with no changed input
     # fails; so does an input outside the source tree the workflow doesn't hold equal
@@ -1259,6 +1330,51 @@ def selftest(engine_dir):
                  ("", N_FUN, 0, 0, 8), ("", N_SO, 1, 0, 0)]
     if objc.functions() != {("cocoa_window.m", "-[WineWindow a]"): (0x100, 8)}:
         failed.append(f"debug map: a method named by its source, not {objc.functions()}")
+
+    # win32u.so: bitblt.o and dibdrv/bitblt.o are two objects, a PE object is in aarch64-windows/,
+    # and the debug map names dibdrv/bitblt.c's function apart from bitblt.c's
+    with tempfile.TemporaryDirectory() as tmp:
+        makefile, log = os.path.join(tmp, "Makefile"), os.path.join(tmp, "make.log")
+        with open(makefile, "w") as f:
+            f.write("dlls/win32u/bitblt.o: /src/dlls/win32u/bitblt.c\n"
+                    "dlls/win32u/dibdrv/bitblt.o: /src/dlls/win32u/dibdrv/bitblt.c /src/dlls/win32u/dibdrv/dibdrv.h\n"
+                    "dlls/win32u/aarch64-windows/main.o: /src/dlls/win32u/main.c\n")
+        with open(log, "w") as f:
+            f.write("clang -c -o dlls/win32u/bitblt.o ../src/dlls/win32u/bitblt.c\n"
+                    "clang -c -o dlls/win32u/dibdrv/bitblt.o ../src/dlls/win32u/dibdrv/bitblt.c\n"
+                    "aarch64-w64-mingw32-clang -c -o dlls/win32u/aarch64-windows/main.o main.c\n"
+                    "clang -o dlls/win32u/win32u.so -dynamiclib dlls/win32u/bitblt.o dlls/win32u/dibdrv/bitblt.o\n")
+        spec = LIBRARIES["win32u.so"]
+        inputs = makefile_inputs(makefile, "/src", spec["objects"], spec["subdirs"])
+        compiles, link = build_commands(log, "win32u.so")
+        for sub in ("", "dibdrv", "aarch64-windows"):
+            os.makedirs(os.path.join(tmp, "objs", sub), exist_ok=True)
+            open(os.path.join(tmp, "objs", sub, "main.o" if sub == "aarch64-windows" else "bitblt.o"), "wb").close()
+        files = sorted(object_files(os.path.join(tmp, "objs"), spec["subdirs"]))
+    if inputs != {"bitblt.o": {"dlls/win32u/bitblt.c"},
+                  "dibdrv/bitblt.o": {"dlls/win32u/dibdrv/bitblt.c", "dlls/win32u/dibdrv/dibdrv.h"}}:
+        failed.append(f"win32u.so: Makefile inputs read {inputs}")
+    if sorted(compiles) != ["bitblt.o", "dibdrv/bitblt.o"] or not link \
+            or link[0] != ["dlls/win32u/bitblt.o", "dlls/win32u/dibdrv/bitblt.o"]:
+        failed.append(f"win32u.so: make log read {compiles} {link}")
+    if files != ["bitblt.o", "dibdrv/bitblt.o"]:
+        failed.append(f"win32u.so: object files {files}")
+    bad, changed, _, _, _ = sort_objects({"bitblt.o": "same", "dibdrv/bitblt.o": "base"},
+                                         {"bitblt.o": "same", "dibdrv/bitblt.o": "head"}, inputs,
+                                         {"dlls/win32u/dibdrv/dibdrv.h"}, {"bitblt.o": "cc"}, {"bitblt.o": "cc"},
+                                         load=lambda o: {
+                                             "same": fake_object(four, rel(0), b"", functions=(("_f", 0),)),
+                                             "base": fake_object(four, rel(0), b"", functions=(("_f", 0),)),
+                                             "head": fake_object(four, rel(1), b"", functions=(("_f", 0),))}[o])
+    if bad or changed != ["dibdrv/bitblt.c: f"]:
+        failed.append(f"win32u.so: a touched dibdrv/bitblt.o beside an untouched bitblt.o, not {bad} {changed}")
+    two = MachO.__new__(MachO)
+    two.syms = [("/build/../src/dlls/win32u/", N_SO, 0, 0, 0), ("bitblt.c", N_SO, 0, 0, 0), ("_f", N_FUN, 1, 0, 0x100),
+                ("", N_FUN, 0, 0, 8), ("", N_SO, 1, 0, 0),
+                ("/build/../src/dlls/win32u/dibdrv/", N_SO, 0, 0, 0), ("bitblt.c", N_SO, 0, 0, 0),
+                ("_f", N_FUN, 1, 0, 0x200), ("", N_FUN, 0, 0, 8), ("", N_SO, 1, 0, 0)]
+    if two.functions() != {("bitblt.c", "_f"): (0x100, 8), ("dibdrv/bitblt.c", "_f"): (0x200, 8)}:
+        failed.append(f"debug map: dibdrv/bitblt.c's function apart from bitblt.c's, not {two.functions()}")
 
     # an import from the engine's ntdll.so or win32u.so: the engine's own, or one it doesn't have
     theirs = {"NtClose": "@rpath/ntdll.so", "window_surface_create": "@rpath/win32u.so", "malloc": "/usr/lib/libSystem.B.dylib"}
