@@ -27,15 +27,22 @@
  *     too (matrix.zsh), a release during a worker's spin makes no wake call, and the worker joins
  *     the sleeper count only after its spin: a wake lost there would leave a round's jobs undone,
  *     and the game thread's wait for them fails after 5 s
- * A "spun" check needs one spin in a whole case, and a "hits" check one hit in thousands of
- * rounds, each of which begins with both threads running: neither depends on a thread being on a
- * core at a given moment.
+ * A "spun" check needs one spin in a whole case. A "hits" check needs one hit in thousands of
+ * rounds, and a hit needs the other thread to run during a spin of 20 or 30 us. Each round begins
+ * with both threads running, so on an otherwise idle machine that happens in most rounds. With
+ * more busy threads than CPUs it is left to chance: four of these programs side by side on the
+ * runner's 3 CPUs gave 0 lock hits in 556 spins. So matrix.zsh runs one at a time.
  *
  * A pulse releases only a thread that is waiting when it comes (PulseEvent), and the waiter can't
  * show when its wait began, so a pulse that comes before the wait is dropped by the rules, here as
  * on Windows. A round that times out is either that or a lost pulse, and the case can't tell
- * which: it allows them in 1% of its rounds and prints how many, for the sweep and the 3 ms rounds
- * apart. It is stress coverage, not proof; the proof that a pulse during a spin is kept is the
+ * which: it allows them in 1% of its pulsed rounds and prints how many, for the sweep and the 3 ms
+ * rounds apart. The rounds run in lockstep: the waiter starts a round only when the pulser says so,
+ * and the pulser sends no pulse in a round whose 50 ms wait already ended, which happens only when
+ * the pulser was off its core that long. Such a round is "pulser late" and tests nothing; more than
+ * 10% of them and the case fails, because it no longer tests enough pulses. A failure says which
+ * it was: a wait that returned another status (with it), or a waiter that didn't come back (with
+ * the last round it finished). It is stress coverage, not proof; the proof that a pulse during a spin is kept is the
  * argument in heat.c. The sweep runs from a quarter of the spin's time to past its end, so pulses
  * land in the spin, at its end and in the sleep after it. The waiter's hits under event spin show
  * pulses taken during a spin.
@@ -602,57 +609,82 @@ static void test_alerts(void)
 /* pulse: PulseEvent during an event spin */
 
 static HANDLE pulse_event;
-static volatile LONG pulse_armed, pulse_taken, pulse_stop;
-static LONG pulse_missed, pulse_slept_missed;  /* rounds that timed out, all and of the 3 ms ones */
+/* the round the pulser lets the waiter start, the waiter's last round armed and done, its result */
+static volatile LONG pulse_go, pulse_armed, pulse_taken, pulse_stop;
+static volatile DWORD pulse_result;
 static DWORD pulse_tid;
 
+#define PULSE_ROUNDS 2000
+#define PULSE_WAIT_MS 50
+
+/* waits for round after round that the pulser starts, each with one wait */
 static DWORD WINAPI pulse_waiter( void *arg )
 {
-    DWORD r;
     LONG i;
 
-    for (i = 1; !pulse_stop; i++)
+    for (i = 1;; i++)
     {
-        InterlockedExchange( &pulse_armed, i );
-        r = WaitForSingleObject( pulse_event, 20 );
-        if (r == WAIT_TIMEOUT)
+        while (pulse_go < i)
         {
             if (pulse_stop) return 0;
-            pulse_missed++;
-            if (!(i % 16)) pulse_slept_missed++;
+            YieldProcessor();
         }
-        else if (r != WAIT_OBJECT_0) return 1;
+        InterlockedExchange( &pulse_armed, i );
+        pulse_result = WaitForSingleObject( pulse_event, PULSE_WAIT_MS );
         InterlockedExchange( &pulse_taken, i );
+        if (pulse_result != WAIT_OBJECT_0 && pulse_result != WAIT_TIMEOUT) return 1;
     }
-    return 0;
 }
 
 static void test_pulse(void)
 {
     LONGLONG span = us_ticks( 2 * (spin[EVENT].on ? spin[EVENT].us : 30) ), until;
+    LONG i, pulsed = 0, late = 0, missed = 0, slept_missed = 0, seen;
+    DWORD t0;
+    BOOL sent;
     HANDLE w;
-    LONG i;
 
     start( "pulse" );
     if (!(pulse_event = CreateEventW( NULL, FALSE, FALSE, NULL ))) FAIL( "CreateEvent: error %lu", GetLastError() );
     w = thread( pulse_waiter, NULL );
     pulse_tid = GetThreadId( w );
     until = now() + 3 * freq.QuadPart;
-    for (i = 1; i <= 2000 && now() < until; i++)
+    for (i = 1; i <= PULSE_ROUNDS && now() < until; i++)
     {
+        InterlockedExchange( &pulse_go, i );
         await( &pulse_armed, i, 2000, "the waiter didn't get to its wait", i );
         busy( i % 16 ? span / 4 + span * (i % 32) / 32 : us_ticks( 3000 ) );
-        if (!PulseEvent( pulse_event )) FAIL( "PulseEvent: error %lu", GetLastError() );
-        await( &pulse_taken, i, 2000, "the waiter didn't come back", i );
+        /* this thread was off its core longer than the wait: the round tests nothing */
+        if (!(sent = pulse_taken != i)) late++;
+        else if (!PulseEvent( pulse_event )) FAIL( "PulseEvent: error %lu", GetLastError() );
+        t0 = GetTickCount();
+        while ((seen = pulse_taken) != i)
+        {
+            if (seen > i) FAIL( "round %ld: the waiter ran ahead to round %ld", i, seen );
+            if (GetTickCount() - t0 > 2000)
+                FAIL( "round %ld: the waiter didn't come back, its last round done is %ld", i, seen );
+            YieldProcessor();
+        }
+        if (pulse_result != WAIT_OBJECT_0 && pulse_result != WAIT_TIMEOUT)
+            FAIL( "round %ld: the wait returned %#lx", i, pulse_result );
+        if (!sent && pulse_result == WAIT_OBJECT_0) FAIL( "round %ld: the wait took a pulse nobody sent", i );
+        if (!sent) continue;
+        pulsed++;
+        if (pulse_result == WAIT_TIMEOUT)
+        {
+            missed++;
+            if (!(i % 16)) slept_missed++;
+        }
     }
     pulse_stop = 1;
     join( w, 10000 );
     i--;
-    printf( "gw2 test spin: %ld pulses, %ld waits timed out (a pulse before the wait, or a lost one): "
-            "%ld in the sweep, %ld of the 3 ms rounds\n", i, pulse_missed, pulse_missed - pulse_slept_missed,
-            pulse_slept_missed );
-    if (pulse_missed * 100 > i) FAIL( "%ld of %ld waits timed out, more than 1%%", pulse_missed, i );
-    if (i < 500) FAIL( "only %ld pulses in 3 s", i );
+    printf( "gw2 test spin: %ld rounds, %ld pulsed, %ld with the pulser late; %ld waits timed out "
+            "(a pulse before the wait, or a lost one): %ld in the sweep, %ld of the 3 ms rounds\n",
+            i, pulsed, late, missed, missed - slept_missed, slept_missed );
+    if (i < 500) FAIL( "only %ld rounds in 3 s", i );
+    if (late * 10 > i) FAIL( "the pulser was late in %ld of %ld rounds, more than 10%%: too few pulses tested", late, i );
+    if (missed * 100 > pulsed) FAIL( "%ld of %ld pulsed waits timed out, more than 1%%", missed, pulsed );
     CloseHandle( pulse_event );
 }
 

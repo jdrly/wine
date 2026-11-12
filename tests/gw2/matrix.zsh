@@ -16,7 +16,7 @@
 #    fail on the bug it shows, and three under mine, which have to pass. unreg under mine with
 #    counting, WINE_HEAT_MSYNC_UNREG unset and set.
 # 4. (jdrly/gw2-on-mac#45) spin.exe under mine, as WINE_HEAT_EXE with WINE_HEAT_COUNT=1, with
-#    WINE_HEAT_SPIN unset and in three settings, three runs each, side by side: the app's string
+#    WINE_HEAT_SPIN unset and in three settings, three runs each, one setting at a time: the app's string
 #    (lock and event at :game), sem alone at its default scope with WINE_HEAT_WAKE=one,skip (the
 #    spin against the wake skip's sleeper count), and every kind on with a scope of its own.
 # Prints each run's lines and exits 1 if any failed.
@@ -159,9 +159,14 @@ spin() {
   done
 }
 
+# one mode at a time: a spin hits only when the thread it waits for runs during it, and four
+# programs side by side, each with two busy threads, leave that to chance on 3 CPUs
 side spin-off spin off ""
+collect
 side spin-app spin app "lock=20:game,event=30:game"
+collect
 side spin-sem spin sem "sem=5" one,skip
+collect
 side spin-scopes spin scopes "lock=20:all,event=30:not=2,sem=20:game"
 collect
 
