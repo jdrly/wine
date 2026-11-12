@@ -77,6 +77,7 @@
 #include "wine/debug.h"
 #include "unix_private.h"
 #include "msync.h"
+#include "heat.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(thread);
 WINE_DECLARE_DEBUG_CHANNEL(seh);
@@ -2564,6 +2565,8 @@ NTSTATUS WINAPI NtSetInformationThread( HANDLE handle, THREADINFOCLASS class,
             status = wine_server_call( req );
         }
         SERVER_END_REQ;
+        /* WINE_HEAT_SPIN's scope (jdrly/gw2-on-mac#45): what this thread set for itself */
+        if (!status && handle == NtCurrentThread()) heat_thread_priority( *base_priority );
         return status;
     }
 
