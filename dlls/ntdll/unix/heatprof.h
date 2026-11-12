@@ -63,6 +63,7 @@
 #define HEAT_FEX_TAIL_ENTRIES    24   /* uint32_t NumberOfRIPEntries */
 #define HEAT_FEX_TAIL_ENTRIES_AT 28   /* uint32_t OffsetToRIPEntries, from the tail */
 #define HEAT_FEX_TAIL_COPY       40   /* sizeof(JITCodeTail) */
+#define HEAT_FEX_TAIL_ID         32   /* the bytes before SpinLockFutex, which FEX changes in place */
 
 /* FEX_PROFILESTATS=1: the shared memory object fex-<pid>-stats
  * (Source/Windows/UnixLib/FEXUnixLib.cpp:154-157), a ThreadStatsHeader and then ThreadStats slots
@@ -105,10 +106,12 @@
 #define HP_SYSCALL  0x0004  /* in Wine's unix side: sp on the thread's kernel stack */
 #define HP_STATE    0x0008  /* state[] holds the first 256 bytes of FEX's CPUState */
 #define HP_CALLRET  0x0010  /* callret[] holds the two words at callret_sp */
+#define HP_TAIL     0x0020  /* to_tail and tail[] hold the block's JITCodeHeader and JITCodeTail */
 /* flags, from the sampler thread */
 #define HP_X86      0x0100  /* x86 and block hold the guest address of pc in the block it entered last */
 #define HP_FEX      0x0200  /* HP_SIM and pc outside that block: FEX's own work (dispatcher, compile, lookup) */
-#define HP_GONE     0x0400  /* HP_SIM, but the block's header or tail couldn't be read, or made no sense */
+#define HP_GONE     0x0400  /* HP_SIM, but the block couldn't be read, made no sense, or its tail
+                             * changed since the sample: freed, and its memory another block's */
 
 /* regs[] */
 #define HP_REG_FP   29
@@ -131,8 +134,9 @@ struct heat_prof_rec
     unsigned long long block;      /* HP_X86: the x86 address the block starts at */
     unsigned long long stack_at;   /* the guest stack's address that stack[] starts at */
     unsigned int       stack_len;  /* bytes of stack[] */
-    unsigned int       pad;
+    unsigned int       to_tail;    /* HP_TAIL: the block's OffsetToBlockTail */
     unsigned long long callret[2]; /* HP_CALLRET */
+    unsigned char      tail[HEAT_FEX_TAIL_COPY];   /* HP_TAIL: its JITCodeTail at the sample */
     unsigned char      state[HEAT_FEX_STATE_COPY]; /* HP_STATE */
     unsigned char      stack[HEAT_PROF_STACK];     /* only stack_len bytes go to the file */
 };

@@ -41,8 +41,9 @@ struct rec
     unsigned short     target, flags;
     unsigned long long regs[34];
     unsigned long long sys_sp, sys_pc, x86, block, stack_at;
-    unsigned int       stack_len, pad;
+    unsigned int       stack_len, to_tail;
     unsigned long long callret[2];
+    unsigned char      tail[40];
     unsigned char      state[256];
 };
 #define HP_SIM     0x0001

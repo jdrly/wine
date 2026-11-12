@@ -113,8 +113,8 @@ struct heat_prof_target
     pthread_t           thread;  /* the handler compares pthread_self() with it; 0: none */
     int                 entry;   /* in heat_prof_threads, -1: none */
     DWORD               tid;
-    int                 busy;    /* a handler is filling the ring */
-    int                 pending; /* a signal was sent and not handled yet */
+    int                 busy;    /* a handler fills the ring, or the sampler retargets */
+    pthread_t           pending; /* the thread a signal went to that wasn't handled yet, or 0 */
     unsigned int        write;   /* the handler's */
     unsigned int        read;    /* the sampler's */
     unsigned long long  sent, skipped, recorded, dropped, cpu_ms;
@@ -129,7 +129,7 @@ static struct heat_prof_target heat_prof_targets[HEAT_PROF_TARGETS];
 static unsigned int heat_prof_late;
 static unsigned int heat_prof_want = 1;  /* a bit per target */
 static unsigned int heat_prof_hz = 1000;
-static int heat_prof_own[2];             /* the sampler thread's pipe */
+static int heat_prof_own[2];             /* the sampler thread's pipe, after atexit() with heat_prof_file_lock */
 static unsigned long long *heat_prof_named;
 static mach_timebase_info_data_t heat_prof_timebase;
 static char heat_prof_bin_path[1024], heat_prof_txt_path[1024];
@@ -164,7 +164,7 @@ static void heat_prof_sample( struct heat_prof_rec *rec, unsigned int target, uc
     struct thread_data *data = get_thread_data();
     TEB *teb = data ? data->teb : NULL;
     CHPE_V2_CPU_AREA_INFO *cpu = teb ? teb->ChpeV2CpuAreaInfo : NULL;
-    ULONG_PTR gsp, gx23, frame, callret, lo, hi;
+    ULONG_PTR gsp, gx23, frame, callret, block, lo, hi;
     unsigned short flags = 0;
     unsigned int i;
 
@@ -179,7 +179,7 @@ static void heat_prof_sample( struct heat_prof_rec *rec, unsigned int target, uc
     rec->regs[HP_REG_CPSR] = uc->uc_mcontext->__ss.__cpsr;
     rec->sys_sp = rec->sys_pc = rec->x86 = rec->block = rec->stack_at = 0;
     rec->callret[0] = rec->callret[1] = 0;
-    rec->stack_len = rec->pad = 0;
+    rec->stack_len = rec->to_tail = 0;
     if (!teb) goto done;
 
     /* the guest's stack pointer: x23 in translated code (FEX's ARM64EC register map), sp in
@@ -211,6 +211,11 @@ static void heat_prof_sample( struct heat_prof_rec *rec, unsigned int target, uc
             flags |= HP_STATE;
             memcpy( &callret, rec->state + HEAT_FEX_STATE_CALLRET, sizeof(callret) );
             if (heat_prof_peek( fd, rec->callret, callret, HEAT_FEX_CALLRET_COPY )) flags |= HP_CALLRET;
+            /* the block's tail as it is now, which the sampler thread checks its own read against */
+            memcpy( &block, rec->state + HEAT_FEX_STATE_BLOCK, sizeof(block) );
+            if ((flags & HP_SIM) && heat_prof_peek( fd, &rec->to_tail, block + HEAT_FEX_HEADER_TAIL, sizeof(rec->to_tail) ) &&
+                rec->to_tail <= (128 << 20) && heat_prof_peek( fd, rec->tail, block + rec->to_tail, HEAT_FEX_TAIL_COPY ))
+                flags |= HP_TAIL;
         }
     }
     lo = (ULONG_PTR)teb->Tib.StackLimit;
@@ -241,30 +246,39 @@ static void heat_prof_handler( int sig, siginfo_t *info, void *ucv )
             t = &heat_prof_targets[k];
             break;
         }
-    /* a target's ring has one writer at a time: a handler of a thread that was the target before
-     * a retarget may still run */
-    if (!t || __atomic_exchange_n( &t->busy, 1, __ATOMIC_ACQUIRE ))
+    if (!t)
     {
         __atomic_fetch_add( &heat_prof_late, 1, __ATOMIC_RELAXED );
         goto done;
     }
-    if (__atomic_load_n( &t->thread, __ATOMIC_ACQUIRE ) != self)
+    /* busy gives the ring and the counters one writer at a time: a handler of the thread the
+     * target had before a retarget may still run, and the retarget itself takes busy */
+    if (__atomic_exchange_n( &t->busy, 1, __ATOMIC_ACQUIRE ))
     {
         __atomic_fetch_add( &heat_prof_late, 1, __ATOMIC_RELAXED );
-        goto release;
+        goto handled;
     }
-    w = t->write;
-    if (w - __atomic_load_n( &t->read, __ATOMIC_ACQUIRE ) >= HEAT_PROF_RING)
-        __atomic_fetch_add( &t->dropped, 1, __ATOMIC_RELAXED );
+    if (__atomic_load_n( &t->thread, __ATOMIC_ACQUIRE ) != self)
+        __atomic_fetch_add( &heat_prof_late, 1, __ATOMIC_RELAXED );
     else
     {
-        heat_prof_sample( &t->ring[w % HEAT_PROF_RING], k, ucv, t->pipe );
-        __atomic_store_n( &t->write, w + 1, __ATOMIC_RELEASE );
-        __atomic_fetch_add( &t->recorded, 1, __ATOMIC_RELAXED );
+        w = t->write;
+        if (w - __atomic_load_n( &t->read, __ATOMIC_ACQUIRE ) >= HEAT_PROF_RING)
+            __atomic_fetch_add( &t->dropped, 1, __ATOMIC_RELAXED );
+        else
+        {
+            heat_prof_sample( &t->ring[w % HEAT_PROF_RING], k, ucv, t->pipe );
+            __atomic_store_n( &t->write, w + 1, __ATOMIC_RELEASE );
+            __atomic_fetch_add( &t->recorded, 1, __ATOMIC_RELAXED );
+        }
     }
-    __atomic_store_n( &t->pending, 0, __ATOMIC_RELEASE );
-release:
     __atomic_store_n( &t->busy, 0, __ATOMIC_RELEASE );
+handled:
+    /* only this thread's own signal: a handler of the target's old thread leaves the new one's */
+    {
+        pthread_t mine = self;
+        __atomic_compare_exchange_n( &t->pending, &mine, (pthread_t)0, FALSE, __ATOMIC_RELEASE, __ATOMIC_RELAXED );
+    }
 done:
     errno = saved_errno;
 }
@@ -316,7 +330,7 @@ void heat_prof_thread_gone( struct thread_data *data )
             if (heat_prof_targets[k].entry != i) continue;
             __atomic_store_n( &heat_prof_targets[k].thread, (pthread_t)0, __ATOMIC_RELEASE );
             heat_prof_targets[k].entry = -1;
-            heat_prof_targets[k].pending = 0;
+            __atomic_store_n( &heat_prof_targets[k].pending, (pthread_t)0, __ATOMIC_RELEASE );
         }
         heat_prof_threads[i].data = NULL;
         heat_prof_threads[i].thread = (pthread_t)0;
@@ -329,7 +343,8 @@ void heat_prof_thread_gone( struct thread_data *data )
  * target with no candidate keeps its thread. */
 static void heat_prof_retarget(void)
 {
-    static struct { int entry; struct thread_data *data; pthread_t thread; unsigned long long utid; void *start; DWORD tid; }
+    enum { KIND_OTHER, KIND_RENDER, KIND_EXE };
+    static struct { int entry, kind; struct thread_data *data; pthread_t thread; unsigned long long utid, cpu; DWORD tid; }
         seen[HEAT_PROF_THREADS];
     unsigned long long best_d[HEAT_PROF_TARGETS] = { 0 };
     int best[HEAT_PROF_TARGETS] = { -1, -1, -1 };
@@ -339,36 +354,54 @@ static void heat_prof_retarget(void)
     for (i = 0; i < HEAT_PROF_THREADS; i++)
     {
         struct heat_prof_thread *e = &heat_prof_threads[i];
+        ULONG_PTR start;
+
         if (!e->data || !e->thread) continue;
         if (!e->utid) pthread_threadid_np( e->thread, &e->utid );
+        start = (ULONG_PTR)e->data->start;
         seen[n].entry = i;
+        seen[n].kind = start >= heat_prof_exe_lo && start < heat_prof_exe_hi ? KIND_EXE : KIND_OTHER;
         seen[n].data = e->data;
         seen[n].thread = e->thread;
         seen[n].utid = e->utid;
-        seen[n].start = e->data->start;
         seen[n].tid = e->data->tid;
         n++;
     }
     pthread_mutex_unlock( &heat_prof_lock );
 
+    /* the CPU times and names, without the lock */
     for (i = 0; i < n; i++)
     {
         struct proc_threadinfo pti;
-        unsigned long long cpu, d;
-        ULONG_PTR start = (ULONG_PTR)seen[i].start;
 
-        if (proc_pidinfo( getpid(), PROC_PIDTHREADID64INFO, seen[i].utid, &pti, sizeof(pti) ) != sizeof(pti)) continue;
-        cpu = pti.pth_user_time + pti.pth_system_time;
-        /* only the sampler writes cpu */
-        d = cpu - heat_prof_threads[seen[i].entry].cpu;
-        heat_prof_threads[seen[i].entry].cpu = cpu;
-        if (!strncmp( pti.pth_name, "bgfx - renderer", 15 ))
+        if (proc_pidinfo( getpid(), PROC_PIDTHREADID64INFO, seen[i].utid, &pti, sizeof(pti) ) != sizeof(pti))
         {
-            if (best[1] == -1 || d > best_d[1]) { best[1] = i; best_d[1] = d; }
+            seen[i].entry = -1;
             continue;
         }
-        if (pti.pth_name[0] || start < heat_prof_exe_lo || start >= heat_prof_exe_hi) continue;
-        if (best[0] == -1 || d > best_d[0])
+        seen[i].cpu = pti.pth_user_time + pti.pth_system_time;
+        if (!strncmp( pti.pth_name, "bgfx - renderer", 15 )) seen[i].kind = KIND_RENDER;
+        else if (pti.pth_name[0]) seen[i].kind = KIND_OTHER;
+    }
+
+    pthread_mutex_lock( &heat_prof_lock );
+    for (i = 0; i < n; i++)
+    {
+        struct heat_prof_thread *e;
+        unsigned long long d;
+
+        if (seen[i].entry == -1) continue;
+        e = &heat_prof_threads[seen[i].entry];
+        /* it may have exited, and its entry gone to another thread, since the scan */
+        if (e->data != seen[i].data || e->thread != seen[i].thread) continue;
+        d = seen[i].cpu - e->cpu;
+        e->cpu = seen[i].cpu;
+        if (seen[i].kind == KIND_RENDER)
+        {
+            if (best[1] == -1 || d > best_d[1]) { best[1] = i; best_d[1] = d; }
+        }
+        else if (seen[i].kind != KIND_EXE) continue;
+        else if (best[0] == -1 || d > best_d[0])
         {
             best[2] = best[0];
             best_d[2] = best_d[0];
@@ -381,24 +414,22 @@ static void heat_prof_retarget(void)
             best_d[2] = d;
         }
     }
-
-    pthread_mutex_lock( &heat_prof_lock );
     for (k = 0; k < HEAT_PROF_TARGETS; k++)
     {
         struct heat_prof_target *t = &heat_prof_targets[k];
-        struct heat_prof_thread *e;
 
         if (!(heat_prof_want & (1 << k)) || best[k] == -1) continue;
-        e = &heat_prof_threads[seen[best[k]].entry];
-        /* it may have exited, and its entry gone to another thread, since the scan */
-        if (e->data != seen[best[k]].data || e->thread != seen[best[k]].thread) continue;
         t->cpu_ms = best_d[k] / 1000000;
         if (t->entry == seen[best[k]].entry) continue;
+        /* with busy, no handler writes the ring or the counts: a handler running now keeps the
+         * old target until the next second */
+        if (__atomic_exchange_n( &t->busy, 1, __ATOMIC_ACQUIRE )) continue;
         t->entry = seen[best[k]].entry;
         t->tid = seen[best[k]].tid;
         t->sent = t->skipped = t->recorded = t->dropped = 0;
-        t->pending = 0;
-        __atomic_store_n( &t->thread, e->thread, __ATOMIC_RELEASE );
+        __atomic_store_n( &t->pending, (pthread_t)0, __ATOMIC_RELEASE );
+        __atomic_store_n( &t->thread, seen[best[k]].thread, __ATOMIC_RELEASE );
+        __atomic_store_n( &t->busy, 0, __ATOMIC_RELEASE );
     }
     pthread_mutex_unlock( &heat_prof_lock );
 }
@@ -419,8 +450,8 @@ static void heat_prof_send(void)
             t->skipped++;
             continue;
         }
-        __atomic_store_n( &t->pending, 1, __ATOMIC_RELEASE );
-        if (pthread_kill( t->thread, SIGPROF )) __atomic_store_n( &t->pending, 0, __ATOMIC_RELEASE );
+        __atomic_store_n( &t->pending, t->thread, __ATOMIC_RELEASE );
+        if (pthread_kill( t->thread, SIGPROF )) __atomic_store_n( &t->pending, (pthread_t)0, __ATOMIC_RELEASE );
         else t->sent++;
     }
     pthread_mutex_unlock( &heat_prof_lock );
@@ -584,12 +615,25 @@ static size_t heat_prof_entry( const unsigned char *p, size_t avail, unsigned lo
     return 17;
 }
 
-/* RestoreRIPFromHostPC on a sample: the block FEX entered last, read from the sampler thread */
+/* whether the block at <header> still has the header and tail the handler copied: FEX may have
+ * freed it since the sample, and given its memory to another block */
+static BOOL heat_prof_same_block( const struct heat_prof_rec *rec, ULONG_PTR header )
+{
+    unsigned char tail[HEAT_FEX_TAIL_ID];
+    unsigned int to_tail;
+
+    return heat_prof_peek( heat_prof_own, &to_tail, header + HEAT_FEX_HEADER_TAIL, sizeof(to_tail) ) &&
+           to_tail == rec->to_tail && heat_prof_peek( heat_prof_own, tail, header + to_tail, sizeof(tail) ) &&
+           !memcmp( tail, rec->tail, sizeof(tail) );
+}
+
+/* RestoreRIPFromHostPC on a sample: the block FEX entered last. The handler copied its header and
+ * tail; the RIP entries are read here, between two checks that the block is still the same. */
 static void heat_prof_resolve( struct heat_prof_rec *rec )
 {
-    unsigned char tail[HEAT_FEX_TAIL_COPY], chunk[HEAT_PROF_CHUNK];
-    unsigned long long header, pc = rec->regs[HP_REG_PC], size, rip, guest_size, host, arm, x86;
-    unsigned int to_tail, entries, entries_at, i, have = 0, used = 0;
+    unsigned char chunk[HEAT_PROF_CHUNK];
+    unsigned long long header, pc = rec->regs[HP_REG_PC], size, rip, x86_start, guest_size, host, arm, x86;
+    unsigned int entries, entries_at, i, have = 0, used = 0;
     ULONG_PTR at;
 
     if (!(rec->flags & HP_SIM) || !(rec->flags & HP_STATE)) return;
@@ -599,33 +643,35 @@ static void heat_prof_resolve( struct heat_prof_rec *rec )
         rec->flags |= HP_FEX;
         return;
     }
-    /* the block may be gone, and its memory another block's, since the sample: what doesn't add
-     * up is HP_GONE */
-    if (!heat_prof_peek( heat_prof_own, &to_tail, header + HEAT_FEX_HEADER_TAIL, sizeof(to_tail) ) ||
-        to_tail > (128 << 20) || !heat_prof_peek( heat_prof_own, tail, header + to_tail, sizeof(tail) ))
+    if (!(rec->flags & HP_TAIL))
     {
         rec->flags |= HP_GONE;
         return;
     }
-    memcpy( &size, tail + HEAT_FEX_TAIL_SIZE, 8 );
-    memcpy( &rip, tail + HEAT_FEX_TAIL_RIP, 8 );
-    memcpy( &guest_size, tail + HEAT_FEX_TAIL_GUEST_SIZE, 8 );
-    memcpy( &entries, tail + HEAT_FEX_TAIL_ENTRIES, 4 );
-    memcpy( &entries_at, tail + HEAT_FEX_TAIL_ENTRIES_AT, 4 );
+    memcpy( &size, rec->tail + HEAT_FEX_TAIL_SIZE, 8 );
+    memcpy( &rip, rec->tail + HEAT_FEX_TAIL_RIP, 8 );
+    x86_start = rip;
+    memcpy( &guest_size, rec->tail + HEAT_FEX_TAIL_GUEST_SIZE, 8 );
+    memcpy( &entries, rec->tail + HEAT_FEX_TAIL_ENTRIES, 4 );
+    memcpy( &entries_at, rec->tail + HEAT_FEX_TAIL_ENTRIES_AT, 4 );
     if (size > (128 << 20) || guest_size > (1 << 20) || entries > (1 << 20))
     {
         rec->flags |= HP_GONE;
         return;
     }
-    heat_prof_region( header );
     if (pc < header || pc >= header + size)
     {
         rec->flags |= HP_FEX;
         return;
     }
-    rec->block = rip;
+    if (!heat_prof_same_block( rec, header ))
+    {
+        rec->flags |= HP_GONE;
+        return;
+    }
+    heat_prof_region( header );
     host = header;
-    at = header + to_tail + entries_at;
+    at = header + rec->to_tail + entries_at;
     for (i = 0; i < entries; i++)
     {
         size_t n = heat_prof_entry( chunk + used, have - used, &arm, &x86 );
@@ -657,11 +703,12 @@ static void heat_prof_resolve( struct heat_prof_rec *rec )
         host += arm;
         rip += x86;
     }
-    if (rip - rec->block > guest_size)
+    if (rip - x86_start > guest_size || !heat_prof_same_block( rec, header ))
     {
         rec->flags |= HP_GONE;
         return;
     }
+    rec->block = x86_start;
     rec->x86 = rip;
     rec->flags |= HP_X86;
 }
@@ -801,7 +848,10 @@ static void *heat_prof_main( void *arg )
         if (now - second >= 1000000000ull)
         {
             heat_prof_retarget();
+            /* heat_prof_own and the text file are heat_prof_atexit()'s too from here on */
+            pthread_mutex_lock( &heat_prof_file_lock );
             heat_prof_modules();
+            pthread_mutex_unlock( &heat_prof_file_lock );
             heat_prof_counts();
             second = now;
         }
