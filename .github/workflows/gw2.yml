@@ -430,7 +430,8 @@ jobs:
         run: |
           mkdir "$RUNNER_TEMP/tests"
           for c in tests/gw2/*.c; do
-            toolchains/llvm-mingw/bin/x86_64-w64-mingw32-clang -O2 -Wall -Werror -o "$RUNNER_TEMP/tests/$(basename "$c" .c).exe" "$c"
+            # gdi32 for layered.exe's bitmap; mingw's default libraries don't have it
+            toolchains/llvm-mingw/bin/x86_64-w64-mingw32-clang -O2 -Wall -Werror -o "$RUNNER_TEMP/tests/$(basename "$c" .c).exe" "$c" -lgdi32
           done
           ls "$RUNNER_TEMP/tests"
       # whether the Mac driver starts on this runner, with my winemac.so in the engine (matrix.zsh
