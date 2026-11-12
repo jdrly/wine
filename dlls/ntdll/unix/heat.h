@@ -28,7 +28,7 @@ enum heat_mode_bit
     HEAT_BIT_WAKE_ONE,     /* 0x2    WINE_HEAT_WAKE=one */
     HEAT_BIT_WAKE_SKIP,    /* 0x4    WINE_HEAT_WAKE=skip */
     HEAT_BIT_UNUSED,       /* 0x8    never used */
-    HEAT_BIT_MSYNC_UNREG,  /* 0x10   WINE_HEAT_MSYNC_UNREG=1, jdrly/gw2-on-mac#44 */
+    HEAT_BIT_UNUSED_UNREG, /* 0x10   WINE_HEAT_MSYNC_UNREG=1 (#44) until it became the code (#104) */
     HEAT_BIT_EVPOOL,       /* 0x20   WINE_HEAT_EVPOOL=1, jdrly/gw2-on-mac#42 */
     HEAT_BIT_EVPOOL_MASK,  /* 0x40   WINE_HEAT_EVPOOL=1,mask, jdrly/gw2-on-mac#42 */
     HEAT_BIT_SPIN_LOCK,    /* 0x80   WINE_HEAT_SPIN=lock=<us>, jdrly/gw2-on-mac#45 */
@@ -42,7 +42,6 @@ C_ASSERT( HEAT_BITS <= 32 );  /* heat_mode is an unsigned int */
 #define HEAT_COUNT       (1u << HEAT_BIT_COUNT)
 #define HEAT_WAKE_ONE    (1u << HEAT_BIT_WAKE_ONE)
 #define HEAT_WAKE_SKIP   (1u << HEAT_BIT_WAKE_SKIP)
-#define HEAT_MSYNC_UNREG (1u << HEAT_BIT_MSYNC_UNREG)
 
 /* jdrly/gw2-on-mac#42 */
 #define HEAT_EVPOOL      (1u << HEAT_BIT_EVPOOL)

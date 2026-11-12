@@ -493,23 +493,12 @@ static NTSTATUS msync_wait_multiple( const int *objs, void **objs_shm, const uns
     {
         if (check_shm_contention( objs_shm, alert_obj_shm, count, tid ))
         {
-            int i;
-            /* WINE_HEAT_MSYNC_UNREG=1 (dappermint/winecx 9be392b3b4): unregister from the server
-             * too, and drop the alert object's count, as every other way out of here does */
-            if (heat_mode & HEAT_MSYNC_UNREG)
-            {
-                heat_count( HC_UNREG );
-                server_remove_wait( msgh_id, objs, objs_shm, alert_obj, alert_obj_shm, count );
-                return STATUS_PENDING;
-            }
-            for (i = 0; i < count; i++)
-            {
-                struct event *obj = (struct event *)objs_shm[i];
-
-                int refs = __atomic_sub_fetch( &obj->multiple_waiters, 1, __ATOMIC_SEQ_CST);
-                if (refs < 0)
-                    __atomic_store_n( &obj->multiple_waiters, 0, __ATOMIC_SEQ_CST);
-            }
+            /* Unregister from the server too, and drop the alert object's count, as every other
+             * way out of here does (dappermint/winecx 9be392b3b4). Dropping only the objects'
+             * counts left the registration on the server and the alert object's count raised
+             * (jdrly/gw2-on-mac#44, #104). */
+            heat_count( HC_UNREG );
+            server_remove_wait( msgh_id, objs, objs_shm, alert_obj, alert_obj_shm, count );
             return STATUS_PENDING;
         }
     }
