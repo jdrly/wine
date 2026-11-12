@@ -4,7 +4,8 @@
  * Off unless WINE_HEAT_PROF=1 is set for WINE_HEAT_EXE (heat.c decides, in heat_init()). Then a
  * thread of its own that runs no Windows code, with every signal blocked, waits until FEX is
  * loaded, checks that it is the FEX heatprof.h was read from, and only then installs a SIGPROF
- * handler. It sends SIGPROF about WINE_HEAT_PROF_HZ (default 1000) times a second to the game
+ * handler. It sends SIGPROF about WINE_HEAT_PROF_HZ (default 1000) times a second, at random
+ * intervals of half to one and a half of the mean on a timer macOS doesn't coalesce, to the game
  * thread, the busiest unnamed thread that started in the exe, and with WINE_HEAT_PROF_THREADS
  * (a list of "render", "worker") to bgfx's render thread and the busiest other such thread.
  * These are wall-clock samples: a signal interrupts a blocked system call too.
@@ -70,6 +71,7 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#include <sys/event.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/ucontext.h>
@@ -798,21 +800,27 @@ static void heat_prof_atexit(void)
     heat_prof_counts();
 }
 
-static void heat_prof_sleep_until( unsigned long long when )
+/* Waits about <ns> on a kqueue timer with NOTE_CRITICAL, which macOS doesn't coalesce with other
+ * timers: a coalesced wake lands on the same tick as the sampled thread's own timed waits, and
+ * every sample then follows one. The first run on the runner had 130 of the asked 1,000 a second
+ * with nanosleep(), and a 74% share for a function that has 59% of the work. */
+static void heat_prof_wait( int kq, unsigned long long ns )
 {
-    unsigned long long now = heat_now();
+    struct kevent change, event;
     struct timespec ts;
 
-    if (when <= now) return;
-    ts.tv_sec = (when - now) / 1000000000;
-    ts.tv_nsec = (when - now) % 1000000000;
+    EV_SET( &change, 1, EVFILT_TIMER, EV_ADD | EV_ONESHOT, NOTE_NSECONDS | NOTE_CRITICAL, ns, NULL );
+    if (kq != -1 && kevent( kq, &change, 1, &event, 1, NULL ) == 1) return;
+    ts.tv_sec = ns / 1000000000;
+    ts.tv_nsec = ns % 1000000000;
     nanosleep( &ts, NULL );
 }
 
 static void *heat_prof_main( void *arg )
 {
     const unsigned long long tick = 1000000000ull / heat_prof_hz;
-    unsigned long long next, second = 0;
+    unsigned long long second = 0, rnd = mach_absolute_time() | 1;
+    int kq = kqueue();
     struct sigaction sa;
     ULONG_PTR fex;
     char found[128];
@@ -825,7 +833,7 @@ static void *heat_prof_main( void *arg )
              heat_prof_timebase.numer, heat_prof_timebase.denom );
 
     /* FEX is loaded by the PE side's process init, after heat_init() */
-    while (!(fex = heat_prof_modules())) heat_prof_sleep_until( heat_now() + 100000000 );
+    while (!(fex = heat_prof_modules())) heat_prof_wait( kq, 100000000 );
     pinned = heat_prof_fex_pinned( fex, found, sizeof(found) );
     fprintf( heat_prof_txt, "F %.3f fex %s %s\n", heat_prof_seconds(), found, pinned ? "pinned" : "refused" );
     fflush( heat_prof_txt );
@@ -852,7 +860,7 @@ static void *heat_prof_main( void *arg )
     if (sigaction( SIGPROF, &sa, NULL ) == -1) return NULL;
     atexit( heat_prof_atexit );
 
-    for (next = heat_now();; next += tick)
+    for (;;)
     {
         unsigned long long now = heat_now();
 
@@ -868,8 +876,12 @@ static void *heat_prof_main( void *arg )
         }
         heat_prof_drain();
         heat_prof_send();
-        if (next + tick < now) next = now;  /* behind: no burst to catch up */
-        heat_prof_sleep_until( next + tick );
+        /* between half a tick and one and a half, so the samples don't line up with periodic
+         * work either, a frame loop or a timed wait */
+        rnd ^= rnd << 13;
+        rnd ^= rnd >> 7;
+        rnd ^= rnd << 17;
+        heat_prof_wait( kq, tick / 2 + rnd % tick );
     }
     return NULL;
 }
