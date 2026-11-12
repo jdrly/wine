@@ -3248,10 +3248,12 @@ static inline BOOL stage_manager_enabled(void)
     }
 
     /* The controller leaves the options alone in native full screen, so the
-       bit has to be part of what AppKit applies on entry. */
+       bit has to be part of what AppKit applies on entry, except with
+       WINE_MACDRV_ASSIST=leave (GW2 on Mac). */
     - (NSApplicationPresentationOptions) window:(NSWindow*)window
                  willUseFullScreenPresentationOptions:(NSApplicationPresentationOptions)proposedOptions
     {
+        if (cursor_assist_leave) return proposedOptions;
         return proposedOptions | NSApplicationPresentationDisableCursorLocationAssistance;
     }
 

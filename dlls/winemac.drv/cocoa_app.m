@@ -29,6 +29,7 @@
 #pragma GCC diagnostic ignored "-Wdeclaration-after-statement"
 
 WINE_DEFAULT_DEBUG_CHANNEL(macdrv);
+WINE_DECLARE_DEBUG_CHANNEL(macsurface);
 
 
 static NSString* const WineAppWaitQueryResponseMode = @"WineAppWaitQueryResponseMode";
@@ -1105,11 +1106,13 @@ static NSString* WineLocalizedString(unsigned int stringID)
        way hiding the cursor does, so it is off while the pointer is on a Wine
        window, whatever the cursor.  The options are left alone while inactive
        (see updateFullscreenPresentation:) and in native full screen, where
-       window:willUseFullScreenPresentationOptions: sets the bit. */
+       window:willUseFullScreenPresentationOptions: sets the bit.
+       GW2 on Mac: WINE_MACDRV_ASSIST=leave never sets it. */
     - (void) updateCursorLocationAssistance
     {
         NSApplicationPresentationOptions current, options;
 
+        if (cursor_assist_leave) return;
         if (![NSApp isActive]) return;
 
         current = [NSApp presentationOptions];
@@ -1121,7 +1124,10 @@ static NSString* WineLocalizedString(unsigned int stringID)
             options = current & ~NSApplicationPresentationDisableCursorLocationAssistance;
 
         if (options != current)
+        {
+            TRACE_(macsurface)("presentation options %#lx -> %#lx\n", (unsigned long)current, (unsigned long)options);
             [NSApp setPresentationOptions:options];
+        }
     }
 
     /* +[NSCursor currentCursor] is AppKit's record of the last cursor this

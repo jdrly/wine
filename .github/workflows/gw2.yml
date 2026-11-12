@@ -28,6 +28,8 @@
 #   the engine with my winemac.so says whether the Mac driver starts on the runner;
 #   tests/gw2/native/frames.c, built natively, tests the driver's frame decision; layered.exe under
 #   the engine with my winemac.so counts the frames WINE_MACDRV_SURFACE skips, where the driver
+#   starts; assist.exe, with tests/gw2/native/pointer.c moving the pointer off and onto its window,
+#   counts the presentation option changes WINE_MACDRV_ASSIST=leave leaves out, where the driver
 #   starts; and tests/gw2/matrix.zsh runs them all under the engine from the release tarball: with
 #   its own ntdll.so, and with mine in each WINE_HEAT_WAKE mode, with no WINE_HEAT_* variable and
 #   with them set for another program. A push to gw2-on-mac runs only the prefix boot and
@@ -487,6 +489,60 @@ jobs:
             line=$(tr -d '\r' <"$prefix/layered.log" | grep -E 'macsurface:.*: 600 flushes' || true)
             echo "WINE_MACDRV_SURFACE=$mode: ${line:-no macsurface line at the 600th flush}" | tee -a "$GITHUB_STEP_SUMMARY"
             [[ $line == *"$want"* ]] || { echo "::error::WINE_MACDRV_SURFACE=$mode: expected \"$want\""; exit 1; }
+          done
+      # test 4 of jdrly/gw2-on-mac#88: assist.exe's window under the engine with my winemac.so and the
+      # macsurface channel on. tests/gw2/native/pointer.c clicks it, then moves the pointer off and
+      # onto it ten times. In those trips the driver has to change the presentation options 20 times
+      # with WINE_MACDRV_ASSIST unset, and never in the whole run with leave. Only where the Mac
+      # driver starts, like test 12.
+      - name: Cursor Location Assistance
+        if: github.event_name == 'pull_request'
+        run: |
+          if ! grep -qF 'gw2 test window: the Mac driver started' "$RUNNER_TEMP/window.txt"; then
+            echo "::warning::the Mac driver doesn't start on this runner, so the test of #88 needs the Mac run" |
+              tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          clang -std=gnu23 -O2 -Wall -Werror -framework CoreGraphics -o "$RUNNER_TEMP/pointer" tests/gw2/native/pointer.c
+          prefix=$RUNNER_TEMP/assist-prefix log=$RUNNER_TEMP/assist-prefix/assist.log
+          # the driver's line per change of the options
+          changes() { tr -d '\r' <"$log" | grep -c 'macsurface:.*presentation options' || true; }
+          for mode in unset leave; do
+            if [[ $mode == unset ]]; then unset WINE_MACDRV_ASSIST; else export WINE_MACDRV_ASSIST=leave; fi
+            rm -f "$log"
+            GW2_TEST_ASSIST=1 GW2_TEST_SECONDS=90 GW2_TEST_WINEDEBUG=-all,+macsurface \
+              tests/gw2/run.zsh "$RUNNER_TEMP/macdrv/wine" "$prefix" "$RUNNER_TEMP/tests/assist.exe" >"$RUNNER_TEMP/assist-$mode.txt" 2>&1 &
+            run=$!
+            # the prefix boot comes first
+            ready=""
+            for _ in $(seq 600); do
+              [[ ! -f $log ]] || ready=$(tr -d '\r' <"$log" | sed -n 's/^gw2 test assist: ready //p')
+              if [[ -n $ready ]] || ! kill -0 "$run" 2>/dev/null; then break; fi
+              sleep 0.2
+            done
+            status=0
+            if [[ -n $ready ]]; then
+              read -r on_x on_y off_x off_y <<<"$ready"
+              "$RUNNER_TEMP/pointer" click "$on_x" "$on_y" || status=1
+              sleep 1
+              before=$(changes)
+              "$RUNNER_TEMP/pointer" trips 10 "$off_x" "$off_y" "$on_x" "$on_y" || status=1
+              sleep 0.5
+              after=$(changes)
+              "$RUNNER_TEMP/pointer" rclick "$on_x" "$on_y" || status=1
+            fi
+            wait "$run" || status=1
+            cat "$RUNNER_TEMP/assist-$mode.txt"
+            [[ -n $ready ]] || { echo "::error::WINE_MACDRV_ASSIST=$mode: assist.exe never said ready"; exit 1; }
+            total=$(changes)
+            line="WINE_MACDRV_ASSIST=$mode: $((after - before)) changes of the presentation options in the 10 trips, $total in the run"
+            echo "$line" | tee -a "$GITHUB_STEP_SUMMARY"
+            (( status == 0 )) || { echo "::error::WINE_MACDRV_ASSIST=$mode: assist.exe or the pointer failed"; exit 1; }
+            if [[ $mode == unset ]]; then
+              (( after - before == 20 )) || { echo "::error::WINE_MACDRV_ASSIST unset: expected 20 changes in the trips"; exit 1; }
+            else
+              (( total == 0 )) || { echo "::error::WINE_MACDRV_ASSIST=leave: expected no change in the run"; exit 1; }
+            fi
           done
       - name: Run them
         if: github.event_name == 'pull_request'

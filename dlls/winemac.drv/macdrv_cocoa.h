@@ -112,6 +112,7 @@ extern bool use_confinement_cursor_clipping;
 extern bool cursor_clipping_locks_windows;
 extern bool use_precise_scrolling;
 extern bool use_gcmouse;
+extern bool cursor_assist_leave;  /* WINE_MACDRV_ASSIST=leave, see setup_options */
 extern bool ime_fallback_position_set;
 extern int ime_fallback_x, ime_fallback_y;
 extern int gl_surface_mode;

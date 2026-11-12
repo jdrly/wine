@@ -54,6 +54,7 @@ bool use_precise_scrolling = true;
 bool use_gcmouse = false;  /* from compatdb, see setup_options */
 bool surface_copy = false;  /* WINE_MACDRV_SURFACE, see setup_options */
 bool surface_skip = false;
+bool cursor_assist_leave = false;  /* WINE_MACDRV_ASSIST, see setup_options */
 /* Where the input method window goes, in client coordinates of the focus
    window, for a program that never places it; unset by default. */
 bool ime_fallback_position_set = false;
@@ -277,7 +278,7 @@ static void setup_options(void)
 {
     static const WCHAR macdriverW[] = {'\\','M','a','c',' ','D','r','i','v','e','r',0};
     WCHAR buffer[MAX_PATH + 16], *p, *appname;
-    const char *surface_mode;
+    const char *surface_mode, *assist_mode;
     HKEY hkey, appkey = 0;
     DWORD len;
 
@@ -370,6 +371,15 @@ static void setup_options(void)
         surface_skip = !strcmp(surface_mode, "copy,skip");
         surface_copy = surface_skip || !strcmp(surface_mode, "copy");
         if (!surface_copy) ERR("WINE_MACDRV_SURFACE=%s is neither copy nor copy,skip\n", debugstr_a(surface_mode));
+    }
+
+    /* GW2 on Mac: leave keeps Cursor Location Assistance as the system has it.
+       Unset, the controller turns it off while the pointer is on a Wine window
+       (updateCursorLocationAssistance in cocoa_app.m). */
+    if ((assist_mode = getenv("WINE_MACDRV_ASSIST")))
+    {
+        cursor_assist_leave = !strcmp(assist_mode, "leave");
+        if (!cursor_assist_leave) ERR("WINE_MACDRV_ASSIST=%s is not leave\n", debugstr_a(assist_mode));
     }
 
     /* "x,y" */
