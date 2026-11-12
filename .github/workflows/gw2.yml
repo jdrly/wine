@@ -1,32 +1,40 @@
-# gw2 (jdrly/gw2-on-mac#40): my ntdll.so for Mach9 $MACH9_VERSION's engine, built on GitHub's runner
-# the way Mach9's CI built the engine's, and checked against the engine's file. Nothing here runs on
-# my Mac.
+# gw2 (jdrly/gw2-on-mac#40, #57): my ntdll.so and winemac.so for Mach9 $MACH9_VERSION's engine,
+# built on GitHub's runner the way Mach9's CI built the engine's, and checked against the engine's
+# files. Nothing here runs on my Mac.
 #
-# build: one Wine tree configured as Mach9 configures its own (.github/gw2/ntdll.zsh), in the
+# build: one Wine tree configured as Mach9 configures its own (.github/gw2/wine.zsh), in the
 #   engine's paths, with Xcode $XCODE_VERSION, macOS $MACOSX_DEPLOYMENT_TARGET and llvm-mingw
-#   $LLVM_MINGW_VERSION. In it, one after the other:
-#   - $BASE_COMMIT, the commit the engine was built from, compared with the engine's ntdll.so by
-#     .github/gw2/ntdll-compare.py baseline: the same exports and imports, and the header, every
+#   $LLVM_MINGW_VERSION. Each build makes dlls/ntdll/ntdll.so and dlls/winemac.drv/winemac.so
+#   (and win32u.so on the way, which winemac.so links with and nothing checks or ships). In the
+#   tree, one after the other:
+#   - $BASE_COMMIT, the commit the engine was built from, each file compared with the engine's by
+#     .github/gw2/compare.py baseline: the same exports and imports, and the header, every
 #     section, the load commands and the link edit data byte for byte
-#   - the same with one line of NtYieldExecution changed, which that compare has to fail and name
-#   - this commit, every object compiled again, compared by ntdll-compare.py patched: each object
-#     none of whose inputs (makedep's rule for it: its .c and every header it includes) the commit
-#     changes is the base build's, by its compile command, code, data, relocations and symbols, and
-#     the summary lists the other objects' changed functions and the changed inputs that touched them
+#   - the same with one line of NtYieldExecution changed, and then with one line of an
+#     Objective-C method of the Mac driver changed: that compare has to fail on the file and name
+#     the function
+#   - this commit, every object of both files compiled again, compared by compare.py patched: each
+#     object none of whose inputs (makedep's rule for it: its .c or .m and every header it
+#     includes) the commit changes is the base build's, by its compile command, code, data,
+#     relocations and symbols, and the summary lists the other objects' changed functions and the
+#     changed inputs that touched them
 #   The per-function listing with masked addresses that follows a failed byte gate only names
 #   what differs; it is not the gate and never passes or fails a build.
-#   Artifact ntdll-mach9-<commit>: ntdll.so, VERSION, COPYING.LIB, LICENSE, kept 7 days.
-# tests: tests/gw2/*.c built for Win64 x86_64 with llvm-mingw. On a pull request,
-#   tests/gw2/matrix.zsh runs them under the engine from the release tarball: with its own
+#   Artifacts ntdll-mach9-<commit> and macdrv-mach9-<commit>: ntdll.so or winemac.so, VERSION,
+#   COPYING.LIB, LICENSE, kept 7 days.
+# tests: tests/gw2/*.c built for Win64 x86_64 with llvm-mingw. On a pull request, window.exe under
+#   the engine with my winemac.so says whether the Mac driver starts on the runner, and
+#   tests/gw2/matrix.zsh runs them all under the engine from the release tarball: with its own
 #   ntdll.so, and with mine in each WINE_HEAT_WAKE mode, with no WINE_HEAT_* variable and with them
 #   set for another program. A push to gw2-on-mac runs only the prefix boot and smoke.exe, under
 #   the engine's ntdll.so and under mine: its tree is a merged pull request's head, which went
 #   through the matrix in that pull request's run, and Publish names that run.
 # lint: actionlint, and the Python script compiles.
-# publish: after the others are green, packs ntdll-mach9-<commit>.tar.xz and prints its sha256. For
-#   a push to gw2-on-mac it adds the archive to the pre-release mach9-builds, the one release this
-#   workflow makes, never marked latest, and keeps its 30 newest assets, and says which pull
-#   request's green run tested the same tree, or that none did.
+# publish: after the others are green, packs ntdll-mach9-<commit>.tar.xz and
+#   macdrv-mach9-<commit>.tar.xz and prints their sha256. For a push to gw2-on-mac it adds both to
+#   the pre-release mach9-builds, the one release this workflow makes, never marked latest, keeps
+#   the 30 newest of each kind, and says which pull request's green run tested the same tree, or
+#   that none did.
 name: GW2
 
 on:
@@ -67,7 +75,7 @@ defaults:
 
 jobs:
   build:
-    name: Build ntdll.so
+    name: Build ntdll.so and winemac.so
     runs-on: macos-26
     timeout-minutes: 60
     env:
@@ -90,7 +98,7 @@ jobs:
           } | tee -a "$GITHUB_STEP_SUMMARY"
           app=/Applications/Xcode_$XCODE_VERSION.app
           if [[ ! -d $app ]]; then
-            echo "::error::Xcode $XCODE_VERSION isn't on this runner's image ($ImageOS $ImageVersion), so the engine's ntdll.so can't be rebuilt."
+            echo "::error::Xcode $XCODE_VERSION isn't on this runner's image ($ImageOS $ImageVersion), so the engine's files can't be rebuilt."
             exit 1
           fi
           sudo xcode-select -s "$app"
@@ -111,7 +119,7 @@ jobs:
           persist-credentials: false
       - name: The scripts are this workflow's
         run: |
-          [[ $(git -C gw2-ci rev-parse HEAD) == "$GITHUB_SHA" && -f $GW2/ntdll.zsh && -f $GW2/ntdll-compare.py ]] ||
+          [[ $(git -C gw2-ci rev-parse HEAD) == "$GITHUB_SHA" && -f $GW2/wine.zsh && -f $GW2/compare.py ]] ||
             { echo "::error::the scripts of $GITHUB_SHA, the commit this workflow file is from, aren't there"; exit 1; }
           echo "scripts from $GITHUB_SHA, source from $COMMIT"
       # The source to build, with the whole history for git describe, without the file contents
@@ -148,7 +156,7 @@ jobs:
           tar -xf toolchains/mach9.tar.xz -C toolchains/engine --strip-components 1 wine/lib/wine/aarch64-unix
       # every address-bearing instruction of the engine's file changed in turn has to show
       - name: The compare's self-test
-        run: python3 -I "$GW2/ntdll-compare.py" selftest toolchains/engine/lib/wine/aarch64-unix
+        run: python3 -I "$GW2/compare.py" selftest toolchains/engine/lib/wine/aarch64-unix
 
       - name: Restore llvm-mingw
         id: mingw
@@ -179,17 +187,20 @@ jobs:
         run: |
           mkdir -p "${SRC%/*}"
           mv src "$SRC"
-          "$GW2/ntdll.zsh" prepare "$BASE_COMMIT"
-          "$GW2/ntdll.zsh" configure
+          "$GW2/wine.zsh" prepare "$BASE_COMMIT"
+          "$GW2/wine.zsh" configure
 
       - name: Build the engine's commit
         id: base
         run: |
-          "$GW2/ntdll.zsh" build | tee "$RUNNER_TEMP/base-build.log"
+          "$GW2/wine.zsh" build | tee "$RUNNER_TEMP/base-build.log"
           cp -p "$BUILD/dlls/ntdll/ntdll.so" "$RUNNER_TEMP/baseline-ntdll.so"
-          # what the patched build's objects are compared with, with the times its link saw
-          mkdir "$RUNNER_TEMP/base-objects"
-          cp -p "$BUILD"/dlls/ntdll/unix/*.o "$RUNNER_TEMP/base-objects/"
+          cp -p "$BUILD/dlls/winemac.drv/winemac.so" "$RUNNER_TEMP/baseline-winemac.so"
+          # what the patched build's objects are compared with, with the times its link saw. A PE
+          # object of the Mac driver is in a subdirectory, so the glob takes the unix ones only.
+          mkdir -p "$RUNNER_TEMP/base-objects/ntdll" "$RUNNER_TEMP/base-objects/winemac"
+          cp -p "$BUILD"/dlls/ntdll/unix/*.o "$RUNNER_TEMP/base-objects/ntdll/"
+          cp -p "$BUILD"/dlls/winemac.drv/*.o "$RUNNER_TEMP/base-objects/winemac/"
           # makedep's rules: each object's inputs, which decide whether a commit touched it
           cp "$BUILD/Makefile" "$RUNNER_TEMP/base-Makefile"
           # config.h and the generated headers, which reach an object besides its source
@@ -198,26 +209,35 @@ jobs:
         id: baseline
         run: |
           status=0
-          python3 -I "$GW2/ntdll-compare.py" baseline "$RUNNER_TEMP/baseline-ntdll.so" toolchains/engine/lib/wine/aarch64-unix \
-            >"$RUNNER_TEMP/baseline.md" || status=$?
-          tee -a "$GITHUB_STEP_SUMMARY" <"$RUNNER_TEMP/baseline.md"
+          for lib in ntdll winemac; do
+            python3 -I "$GW2/compare.py" baseline "$lib.so" "$RUNNER_TEMP/baseline-$lib.so" toolchains/engine/lib/wine/aarch64-unix \
+              >"$RUNNER_TEMP/baseline-$lib.md" || status=1
+            tee -a "$GITHUB_STEP_SUMMARY" <"$RUNNER_TEMP/baseline-$lib.md"
+          done
           exit "$status"
       # what differs, for the first functions the compare's listing names (the listing is not the gate)
       - name: Disassemble what differs
         if: failure() && steps.baseline.outcome == 'failure'
         run: |
-          engine=toolchains/engine/lib/wine/aarch64-unix/ntdll.so
-          # shellcheck disable=SC2016 # the backticks are the report's
-          sed -n 's/^  - `[a-z0-9_]*\.c: \([^ `]*\)`$/\1/p' "$RUNNER_TEMP/baseline.md" | sed -n 1,5p | while read -r f; do
-            echo "== $f (< the engine's, > mine)"
-            diff <(xcrun objdump -d --no-show-raw-insn --no-leading-addr --disassemble-symbols="_$f" "$engine" | tail -n +5) \
-              <(xcrun objdump -d --no-show-raw-insn --no-leading-addr --disassemble-symbols="_$f" "$RUNNER_TEMP/baseline-ntdll.so" | tail -n +5) || true
+          for lib in ntdll winemac; do
+            engine=toolchains/engine/lib/wine/aarch64-unix/$lib.so
+            # shellcheck disable=SC2016 # the backticks are the report's
+            sed -n 's/^  - `[A-Za-z0-9_]*\.[cm]: \(.*\)`$/\1/p' "$RUNNER_TEMP/baseline-$lib.md" | sed -n 1,5p | while IFS= read -r f; do
+              f=${f% (only in one)}
+              # a C function's symbol has an underscore before its name, an Objective-C method's doesn't
+              case $f in [-+]\[*) sym=$f ;; *) sym=_$f ;; esac
+              echo "== $lib.so: $f (< the engine's, > mine)"
+              diff <(xcrun objdump -d --no-show-raw-insn --no-leading-addr --disassemble-symbols="$sym" "$engine" | tail -n +5) \
+                <(xcrun objdump -d --no-show-raw-insn --no-leading-addr --disassemble-symbols="$sym" "$RUNNER_TEMP/baseline-$lib.so" | tail -n +5) || true
+            done
           done
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: failure() && steps.baseline.outcome == 'failure'
         with:
-          name: baseline-ntdll-${{ env.COMMIT }}
-          path: ${{ runner.temp }}/baseline-ntdll.so
+          name: baseline-${{ env.COMMIT }}
+          path: |
+            ${{ runner.temp }}/baseline-ntdll.so
+            ${{ runner.temp }}/baseline-winemac.so
           retention-days: 7
 
       # One line of NtYieldExecution changed: a second sched_yield call, which also moves every
@@ -230,25 +250,44 @@ jobs:
           sed -i '' '/^NTSTATUS WINAPI NtYieldExecution/,/^}/s/^    sched_yield();$/    sched_yield(); sched_yield();/' "$SRC/$f"
           # with "|| exit": macOS's bash 3.2 doesn't stop at a failed [[ ]] under -e
           [[ $(git -C "$SRC" diff --numstat) == $'1\t1\t'"$f" ]] || { echo "::error::the line to change isn't in $f"; exit 1; }
-          "$GW2/ntdll.zsh" build
+          "$GW2/wine.zsh" build
           status=0
-          python3 -I "$GW2/ntdll-compare.py" baseline "$BUILD/dlls/ntdll/ntdll.so" toolchains/engine/lib/wine/aarch64-unix \
+          python3 -I "$GW2/compare.py" baseline ntdll.so "$BUILD/dlls/ntdll/ntdll.so" toolchains/engine/lib/wine/aarch64-unix \
             >"$RUNNER_TEMP/broken.md" || status=$?
           git -C "$SRC" checkout -- "$f"
           cat "$RUNNER_TEMP/broken.md"
           # shellcheck disable=SC2016 # the backticks are the report's
           [[ $status == 1 ]] && grep -qF '`sync.c: NtYieldExecution`' "$RUNNER_TEMP/broken.md" &&
             ! grep '^  - `' "$RUNNER_TEMP/broken.md" | grep -v '^  - `sync\.c: '
+      # One line of an Objective-C method changed: -[WineContentView setColorImage:] retains the
+      # image twice. No selector or string is added, so only __text changes, and every function
+      # after it moves. The byte gate has to fail on winemac.so, and its listing has to name the
+      # method and nothing outside cocoa_window.m.
+      - name: The baseline compare fails on a broken Objective-C method
+        if: ${{ !cancelled() && steps.base.outcome == 'success' }}
+        run: |
+          f=dlls/winemac.drv/cocoa_window.m
+          sed -i '' '/^    - (void) setColorImage:(CGImageRef)image$/,/^    }$/s/^        colorImage = CGImageRetain(image);$/        colorImage = CGImageRetain(CGImageRetain(image));/' "$SRC/$f"
+          [[ $(git -C "$SRC" diff --numstat) == $'1\t1\t'"$f" ]] || { echo "::error::the line to change isn't in $f"; exit 1; }
+          "$GW2/wine.zsh" build
+          status=0
+          python3 -I "$GW2/compare.py" baseline winemac.so "$BUILD/dlls/winemac.drv/winemac.so" toolchains/engine/lib/wine/aarch64-unix \
+            >"$RUNNER_TEMP/broken-winemac.md" || status=$?
+          git -C "$SRC" checkout -- "$f"
+          cat "$RUNNER_TEMP/broken-winemac.md"
+          # shellcheck disable=SC2016 # the backticks are the report's
+          [[ $status == 1 ]] && grep -qF '`cocoa_window.m: -[WineContentView setColorImage:]`' "$RUNNER_TEMP/broken-winemac.md" &&
+            ! grep '^  - `' "$RUNNER_TEMP/broken-winemac.md" | grep -v '^  - `cocoa_window\.m: '
 
       - name: Build this commit
         id: head
         if: ${{ !cancelled() && steps.base.outcome == 'success' }}
         run: |
-          "$GW2/ntdll.zsh" checkout "$COMMIT"
+          "$GW2/wine.zsh" checkout "$COMMIT"
           # every object compiled again, so none compared is one the base build left behind
           date +%s >"$RUNNER_TEMP/checkout-time"
-          rm -f "$BUILD"/dlls/ntdll/unix/*.o
-          "$GW2/ntdll.zsh" build | tee "$RUNNER_TEMP/head-build.log"
+          rm -f "$BUILD"/dlls/ntdll/unix/*.o "$BUILD"/dlls/winemac.drv/*.o
+          "$GW2/wine.zsh" build | tee "$RUNNER_TEMP/head-build.log"
           (cd "$BUILD" && find include -type f -print0 | sort -z | xargs -0 shasum -a 256) >"$RUNNER_TEMP/head-headers.txt"
           diff "$RUNNER_TEMP/base-headers.txt" "$RUNNER_TEMP/head-headers.txt" ||
             { echo "::error::config.h or a generated header isn't the base build's"; exit 1; }
@@ -259,42 +298,60 @@ jobs:
           touched=()
           while IFS= read -r f; do touched+=("$f"); done < <(git -C "$SRC" diff --name-only "$BASE_COMMIT" "$COMMIT")
           status=0
-          python3 -I "$GW2/ntdll-compare.py" patched "$BUILD/dlls/ntdll/ntdll.so" toolchains/engine/lib/wine/aarch64-unix \
-            "$SRC" "$BUILD" "$RUNNER_TEMP/baseline-ntdll.so" "$RUNNER_TEMP/base-objects" \
-            "$RUNNER_TEMP/base-build.log" "$RUNNER_TEMP/head-build.log" "$RUNNER_TEMP/base-Makefile" "$BUILD/Makefile" \
-            "$(cat "$RUNNER_TEMP/checkout-time")" \
-            "${touched[@]}" >"$RUNNER_TEMP/compare.md" || status=$?
-          tee -a "$GITHUB_STEP_SUMMARY" <"$RUNNER_TEMP/compare.md"
+          for lib in ntdll winemac; do
+            file=$BUILD/dlls/ntdll/ntdll.so
+            [[ $lib == ntdll ]] || file=$BUILD/dlls/winemac.drv/winemac.so
+            python3 -I "$GW2/compare.py" patched "$lib.so" "$file" toolchains/engine/lib/wine/aarch64-unix \
+              "$SRC" "$BUILD" "$RUNNER_TEMP/baseline-$lib.so" "$RUNNER_TEMP/base-objects/$lib" \
+              "$RUNNER_TEMP/base-build.log" "$RUNNER_TEMP/head-build.log" "$RUNNER_TEMP/base-Makefile" "$BUILD/Makefile" \
+              "$(cat "$RUNNER_TEMP/checkout-time")" \
+              "${touched[@]}" >"$RUNNER_TEMP/compare-$lib.md" || status=1
+            tee -a "$GITHUB_STEP_SUMMARY" <"$RUNNER_TEMP/compare-$lib.md"
+          done
           exit "$status"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: failure() && steps.compare.outcome == 'failure'
         with:
-          name: compared-ntdll-${{ env.COMMIT }}
-          path: ${{ env.BUILD }}/dlls/ntdll/ntdll.so
+          name: compared-${{ env.COMMIT }}
+          path: |
+            ${{ env.BUILD }}/dlls/ntdll/ntdll.so
+            ${{ env.BUILD }}/dlls/winemac.drv/winemac.so
           retention-days: 7
 
+      # dist/ntdll and dist/macdrv: each file with its own VERSION and the licences
       - name: Stage
         run: |
-          mkdir dist
-          cp "$BUILD/dlls/ntdll/ntdll.so" "$SRC/COPYING.LIB" "$SRC/LICENSE" dist/
-          {
-            strings -a dist/ntdll.so | grep -oE 'wine-[0-9]+\.[0-9]+-[0-9]+-g[0-9a-f]+'
-            echo "commit: $COMMIT"
-            echo "base: $BASE_COMMIT ($(git -C "$SRC" describe "$BASE_COMMIT"))"
-            echo "engine: Mach9 $MACH9_VERSION (wine-$MACH9_VERSION-macos-arm64.tar.xz, sha256 $MACH9_SHA256)"
-            echo "toolchain: Xcode $(xcodebuild -version | sed -n 's/^Xcode //p') (macOS SDK $(xcrun -sdk macosx --show-sdk-version)), $(clang --version | sed -n 1p), llvm-mingw $LLVM_MINGW_VERSION, macOS $MACOSX_DEPLOYMENT_TARGET"
-            echo "ntdll.so: sha256 $(shasum -a 256 dist/ntdll.so | cut -d' ' -f1)"
-            echo
-            cat "$RUNNER_TEMP/baseline.md"
-            echo
-            cat "$RUNNER_TEMP/compare.md"
-          } >dist/VERSION
-          cat dist/VERSION
-          ls -l dist
+          mkdir -p dist/ntdll dist/macdrv
+          cp "$BUILD/dlls/ntdll/ntdll.so" "$SRC/COPYING.LIB" "$SRC/LICENSE" dist/ntdll/
+          cp "$BUILD/dlls/winemac.drv/winemac.so" "$SRC/COPYING.LIB" "$SRC/LICENSE" dist/macdrv/
+          for lib in ntdll winemac; do
+            dir=dist/ntdll
+            [[ $lib == ntdll ]] || dir=dist/macdrv
+            {
+              strings -a dist/ntdll/ntdll.so | grep -oE 'wine-[0-9]+\.[0-9]+-[0-9]+-g[0-9a-f]+'
+              echo "commit: $COMMIT"
+              echo "base: $BASE_COMMIT ($(git -C "$SRC" describe "$BASE_COMMIT"))"
+              echo "engine: Mach9 $MACH9_VERSION (wine-$MACH9_VERSION-macos-arm64.tar.xz, sha256 $MACH9_SHA256)"
+              echo "toolchain: Xcode $(xcodebuild -version | sed -n 's/^Xcode //p') (macOS SDK $(xcrun -sdk macosx --show-sdk-version)), $(clang --version | sed -n 1p), llvm-mingw $LLVM_MINGW_VERSION, macOS $MACOSX_DEPLOYMENT_TARGET"
+              echo "$lib.so: sha256 $(shasum -a 256 "$dir/$lib.so" | cut -d' ' -f1)"
+              echo
+              cat "$RUNNER_TEMP/baseline-$lib.md"
+              echo
+              cat "$RUNNER_TEMP/compare-$lib.md"
+            } >"$dir/VERSION"
+            cat "$dir/VERSION"
+            ls -l "$dir"
+          done
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ntdll-mach9-${{ env.COMMIT }}
-          path: dist
+          path: dist/ntdll
+          retention-days: 7
+          if-no-files-found: error
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: macdrv-mach9-${{ env.COMMIT }}
+          path: dist/macdrv
           retention-days: 7
           if-no-files-found: error
 
@@ -345,17 +402,25 @@ jobs:
         with:
           name: ntdll-mach9-${{ env.COMMIT }}
           path: ${{ runner.temp }}/dist
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: macdrv-mach9-${{ env.COMMIT }}
+          path: ${{ runner.temp }}/macdrv-dist
 
-      # Two copies of the engine, the second with my ntdll.so; APFS clones, so the copy is free
+      # Three copies of the engine: its own, one with my ntdll.so, one with my winemac.so. APFS
+      # clones, so the copies are free.
       - name: Unpack the engine
         run: |
           echo "$MACH9_SHA256  toolchains/mach9.tar.xz" | shasum -a 256 -c
           mkdir "$RUNNER_TEMP/engine"
           tar -xf toolchains/mach9.tar.xz -C "$RUNNER_TEMP/engine"
           cp -Rc "$RUNNER_TEMP/engine" "$RUNNER_TEMP/mine"
+          cp -Rc "$RUNNER_TEMP/engine" "$RUNNER_TEMP/macdrv"
           install -m 755 "$RUNNER_TEMP/dist/ntdll.so" "$RUNNER_TEMP/mine/wine/lib/wine/aarch64-unix/ntdll.so"
-          xattr -drs com.apple.quarantine "$RUNNER_TEMP/engine" "$RUNNER_TEMP/mine"
-          shasum -a 256 "$RUNNER_TEMP"/{engine,mine}/wine/lib/wine/aarch64-unix/ntdll.so
+          install -m 755 "$RUNNER_TEMP/macdrv-dist/winemac.so" "$RUNNER_TEMP/macdrv/wine/lib/wine/aarch64-unix/winemac.so"
+          xattr -drs com.apple.quarantine "$RUNNER_TEMP/engine" "$RUNNER_TEMP/mine" "$RUNNER_TEMP/macdrv"
+          shasum -a 256 "$RUNNER_TEMP"/{engine,mine}/wine/lib/wine/aarch64-unix/ntdll.so \
+            "$RUNNER_TEMP"/{engine,macdrv}/wine/lib/wine/aarch64-unix/winemac.so
           "$RUNNER_TEMP/mine/wine/bin/wine" --version
       - name: Build the test programs
         run: |
@@ -364,6 +429,14 @@ jobs:
             toolchains/llvm-mingw/bin/x86_64-w64-mingw32-clang -O2 -Wall -Werror -o "$RUNNER_TEMP/tests/$(basename "$c" .c).exe" "$c"
           done
           ls "$RUNNER_TEMP/tests"
+      # whether the Mac driver starts on this runner, with my winemac.so in the engine (matrix.zsh
+      # runs window.exe under the engine's own as well)
+      - name: The Mac driver on the runner
+        if: github.event_name == 'pull_request'
+        run: |
+          tests/gw2/run.zsh "$RUNNER_TEMP/macdrv/wine" "$RUNNER_TEMP/macdrv-prefix" "$RUNNER_TEMP/tests/window.exe" |
+            tee "$RUNNER_TEMP/window.txt"
+          { echo "### The Mac driver on the runner"; echo '```'; cat "$RUNNER_TEMP/window.txt"; echo '```'; } >>"$GITHUB_STEP_SUMMARY"
       - name: Run them
         if: github.event_name == 'pull_request'
         run: tests/gw2/matrix.zsh "$RUNNER_TEMP/engine/wine" "$RUNNER_TEMP/mine/wine" "$RUNNER_TEMP/tests" "$RUNNER_TEMP/matrix"
@@ -406,7 +479,7 @@ jobs:
           tar -xzf "$RUNNER_TEMP/$f" -C "$RUNNER_TEMP" actionlint
           "$RUNNER_TEMP/actionlint" -color .github/workflows/gw2.yml
       - name: Python
-        run: python3 -I -m py_compile .github/gw2/ntdll-compare.py
+        run: python3 -I -m py_compile .github/gw2/compare.py
 
   publish:
     name: Publish
@@ -428,42 +501,52 @@ jobs:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: ntdll-mach9-${{ env.COMMIT }}
-          path: dist
+          path: dist/ntdll
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: macdrv-mach9-${{ env.COMMIT }}
+          path: dist/macdrv
       - name: Pack
         run: |
-          name="ntdll-mach9-$COMMIT.tar.xz"
-          chmod 755 dist/ntdll.so
-          chmod 644 dist/VERSION dist/COPYING.LIB dist/LICENSE
-          tar --sort=name --owner=0 --group=0 --numeric-owner -C dist -cJf "$name" ntdll.so VERSION COPYING.LIB LICENSE
-          tar -tvJf "$name"
-          sha256sum "$name" | tee -a "$GITHUB_STEP_SUMMARY"
+          for kind in ntdll macdrv; do
+            file=ntdll.so
+            [[ $kind == ntdll ]] || file=winemac.so
+            name="$kind-mach9-$COMMIT.tar.xz"
+            chmod 755 "dist/$kind/$file"
+            chmod 644 "dist/$kind/VERSION" "dist/$kind/COPYING.LIB" "dist/$kind/LICENSE"
+            tar --sort=name --owner=0 --group=0 --numeric-owner -C "dist/$kind" -cJf "$name" "$file" VERSION COPYING.LIB LICENSE
+            tar -tvJf "$name"
+            sha256sum "$name" | tee -a "$GITHUB_STEP_SUMMARY"
+          done
       - name: Upload to the pre-release ${{ env.RELEASE }}
         if: github.event_name == 'push' && github.ref == 'refs/heads/gw2-on-mac'
         run: |
-          name="ntdll-mach9-$COMMIT.tar.xz"
           if ! gh release view "$RELEASE" >/dev/null 2>&1; then
-            gh release create "$RELEASE" --prerelease --latest=false --target "$COMMIT" --title "Mach9 builds of my ntdll.so" \
-              --notes "CI output for GW2 on Mac's arm64 line, not a release of Wine: my ntdll.so for Mach9 $MACH9_VERSION's engine, built and checked by .github/workflows/gw2.yml for each push to gw2-on-mac. One asset per commit, ntdll-mach9-<full sha>.tar.xz; the 30 newest stay."
+            gh release create "$RELEASE" --prerelease --latest=false --target "$COMMIT" --title "Mach9 builds of my ntdll.so and winemac.so" \
+              --notes "CI output for GW2 on Mac's arm64 line, not a release of Wine: my ntdll.so and winemac.so for Mach9 $MACH9_VERSION's engine, built and checked by .github/workflows/gw2.yml for each push to gw2-on-mac. One asset of each per commit, ntdll-mach9-<full sha>.tar.xz and macdrv-mach9-<full sha>.tar.xz; the 30 newest of each stay."
           fi
-          uploaded=0
-          # grep without -q, which would end the pipe early and fail it under pipefail
-          if gh release view "$RELEASE" --json assets -q '.assets[].name' | grep -xF "$name" >/dev/null; then
-            echo "$name is there already, and a published file is never replaced"
-          else
-            gh release upload "$RELEASE" "$name"
-            uploaded=1
-          fi
-          # the 30 newest assets stay
           id=$(gh api "repos/$GH_REPO/releases/tags/$RELEASE" -q .id)
-          gh api --paginate "repos/$GH_REPO/releases/$id/assets?per_page=100" -q '.[] | [.created_at, .id, .name] | @tsv' |
-            grep -P '\tntdll-mach9-[0-9a-f]{40}\.tar\.xz$' | sort -r | tail -n +31 | while IFS=$'\t' read -r _ asset old; do
-              echo "deleting $old"
-              gh api -X DELETE "repos/$GH_REPO/releases/assets/$asset"
-            done
-          digest=$(gh api "repos/$GH_REPO/releases/tags/$RELEASE" -q ".assets[] | select(.name == \"$name\") | .digest")
-          echo "$RELEASE has $name, $digest" | tee -a "$GITHUB_STEP_SUMMARY"
-          [[ $digest == sha256:* ]]
-          (( !uploaded )) || [[ $digest == "sha256:$(sha256sum "$name" | cut -d' ' -f1)" ]]
+          for kind in ntdll macdrv; do
+            name="$kind-mach9-$COMMIT.tar.xz"
+            uploaded=0
+            # grep without -q, which would end the pipe early and fail it under pipefail
+            if gh release view "$RELEASE" --json assets -q '.assets[].name' | grep -xF "$name" >/dev/null; then
+              echo "$name is there already, and a published file is never replaced"
+            else
+              gh release upload "$RELEASE" "$name"
+              uploaded=1
+            fi
+            # the 30 newest assets of this kind stay
+            gh api --paginate "repos/$GH_REPO/releases/$id/assets?per_page=100" -q '.[] | [.created_at, .id, .name] | @tsv' |
+              grep -P "\t$kind-mach9-[0-9a-f]{40}\\.tar\\.xz\$" | sort -r | tail -n +31 | while IFS=$'\t' read -r _ asset old; do
+                echo "deleting $old"
+                gh api -X DELETE "repos/$GH_REPO/releases/assets/$asset"
+              done
+            digest=$(gh api "repos/$GH_REPO/releases/tags/$RELEASE" -q ".assets[] | select(.name == \"$name\") | .digest")
+            echo "$RELEASE has $name, $digest" | tee -a "$GITHUB_STEP_SUMMARY"
+            [[ $digest == sha256:* ]]
+            (( !uploaded )) || [[ $digest == "sha256:$(sha256sum "$name" | cut -d' ' -f1)" ]]
+          done
           latest=$(gh api "repos/$GH_REPO/releases/latest" -q .tag_name 2>/dev/null || true)
           echo "releases/latest: ${latest:-none}"
           [[ $latest != "$RELEASE" ]]

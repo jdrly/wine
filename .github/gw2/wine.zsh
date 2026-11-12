@@ -1,17 +1,20 @@
 #!/bin/zsh
-# gw2 (jdrly/gw2-on-mac#40): build dlls/ntdll/ntdll.so the way Mach9 0.3.1's CI built the engine's
-# (athei/mach9 at v0.3.1: bin/build-wine.sh, bin/lib/profile.sh, .github/workflows/release.yml).
+# gw2 (jdrly/gw2-on-mac#40, #57): build dlls/ntdll/ntdll.so and dlls/winemac.drv/winemac.so the way
+# Mach9 0.3.1's CI built the engine's (athei/mach9 at v0.3.1: bin/build-wine.sh,
+# bin/lib/profile.sh, .github/workflows/release.yml).
 #
-#   ntdll.zsh prepare <commit>    check $SRC out at <commit> and give it the wine-11.21 tag
-#   ntdll.zsh checkout <commit>   move $SRC to another commit
-#   ntdll.zsh configure           configure a tree in $BUILD for $SRC
-#   ntdll.zsh build               build dlls/ntdll/ntdll.so in $BUILD and check its version string
+#   wine.zsh prepare <commit>    check $SRC out at <commit> and give it the wine-11.21 tag
+#   wine.zsh checkout <commit>   move $SRC to another commit
+#   wine.zsh configure           configure a tree in $BUILD for $SRC
+#   wine.zsh build               build ntdll.so and winemac.so in $BUILD and check ntdll.so's
+#                                version string. winemac.so links with dlls/win32u/win32u.so, so
+#                                make builds that on the way; nothing checks or ships it.
 #
 # $MINGW_DIR is llvm-mingw. $SRC is a clone of this repository with its whole history, as the workflow checks it out. $SRC
 # and $BUILD are the engine's own paths (its debug map names them), since the paths reach the
 # file. The configure arguments are Mach9's, except that GStreamer, OpenGL and Vulkan are off: Mach9
-# builds those itself, and nothing under dlls/ntdll/unix reads what they set. The baseline compare
-# in .github/workflows/gw2.yml decides whether that holds.
+# builds those itself, and nothing under dlls/ntdll/unix or dlls/winemac.drv reads what they set.
+# The baseline compare in .github/workflows/gw2.yml decides whether that holds.
 emulate -L zsh
 setopt err_exit pipe_fail no_unset extended_glob
 
@@ -65,7 +68,7 @@ configure() {
 
 build() {
   local file=$BUILD/dlls/ntdll/ntdll.so commit=$(git -C "$SRC" rev-parse HEAD) version found hash
-  make -C "$BUILD" -j"$(sysctl -n hw.ncpu)" dlls/ntdll/ntdll.so
+  make -C "$BUILD" -j"$(sysctl -n hw.ncpu)" dlls/ntdll/ntdll.so dlls/winemac.drv/winemac.so
   # wine_build, from git describe (configure.ac's rule for dlls/ntdll/unix/version.c). It follows
   # a 16-byte table without a NUL, so strings prints the two as one.
   version=$(sed -n 's/^Wine version //p' "$SRC/VERSION")
@@ -82,5 +85,5 @@ build() {
 
 case ${1:-}:$# in
   prepare:2 | checkout:2 | configure:1 | build:1) "$@" ;;
-  *) print -u2 "usage: ntdll.zsh prepare <commit> | checkout <commit> | configure | build"; exit 2 ;;
+  *) print -u2 "usage: wine.zsh prepare <commit> | checkout <commit> | configure | build"; exit 2 ;;
 esac
