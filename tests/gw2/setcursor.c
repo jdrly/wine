@@ -126,7 +126,8 @@ int main(void)
     expect( "4, detached, a new input without a cursor", a, NULL );
     expect( "4, detached, a again", a, a );
     if (GetCursor() != a) FAIL( "GetCursor returned %p, not %p", GetCursor(), a );
-    on_second( 3 );
+    step = 3;  /* the second thread's end: it returns without setting done */
+    SetEvent( go );
     if (WaitForSingleObject( thread, 10000 )) FAIL( "the second thread didn't end in 10 s" );
 
     printf( "gw2 test setcursor: passed\n" );
