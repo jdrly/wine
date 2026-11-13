@@ -11,8 +11,8 @@
  * clocks into milliseconds per FEX tick, for a counter at Mach's 24 MHz and one at 1 GHz. Then on
  * this machine: the research note's check (CNTFRQ_EL0, and both counters over a 1 s sleep), and a
  * 100 ms sleep timed the way FEX times a scope, which the fex line has to print within 10% of its
- * length. No bound depends on how long the runner lets a sleep run: nanosleep never returns early,
- * which gives the lower one, and Mach's clock read around the scope gives the upper one.
+ * length. No bound depends on how long the runner lets a sleep run: Mach's clock, read just inside
+ * and just outside FEX's two reads, gives the lower and the upper one.
  *
  * Prints "gw2 test fexstats: passed" and exits 0, or names each case that failed and exits 1. */
 #include <stdio.h>
@@ -127,10 +127,10 @@ static void tick_rate( void )
  * (SHMStats.h:97), read back through the fex line with the rate measured since <start> */
 static void this_machine( const struct heat_fex_clock *start )
 {
-    unsigned long long frq, c0, c1, m0, m1, prev[HEAT_FEX_FIELDS] = { 0 };
+    unsigned long long frq, c0, c1, m0, m1, in0, in1, prev[HEAT_FEX_FIELDS] = { 0 };
     struct heat_fex_clock now;
     mach_timebase_info_data_t tb;
-    double mach_ms, jit_ms, span_ms;
+    double mach_ms, jit_ms, inner_ms, outer_ms;
     char buf[1024];
 
     mach_timebase_info( &tb );
@@ -144,13 +144,16 @@ static void this_machine( const struct heat_fex_clock *start )
     printf( "gw2 test fexstats: CNTFRQ_EL0 %llu Hz, CNTVCT_EL0 %llu ticks and mach_absolute_time %llu in a 1 s sleep, "
             "timebase %u/%u, ratio %.3f\n", frq, c1 - c0, m1 - m0, tb.numer, tb.denom, (double)(c1 - c0) / (m1 - m0) );
 
-    /* Mach's reads outside FEX's, so the Mach span holds the scope */
+    /* Mach's reads around each of FEX's: the scope is at least the inner span and at most the outer */
     m0 = mach_absolute_time();
     c0 = cntvct();
+    in0 = mach_absolute_time();
     sleep_ms( 100 );
+    in1 = mach_absolute_time();
     c1 = cntvct();
     m1 = mach_absolute_time();
-    span_ms = (m1 - m0) * mach_ms;
+    inner_ms = (in1 - in0) * mach_ms;
+    outer_ms = (m1 - m0) * mach_ms;
     layout( 3, 144, 1 );
     fill( 144, 0, TID, 0 );
     set( 144, 0, HEAT_FEX_STATS_JIT_TIME, c1 - c0 );
@@ -162,11 +165,11 @@ static void this_machine( const struct heat_fex_clock *start )
         failed++;
         return;
     }
-    printf( "gw2 test fexstats: a 100 ms sleep in a timed scope: jit_ms %.3f, Mach's span around it %.3f ms\n",
-            jit_ms, span_ms );
-    if (jit_ms < 100 * 0.9 || jit_ms > span_ms * 1.1)
+    printf( "gw2 test fexstats: a 100 ms sleep in a timed scope: jit_ms %.3f, Mach's spans %.3f inside and %.3f "
+            "outside it\n", jit_ms, inner_ms, outer_ms );
+    if (jit_ms < inner_ms * 0.9 || jit_ms > outer_ms * 1.1)
     {
-        printf( "gw2 test fexstats: a 100 ms sleep: jit_ms %.3f, want 90 to %.3f\n", jit_ms, span_ms * 1.1 );
+        printf( "gw2 test fexstats: a 100 ms sleep: jit_ms %.3f, want %.3f to %.3f\n", jit_ms, inner_ms * 0.9, outer_ms * 1.1 );
         failed++;
     }
 }
