@@ -29,7 +29,9 @@
 #   an executable section, and each export's section, weak flag, and function or data contents
 #   (structural_gate). Which functions differ in their bytes (addresses masked), which sections in
 #   their order, their size or, outside code, their bytes, is a report: that is the other compiler,
-#   and it never fails a build. With either gate a baseline that passes ends with the line
+#   and it never fails a build. A function whose only difference is the name of a constant without
+#   a symbol, from which its loads read the same bytes, is counted apart (jdrly/gw2-on-mac#133).
+#   With either gate a baseline that passes ends with the line
 #   "baseline: <library> <the gate that held>", which the workflow copies into VERSION, in the form
 #   my FEX fork's record has. A file that fails its gate gets no such line.
 # patched: my build of a later commit, made in the same tree after the baseline with every object
@@ -372,7 +374,9 @@ class MachO:
 
     def resolver(self):
         """address -> what it points to, independent of where the linker put it. A file-local
-        symbol is named with its object file, since two files may each have one of that name."""
+        symbol is named with its object file, since two files may each have one of that name.
+        With the width of a load from it, a constant without a symbol is named by the bytes the
+        load reads (jdrly/gw2-on-mac#133)."""
         where = self.statics()
         defined = sorted((v, n if t & N_EXT or v not in where else f"{where[v]}:{n}")
                          for n, t, sect, _, v in self.syms
@@ -385,7 +389,7 @@ class MachO:
                 pointers.append((s, width))
         # cached: the selftest changes only __TEXT,__text, which no name is read from
         @functools.lru_cache(maxsize=None)
-        def name(addr):
+        def name(addr, load=None):
             for s, width in pointers:
                 if s["addr"] <= addr < s["addr"] + s["size"]:
                     i = s["reserved1"] + (addr - s["addr"]) // width
@@ -409,6 +413,11 @@ class MachO:
                         chars = struct.unpack_from("<Q", self.data, s["offset"] + entry - s["addr"] + 16)[0]
                         return f"cfstr:{name(chars & ((1 << 36) - 1))}+{addr - entry}"
                     i = bisect.bisect_right(addrs, addr) - 1
+                    if s["name"] == "__TEXT,__const" and (i < 0 or addrs[i] != addr) and load \
+                            and addr + load <= s["addr"] + s["size"]:
+                        # a load reads its own bytes from there and nothing else: they are what
+                        # the code takes, whatever the linker put around them
+                        return f"const bytes:{self.data[o:o + load].hex()}"
                     if s["name"] == "__TEXT,__const" and (i < 0 or addrs[i] != addr):
                         # no symbol starts here: a jump table or another constant the linker
                         # dropped the label of. The symbol before it may be another file's,
@@ -485,8 +494,11 @@ def masked(m, resolve, addr, size):
     brings, and UNKNOWN for a way where it holds something else. A use stands for all of its
     ADRPs' targets and counts as a use of each; where UNKNOWN is among them it also keeps its own
     offset as it is, since that may be the whole address. A BR this pass can't read as a jump table
-    keeps every use's offset as it is from there on. Each loss of track makes a function compare
-    as changed, never as equal."""
+    or a tail call keeps every use's offset as it is from there on. Each loss of track makes a
+    function compare as changed, never as equal.
+
+    A load's target is resolved with the width it reads, so a constant without a symbol is named by
+    those bytes (resolver)."""
     code = m.bytes_of(addr, size)
     end = addr + size
     words = [struct.unpack_from("<I", code, i)[0] for i in range(0, len(code) - len(code) % 4, 4)]
@@ -564,6 +576,37 @@ def masked(m, resolve, addr, size):
                     break
             return m.jump_table(table, 1 << size_bits, opc >= 2, base, addr, end, count)
 
+        def tail_call(i):
+            """whether a BR at words[i] leaves the function: a call through a pointer after the
+            epilogue (user_driver->pSystrayCall in win32u.so's system_tray_call). Right before
+            it, only restores from SP (LDP or LDR, at an offset or post-indexed) and ADD SP, SP,
+            #imm, with SP given back by the last of them and x29 and x30 restored together among
+            them; and the BR's register loaded by an LDR Xt, [Xn, #imm] in the 12 instructions
+            before those, with nothing else writing it. The frame is gone, so compiled code
+            doesn't come back into the function. Anything else, a BR without a frame among
+            them, stays a branch to anywhere (jdrly/gw2-on-mac#133)."""
+            def restore(w):  # 2: gives SP back, 1: a restore from SP at an offset, 0: neither
+                if w & 0xff8003ff == 0x910003ff:  # ADD SP, SP, #imm
+                    return 2
+                if (w >> 5) & 31 != 31:
+                    return 0
+                for op in (0xa8c00000, 0x6cc00000):  # LDP X or D, post-indexed
+                    if w & 0xffc00000 == op:
+                        return 2
+                if w & 0xffe00c00 in (0xf8400400, 0xfc400400):  # LDR X or D, post-indexed
+                    return 2
+                return 1 if w & 0xffc00000 in (0xa9400000, 0x6d400000, 0xf9400000, 0xfd400000) else 0
+            if not i or restore(words[i - 1]) != 2:
+                return False
+            j, frame = i - 1, False
+            while j >= 0 and restore(words[j]):
+                frame |= words[j] & 0xffc07fff in (0xa9407bfd, 0xa8c07bfd)  # LDP x29, x30, [SP, #imm] or [SP], #imm
+                j -= 1
+            reg = (words[i] >> 5) & 31
+            load = last_write(reg, j + 1, max(j - 11, 0))
+            return (frame and last_write(reg, i, j + 1) is None and load is not None
+                    and words[load] & 0xffc0001f == 0xf9400000 | reg)
+
         for i, w in enumerate(words):
             pc = addr + i * 4
             rd, rn = w & 31, (w >> 5) & 31
@@ -578,10 +621,10 @@ def masked(m, resolve, addr, size):
             def target(t, keep):
                 return (keep, resolve(t)) if not addr <= t < end else w
 
-            def use(reg, t, keep):
+            def use(reg, t, keep, load=None):
                 cands = page[reg]
                 known = [c for c in cands if c is not UNKNOWN]
-                targets = tuple(resolve(p + t) for p, _ in known)
+                targets = tuple(resolve(p + t, load) if load else resolve(p + t) for p, _ in known)
                 for (_, at), name in zip(known, targets):
                     uses.setdefault(at, []).append(name)
                 out.append((w if opaque or UNKNOWN in cands else keep, targets))
@@ -625,7 +668,8 @@ def masked(m, resolve, addr, size):
                     exact[rd] = a
             elif w & 0x3b000000 == 0x39000000 and rn in page:  # load or store, unsigned offset, after ADRP
                 scale = 4 if w & 0x04800000 == 0x04800000 else w >> 30  # 128-bit SIMD, or the size
-                use(rn, ((w >> 10) & 0xfff) << scale, w & 0xffc003ff)
+                # it reads 1 << scale bytes (nothing stores into __TEXT, where resolver uses them)
+                use(rn, ((w >> 10) & 0xfff) << scale, w & 0xffc003ff, 1 << scale)
                 if not w & 0x04000000 and w & 0x00c00000:  # a general register load (opc != 00)
                     drop(rd)
             else:
@@ -635,7 +679,7 @@ def masked(m, resolve, addr, size):
                     drop(*CALL_CLOBBERED)
                 elif w & 0xfffffc1f == 0xd61f0000:  # BR
                     targets = jump_table(i)
-                    if targets is None:
+                    if targets is None and not tail_call(i):
                         opaque = True  # where it goes is unknown: every use keeps its offset
                     for t in targets or ():
                         branch(t)
@@ -1165,10 +1209,13 @@ def fixtures():
     ret = 0xd65f03c0
     failed = []
 
-    def check(name, a, b, names_a, names_b, tables=None):
+    def same(a, b, names_a, names_b, tables=None):
         size = len(a) * 4
-        if masked(Fixture(a, tables), lambda t: names_a.get(t, f"@{t:#x}"), 0, size) == \
-           masked(Fixture(b, tables), lambda t: names_b.get(t, f"@{t:#x}"), 0, size):
+        return masked(Fixture(a, tables), lambda t, load=None: names_a.get(t, f"@{t:#x}"), 0, size) == \
+            masked(Fixture(b, tables), lambda t, load=None: names_b.get(t, f"@{t:#x}"), 0, size)
+
+    def check(name, a, b, names_a, names_b, tables=None):
+        if same(a, b, names_a, names_b, tables):
             failed.append(name)
 
     # an LSE atomic writes its Rt: x1's page is gone, and the ADD's offset is the change
@@ -1199,6 +1246,30 @@ def fixtures():
     check("a BR that isn't a jump table's", stray(0x10), stray(0x20),
           {0x3010: "Q"}, {0x3020: "Q"}, {0x2000: [7 * 4]})
 
+    # jdrly/gw2-on-mac#133: a call through a pointer after the epilogue leaves the function, so the
+    # load after the BR, reached only by the CBZ, has one way in and its offset masked: the same
+    # target at another page offset is equal. A BR after anything less than an epilogue stays a branch to
+    # anywhere, and a tail call through another pointer is a change.
+    def tail(imm, load=0xf9400030, before=(0xa8c17bfd,)):  # ldr x16, [x1]; ldp x29, x30, [sp], #16
+        return [adrp(9, 1), 0xa9bf7bfd, 0xb4000000 | (3 + len(before)) << 5,  # x9 = page 0x1000; stp x29, x30,
+                load, *before, br(16),                        # [sp, #-16]!; cbz x0 to the LDR after br x16
+                0xf9400000 | imm // 8 << 10 | 9 << 5,         # ldr x0, [x9, #imm]
+                0xa8c17bfd, ret]
+    if not same(tail(0x10), tail(0x20), {0x1010: "X"}, {0x1020: "X"}):
+        failed.append("a load of one target at another page offset, after a tail call")
+    check("a tail call through another pointer", tail(0x10), tail(0x10, 0xf9400430), {0x1010: "X"}, {0x1010: "X"})
+    global_ptr = 0xf9400000 | 1 << 10 | 9 << 5 | 16  # ldr x16, [x9, #8]
+    check("a tail call through a pointer in another global", tail(0x10, global_ptr), tail(0x10, global_ptr),
+          {0x1008: "A", 0x1010: "X"}, {0x1008: "B", 0x1010: "X"})
+    for what, before in (("without the x29 and x30 pair", (0xa8c153f3,)),       # ldp x19, x20, [sp], #16
+                         ("with SP not given back", (0xa9407bfd,)),             # ldp x29, x30, [sp]
+                         ("with a MOV after the epilogue", (0xa8c17bfd, 0xaa0103e0)),  # mov x0, x1
+                         ("that restores the BR's register", (0xf94007f0, 0xa8c17bfd))):  # ldr x16, [sp, #8]
+        check(f"a BR after an epilogue {what}", tail(0x10, before=before), tail(0x20, before=before),
+              {0x1010: "X"}, {0x1020: "X"})
+    check("a BR after an epilogue on a register not loaded", tail(0x10, 0xaa0103f0), tail(0x20, 0xaa0103f0),  # mov x16, x1
+          {0x1010: "X"}, {0x1020: "X"})
+
     # two arrays without symbols that start alike, each also used at +4: a use of either stands
     # for all of it, not for the 4 bytes before the other use
     const = MachO.__new__(MachO)
@@ -1209,6 +1280,34 @@ def fixtures():
     name = const.resolver()
     if name(0x4000) == name(0x4020):
         failed.append("arrays that start alike, cut by uses inside them")
+
+    # jdrly/gw2-on-mac#133: a constant without a symbol, loaded by a function at 0x1000 from page
+    # 0x4000, is named by the bytes the load reads. In <before> and <after> the same 8 bytes sit at
+    # other places with other neighbours, so by their extent they are named apart. Other bytes, a
+    # wider load (LDR Q) that reads the other neighbours, and an address taken with ADD, whose
+    # width isn't known, differ.
+    def const_file(at, before, value, after, use, scale):
+        """masked() of adrp x8, 0x4000; <use> x0, [x8, #at] (or add x0, x8, #at); ret, with
+        __TEXT,__const at 0x4000 holding <before>, <value>, <after>"""
+        f = MachO.__new__(MachO)
+        f.data = bytes(16) + struct.pack("<3I", adrp(8, 3), use | at // scale << 10 | 8 << 5, ret) \
+            + bytes(before + value + after)
+        f.sections = [dict(name="__TEXT,__text", addr=0x1000, size=12, offset=16, type=0, reserved1=0, reserved2=0),
+                      dict(name="__TEXT,__const", addr=0x4000, size=len(f.data) - 28, offset=28, type=0,
+                           reserved1=0, reserved2=0)]
+        f.syms, f.indirect = [], []
+        return masked(f, f.resolver(), 0x1000, 12)
+    k = [0x00, 0x01, 0x00, 0x80, 0x01, 0x00, 0x00, 0x00]  # syscall.c's stub exception code and flags
+    ldr_d, ldr_q, add_x = (0xfd400000, 8), (0x3dc00000, 16), (0x91000000, 1)
+    a, b = (16, [0x11] * 16, k, [0x22] * 8), (32, [0x33] * 32, k, [0x44] * 8)
+    if const_file(*a, *ldr_d) != const_file(*b, *ldr_d):
+        failed.append("one constant's 8 bytes loaded from places with other neighbours")
+    if const_file(*a, *ldr_d) == const_file(16, [0x11] * 16, k[:7] + [1], [0x22] * 8, *ldr_d):
+        failed.append("a constant without a symbol, other bytes loaded")
+    if const_file(*a, *ldr_q) == const_file(*b, *ldr_q):
+        failed.append("a constant without a symbol, a 16-byte load that reads other neighbours")
+    if const_file(*a, *add_x) == const_file(*b, *add_x):
+        failed.append("a constant without a symbol, its address taken with other neighbours")
     return failed
 
 
@@ -1842,10 +1941,14 @@ def structural_gate(mine, theirs, r):
             f"exports other than the engine's (mine / the engine's): {listing(moved)}")
     # the same functions paired, by the engine's names
     pm, pt = {nt[k]: fm[nm[k]] for k in set(nm) & set(nt)}, {nt[k]: ft[nt[k]] for k in set(nm) & set(nt)}
-    differ = differing(mine, theirs, pm, pt)
-    line = f"structural, {len(differ)} of {len(ft)} functions differ from the engine's file"
+    differ, by_bytes = differing(mine, theirs, pm, pt)
+    line = (f"structural, {len(differ)} of {len(ft)} functions differ from the engine's file, "
+            f"{len(by_bytes)} more only in the name of a constant they load the same bytes from")
     print(f"- report: {len(differ)} of the {len(ft)} functions differ in their bytes with the addresses masked, "
           f"the other compiler's doing and not a check" + (f": {listing(differ)}" if differ else ""))
+    print(f"- report: {len(by_bytes)} more differ only in the name of a constant without a symbol, from which "
+          f"their loads read the same bytes; named by its extent, as before jdrly/gw2-on-mac#133, they would differ"
+          + (f": {listing(by_bytes)}" if by_bytes else ""))
     pairs = [(a, theirs.section(a["name"])) for a in mine.sections if theirs.section(a["name"])]
     sizes = [f"{a['name']} {a['size']:#x} / {b['size']:#x}" for a, b in pairs if a["size"] != b["size"]]
     print(f"- report: sections of another size (mine / the engine's): {listing(sizes) if sizes else 'none'}")
@@ -1855,6 +1958,8 @@ def structural_gate(mine, theirs, r):
     print(f"- report: other sections whose bytes differ: {listing(other) if other else 'none'}")
     for d in differ:  # all of them, in the job's log
         print(f"differs from the engine's: {d}", file=sys.stderr)
+    for d in by_bytes:
+        print(f"only a constant's name differs, the bytes loaded are the engine's: {d}", file=sys.stderr)
     return line
 
 
@@ -1920,11 +2025,22 @@ def unnumbered(funcs):
 
 
 def differing(mine, theirs, fm, ft):
-    """the functions both files have whose code differs with the addresses masked, by source and name"""
+    """the functions both files have whose code differs with the addresses masked, by source and
+    name; and those of the others that differ only in the name of a constant without a symbol:
+    their loads read the same bytes from it, and named by its extent, as before
+    jdrly/gw2-on-mac#133, it would differ"""
     rm, rt = mine.resolver(), theirs.resolver()
-    return [f"{obj}: {name[1:] if name.startswith('_') else name}"
-            for obj, name in sorted(set(fm) & set(ft), key=lambda k: (k[0] or "", k[1]))
-            if masked(mine, rm, *fm[(obj, name)]) != masked(theirs, rt, *ft[(obj, name)])]
+    by_extent = lambda resolve: lambda t, load=None: resolve(t)
+    em, et = by_extent(rm), by_extent(rt)
+    differ, by_bytes = [], []
+    for k in sorted(set(fm) & set(ft), key=lambda k: (k[0] or "", k[1])):
+        label = f"{k[0]}: {k[1][1:] if k[1].startswith('_') else k[1]}"
+        a = masked(mine, rm, *fm[k])
+        if a != masked(theirs, rt, *ft[k]):
+            differ.append(label)
+        elif "const bytes:" in repr(a) and masked(mine, em, *fm[k]) != masked(theirs, et, *ft[k]):
+            by_bytes.append(label)
+    return differ, by_bytes
 
 
 def diagnose(mine, theirs):
