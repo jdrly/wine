@@ -6,13 +6,13 @@
  * win32u reads both when a process starts. The second process, system DPI aware:
  * 1. Asks for the registry's mode, which rebuilds the display cache with its settings. The modes
  *    are then win32u's virtual ones, and the display's own mode is the physical one.
- * 2. Lists the sizes offered and picks 1366x768, or else the first size whose ratio to the display
- *    at this DPI has a term of 16 bits or more in lowest terms, as monitor_get_dpi() asks
- *    make_ratio() for it. The engine's make_ratio() asserts on that and the process ends.
+ * 2. Lists the sizes offered and picks one whose ratio to the display at this DPI has a term of
+ *    16 bits or more in lowest terms, as monitor_get_dpi() asks make_ratio() for it: 1366x768 when
+ *    it is such a size, or else the first. The engine's make_ratio() asserts on that and the process ends.
  *    It changes to that size and checks that the mode is the current one. Without such a size it
  *    says so and goes on.
- * 3. Changes to 640x480, or the first size with another aspect ratio than the display's, which
- *    is shown letterboxed. Clearing the cursor clip has to leave it on the mode, 0,0 to its size.
+ * 3. Changes to a size with another aspect ratio than the display's, which is shown letterboxed:
+ *    640x480 when it is one, or else the first. Clearing the cursor clip has to leave it on the mode, 0,0 to its size.
  *    The engine's win32u.so gives the server the whole display as the monitor's raw rect, so the
  *    cleared clip there takes in the bars.
  * 4. Goes back to the registry's mode and checks it is the one it started with.
@@ -123,11 +123,12 @@ static int second( void )
             if (modes[j].dmPelsWidth == m->dmPelsWidth && modes[j].dmPelsHeight == m->dmPelsHeight) break;
         if (j < i) continue;
         snprintf( sizes + strlen( sizes ), sizeof(sizes) - strlen( sizes ), " %lux%lu", m->dmPelsWidth, m->dmPelsHeight );
-        if (m->dmPelsWidth == 1366 && m->dmPelsHeight == 768) pick = m;
-        else if (!pick && (too_big( dpi, start.dmPelsWidth, m->dmPelsWidth ) || too_big( dpi, start.dmPelsHeight, m->dmPelsHeight )))
+        if ((too_big( dpi, start.dmPelsWidth, m->dmPelsWidth ) || too_big( dpi, start.dmPelsHeight, m->dmPelsHeight )) &&
+            (!pick || (m->dmPelsWidth == 1366 && m->dmPelsHeight == 768)))
             pick = m;
-        if (m->dmPelsWidth == 640 && m->dmPelsHeight == 480) letterbox = m;
-        else if (!letterbox && m->dmPelsWidth * start.dmPelsHeight != m->dmPelsHeight * start.dmPelsWidth) letterbox = m;
+        if (m->dmPelsWidth * start.dmPelsHeight != m->dmPelsHeight * start.dmPelsWidth &&
+            (!letterbox || (m->dmPelsWidth == 640 && m->dmPelsHeight == 480)))
+            letterbox = m;
     }
     printf( "gw2 test modeset: %lu modes at %lu bits, sizes%s\n", count, start.dmBitsPerPel, sizes );
 

@@ -10,7 +10,7 @@
  * - A ratio whose lowest terms fit comes back in lowest terms.
  * - Every mode from 320x200 up to the display's size, on seven displays at five DPIs, as
  *   monitor_get_dpi() asks for them (the DPI times the physical size, over the mode's): lowest
- *   terms where they fit, otherwise within 1/65535 of the ratio, and no assert.
+ *   terms where they fit, otherwise a relative error of at most 1/65535, and no assert.
  *
  * Prints "gw2 test ratio: passed" and exits 0, or names each case that failed and exits 1. */
 #include <assert.h>
@@ -111,7 +111,8 @@ static void best( const char *what, UINT num, UINT den )
     }
 }
 
-/* one term as monitor_get_dpi() asks for it: lowest terms where they fit, else within 1/65535 */
+/* one term as monitor_get_dpi() asks for it: lowest terms where they fit, else a relative error of
+ * at most 1/65535 */
 static int sweep_one( UINT dpi, UINT physical, UINT mode )
 {
     UINT num = dpi * physical, den = mode;
