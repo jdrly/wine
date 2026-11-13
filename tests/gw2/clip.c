@@ -14,7 +14,7 @@
  * (up to 5 s, else a failure of its own when counting) and pumps its messages. Without the Mac
  * driver it says so and passes. With WINE_HEAT_COUNT=1 and WINE_HEAT_EXE=clip.exe, each part in a
  * 5 s block of the dumper's of its own:
- * A. CALLS rounds of a 1 ms sleep and pumping its messages until none is left;
+ * A. CALLS rounds of 1 ms of spinning on the clock and pumping its messages until none is left;
  * B. the same with ClipCursor(the window's client area) before each pump.
  * It reads this thread's two blocks in heat-requests-*.log. B must have CALLS set_cursor requests
  * with a clip rectangle and at least CALLS get_message requests, so the clip messages came to this
@@ -124,6 +124,19 @@ static struct block wait_block( const char *path, int blocks )
     return block;
 }
 
+/* 1 ms on the clock, spinning: on GitHub's macOS runner Sleep( 1 ) took about 14.6 ms, so 1,000
+   rounds no longer fit in one of the dumper's blocks. The millisecond gives the server time to see a
+   byte in the event pipe before the next round. */
+static void spin_1ms(void)
+{
+    LARGE_INTEGER freq, start, now;
+
+    QueryPerformanceFrequency( &freq );
+    QueryPerformanceCounter( &start );
+    do QueryPerformanceCounter( &now );
+    while (now.QuadPart - start.QuadPart < freq.QuadPart / 1000);
+}
+
 static void pump(void)
 {
     MSG msg;
@@ -143,7 +156,7 @@ static DWORD rounds( const RECT *clip )
 
     for (i = 0; i < CALLS; i++)
     {
-        Sleep( 1 );
+        spin_1ms();
         if (clip && !ClipCursor( clip )) FAIL( "ClipCursor %d: error %lu", i, GetLastError() );
         pump();
     }
