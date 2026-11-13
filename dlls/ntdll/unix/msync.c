@@ -392,6 +392,7 @@ static inline NTSTATUS msync_wait_single( int obj, void *obj_shm, const unsigned
     int ret, val = 0;
     ULONGLONG ns_timeleft = 0;
     uint64_t word;
+    unsigned long long start;  /* jdrly/gw2-on-mac#99 */
 
     do
     {
@@ -422,6 +423,7 @@ static inline NTSTATUS msync_wait_single( int obj, void *obj_shm, const unsigned
             ns_timeleft = update_timeout( end ) * 100;
             if (!ns_timeleft) return STATUS_TIMEOUT;
         }
+        start = heat_start();
         if (is_event( obj_shm ))
             ret = ulock_wait( UL_COMPARE_AND_WAIT64_SHARED | ULF_NO_ERRNO, obj_shm, word, ns_timeleft );
         else if ((heat_mode & HEAT_WAKE_SKIP) && ((struct semaphore *)obj_shm)->msync_type == MSYNC_SEMAPHORE)
@@ -433,6 +435,7 @@ static inline NTSTATUS msync_wait_single( int obj, void *obj_shm, const unsigned
         }
         else
             ret = ulock_wait( UL_COMPARE_AND_WAIT_SHARED | ULF_NO_ERRNO, obj_shm, val, ns_timeleft );
+        if (start) heat_wait_slept( start );
     } while (ret == -EINTR || ret == -EFAULT);
 
     if (ret == -ETIMEDOUT)
@@ -474,6 +477,7 @@ static NTSTATUS msync_wait_multiple( const int *objs, void **objs_shm, const uns
     int ret, val;
     int *addr = shm_tid_map + tid;
     ULONGLONG ns_timeleft = 0;
+    unsigned long long start;  /* jdrly/gw2-on-mac#99 */
     mach_msg_return_t mr;
     unsigned int msgh_id;
     int total_count = count + (alert_obj ? 1 : 0);
@@ -530,7 +534,9 @@ static NTSTATUS msync_wait_multiple( const int *objs, void **objs_shm, const uns
                 return STATUS_TIMEOUT;
             }
         }
+        start = heat_start();
         ret = ulock_wait( UL_COMPARE_AND_WAIT_SHARED | ULF_NO_ERRNO, addr, 1, ns_timeleft );
+        if (start) heat_wait_slept( start );
         val = __atomic_load_n( addr, __ATOMIC_ACQUIRE );
         if (!val)
             break;
@@ -825,6 +831,7 @@ static inline BOOL signal_all( void *shm, unsigned int shm_idx, ULONG release )
 {
     __thread static mach_msg_header_t send_header;
     struct event *event_obj = (struct event *)shm;
+    unsigned long long start;  /* jdrly/gw2-on-mac#99: each wake call timed while counting */
     int ret;
 
     if (release && heat_skip_wake( shm_idx, &((struct semaphore *)shm)->refcount ))
@@ -834,15 +841,18 @@ static inline BOOL signal_all( void *shm, unsigned int shm_idx, ULONG release )
         /* at most one thread for each count released, until a call finds no waiter */
         do
         {
+            start = heat_start();
             ret = __ulock_wake( UL_COMPARE_AND_WAIT_SHARED | ULF_NO_ERRNO, shm, 0 );
-            heat_count( ret == -ENOENT ? HC_WAKE_NONE : HC_WAKE_ONE );
+            if (start) heat_time( ret == -ENOENT ? HC_WAKE_NONE : HC_WAKE_ONE, HT_WAKE, start );
         } while (--release && ret != -ENOENT);
     }
     else
     {
+        start = heat_start();
         ret = __ulock_wake( (is_event( shm ) ? UL_COMPARE_AND_WAIT64_SHARED : UL_COMPARE_AND_WAIT_SHARED) |
                             ULF_WAKE_ALL | ULF_NO_ERRNO, shm, 0 );
-        if (ret == -ENOENT) heat_count( HC_WAKE_NONE );
+        /* events apart from wake_none, which counts semaphores and mutexes */
+        if (start) heat_wake_done( is_event( shm ), ret != -ENOENT, start );
     }
 
     if (!__atomic_load_n( &event_obj->multiple_waiters, __ATOMIC_SEQ_CST ))
@@ -893,6 +903,7 @@ NTSTATUS msync_set_event_obj( int obj, LONG *prev_state )
     struct event *event = get_shm( obj );
     LONG current;
 
+    heat_count( HC_EVENT_SET );  /* jdrly/gw2-on-mac#99 */
     if (!(current = __atomic_exchange_n( &event->signaled, 1, __ATOMIC_SEQ_CST )))
         signal_all( (void *)event, obj, 0 );
 
@@ -1099,6 +1110,7 @@ NTSTATUS msync_wait_objs( const DWORD count, const int *objs, BOOLEAN wait_any,
     struct deadline end;
     int i, ret;
 
+    heat_wait_begun( timeout );  /* jdrly/gw2-on-mac#99 */
     current_tid = GetCurrentThreadId();
 
     if (alert_obj)
@@ -1323,7 +1335,12 @@ tryagain:
                      * this one was woken without taking the count: pass the wake on, so a single
                      * waiter on the same semaphore doesn't miss it. */
                     if (status == STATUS_SUCCESS && (heat_mode & HEAT_WAKE_ONE) && event->msync_type == MSYNC_SEMAPHORE)
+                    {
+                        unsigned long long start = heat_start();  /* jdrly/gw2-on-mac#99 */
+
                         __ulock_wake( UL_COMPARE_AND_WAIT_SHARED | ULF_NO_ERRNO, objs_shm[i], 0 );
+                        if (start) heat_add_time( HT_WAKE, start );
+                    }
                 }
 
                 if (status == STATUS_TIMEOUT) return STATUS_TIMEOUT;

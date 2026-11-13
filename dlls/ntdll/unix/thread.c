@@ -2143,6 +2143,7 @@ static void set_native_thread_name( HANDLE handle, const UNICODE_STRING *name )
     len = ntdll_wcstoumbs( name->Buffer, name->Length / sizeof(WCHAR), nameA, sizeof(nameA) - 1, FALSE );
     nameA[len] = '\0';
     pthread_setname_np( nameA );
+    heat_thread_named( nameA );  /* jdrly/gw2-on-mac#99 */
 #elif defined(__FreeBSD__)
     unsigned int status;
     char nameA[64];

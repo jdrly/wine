@@ -3653,8 +3653,21 @@ NTSTATUS WINAPI NtAlertThreadByThreadId( HANDLE tid )
 #ifdef USE_FUTEX
     {
         LONG *futex = &entry->futex;
-        if (!InterlockedOr( futex, get_alert_source() ))
-            futex_wake_one( futex );
+        unsigned long long start;
+
+        if (InterlockedOr( futex, get_alert_source() ))
+        {
+            heat_count( HC_ALERT );
+            return STATUS_SUCCESS;
+        }
+        /* jdrly/gw2-on-mac#99: the wake call, timed while counting */
+        start = heat_start();
+        futex_wake_one( futex );
+        if (start)
+        {
+            heat_add( HC_ALERT );
+            heat_time( HC_ALERT_WAKE, HT_ALERT, start );
+        }
         return STATUS_SUCCESS;
     }
 #elif defined(HAVE_KQUEUE)
@@ -3722,6 +3735,7 @@ NTSTATUS WINAPI NtWaitForAlertByThreadId( const void *address, const LARGE_INTEG
         LONG alerts;
 #endif
         ULONGLONG end;
+        unsigned long long start;  /* jdrly/gw2-on-mac#99 */
         int ret;
 
 #ifdef __aarch64__
@@ -3772,14 +3786,15 @@ NTSTATUS WINAPI NtWaitForAlertByThreadId( const void *address, const LARGE_INTEG
 
                 timespec.tv_sec = timeleft / (ULONGLONG)TICKSPERSEC;
                 timespec.tv_nsec = (timeleft % TICKSPERSEC) * 100;
-                heat_count( HC_LOCK_SLEEP );
+                start = heat_start();
                 ret = futex_wait( futex, 0, &timespec );
             }
             else
             {
-                heat_count( HC_LOCK_SLEEP );
+                start = heat_start();
                 ret = futex_wait( futex, 0, NULL );
             }
+            if (start) heat_lock_slept( start );  /* keeps errno */
 
             if (ret == -1 && errno == ETIMEDOUT) return STATUS_TIMEOUT;
         }
