@@ -13,11 +13,12 @@
  * The thread first releases a semaphore RELEASES times, so that it is the game thread by the
  * session report's rule (the most releases). It shows a window, makes it the foreground window
  * (up to 5 s, else a failure of its own when counting) and pumps its messages. Without the Mac
- * driver it says so and passes. With WINE_HEAT_COUNT=1 and WINE_HEAT_EXE=clip.exe, each part in a
- * 5 s block of the dumper's of its own:
+ * driver it says so and passes. With WINE_HEAT_COUNT=1 and WINE_HEAT_EXE=clip.exe, two parts, each
+ * starting right after one of the dumper's blocks of this thread:
  * A. CALLS rounds of 1 ms of spinning on the clock and pumping its messages until none is left;
  * B. the same with ClipCursor(the window's client area) before each pump.
- * It reads this thread's two blocks in heat-requests-*.log. B must have CALLS set_cursor requests
+ * For each part it adds up this thread's blocks in heat-requests-*.log from the part's start to the
+ * first block written after it, however many there are. B must have CALLS set_cursor requests
  * with a clip rectangle and at least CALLS get_message requests, so the clip messages came to this
  * thread. Then by the switches: with WINE_MACDRV_CLIP=changes or WINE_MACDRV_CALL=quiet, B has at
  * most CALLS / 100 more set_queue_mask poll requests than A; with neither, at least CALLS / 2 more,
@@ -28,6 +29,7 @@
  * "not applied" warnings, which say that the runner refused the clip itself.
  *
  * Prints "gw2 test clip: passed" and exits 0, or names what failed and exits 1. */
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -79,55 +81,71 @@ static long long field( const char *line, const char *name )
     return (p = strstr( line, key )) ? _atoi64( p + strlen( key ) ) : 0;
 }
 
-/* the number of this thread's blocks in <path>, and the last one's counts in <last> */
-static int read_blocks( const char *path, struct block *last )
+/* the number of this thread's blocks in <path>, and in <sum> the counts of those after the first
+   <from> added up */
+static int read_blocks( const char *path, int from, struct block *sum )
 {
     char want[64], line[512];
     BOOL mine = FALSE;
     int blocks = 0;
     FILE *f;
 
+    memset( sum, 0, sizeof(*sum) );
     if (!(f = fopen( path, "r" ))) FAIL( "can't open %s", path );
     snprintf( want, sizeof(want), "requests thread %04lx ", GetCurrentThreadId() );
     while (fgets( line, sizeof(line), f ))
     {
         if (!strncmp( line, "requests thread ", 16 ))
         {
-            if ((mine = !strncmp( line, want, strlen( want ) )))
-            {
-                blocks++;
-                memset( last, 0, sizeof(*last) );
-            }
+            if ((mine = !strncmp( line, want, strlen( want ) ))) blocks++;
             continue;
         }
-        if (!mine) continue;
-        if (!strncmp( line, "req set_cursor ", 15 )) last->set_cursor = _atoi64( line + 15 );
-        else if (!strncmp( line, "req get_message ", 16 )) last->get_message = _atoi64( line + 16 );
-        else if (!strncmp( line, "set_cursor ", 11 )) last->clip = field( line, "clip" );
-        else if (!strncmp( line, "get_message ", 12 )) last->internal = field( line, "internal" );
-        else if (!strncmp( line, "set_queue_mask ", 15 )) last->poll = field( line, "poll" );
+        if (!mine || blocks <= from) continue;
+        if (!strncmp( line, "req set_cursor ", 15 )) sum->set_cursor += _atoi64( line + 15 );
+        else if (!strncmp( line, "req get_message ", 16 )) sum->get_message += _atoi64( line + 16 );
+        else if (!strncmp( line, "set_cursor ", 11 )) sum->clip += field( line, "clip" );
+        else if (!strncmp( line, "get_message ", 12 )) sum->internal += field( line, "internal" );
+        else if (!strncmp( line, "set_queue_mask ", 15 )) sum->poll += field( line, "poll" );
     }
     fclose( f );
     return blocks;
 }
 
-/* wait until the dumper has written this thread's block number <blocks>, and return its counts */
-static struct block wait_block( const char *path, int blocks )
+/* wait until the dumper has written this thread's block number <blocks>; returns how many there are */
+static int wait_block( const char *path, int blocks )
 {
-    struct block block;
+    struct block sum;
     DWORD start = GetTickCount();
+    int n;
 
-    while (read_blocks( path, &block ) < blocks)
+    while ((n = read_blocks( path, INT_MAX, &sum )) < blocks)
     {
         if (GetTickCount() - start > 15000) FAIL( "no block %d of this thread in 15 s", blocks );
         Sleep( 20 );
     }
-    return block;
+    return n;
+}
+
+static DWORD rounds( const RECT *clip );
+
+/* one part: right after a block of this thread, the rounds; then the counts of every block from
+   there to the first one written after the rounds, added up. The waits between make no request the
+   test counts. */
+static struct block part( const char *path, const char *name, const RECT *clip )
+{
+    struct block sum;
+    int first = wait_block( path, read_blocks( path, INT_MAX, &sum ) + 1 ), last;
+    DWORD ms = rounds( clip );
+
+    last = wait_block( path, read_blocks( path, INT_MAX, &sum ) + 1 );
+    read_blocks( path, first, &sum );
+    printf( "gw2 test clip: part %s took %lu ms, %d blocks\n", name, ms, last - first );
+    return sum;
 }
 
 /* 1 ms on the clock, spinning: on GitHub's macOS runner Sleep( 1 ) took about 14.6 ms, so 1,000
-   rounds no longer fit in one of the dumper's blocks. The millisecond gives the server time to see a
-   byte in the event pipe before the next round. */
+   rounds took 14.6 s. The millisecond gives the server time to see a byte in the event pipe before
+   the next round. */
 static void spin_1ms(void)
 {
     LARGE_INTEGER freq, start, now;
@@ -171,11 +189,11 @@ int main( void )
     BOOL removed = env_is( "WINE_MACDRV_CLIP", "changes" ) || env_is( "WINE_MACDRV_CALL", "quiet" );
     char path[MAX_PATH * 2];
     struct block a, b;
-    DWORD start, ms;
+    DWORD start;
     RECT clip;
     HANDLE sem;
     HWND hwnd;
-    int i, n;
+    int i;
 
     setvbuf( stdout, NULL, _IONBF, 0 );
     if (!(sem = CreateSemaphoreW( NULL, 0, 0x7fffffff, NULL ))) FAIL( "CreateSemaphore: error %lu", GetLastError() );
@@ -223,14 +241,9 @@ int main( void )
 
     for (start = GetTickCount(); !find_log( path, sizeof(path) ); Sleep( 20 ))
         if (GetTickCount() - start > 15000) FAIL( "the dumper wrote no heat-requests-*.log in 15 s" );
-    /* start each part right after a block of this thread */
     wait_block( path, 1 );
-    n = read_blocks( path, &a );
-    wait_block( path, n + 1 );
-    if ((ms = rounds( NULL )) > 4000) FAIL( "part A took %lu ms, too long for one block", ms );
-    a = wait_block( path, n + 2 );
-    if ((ms = rounds( &clip )) > 4000) FAIL( "part B took %lu ms, too long for one block", ms );
-    b = wait_block( path, n + 3 );
+    a = part( path, "A", NULL );
+    b = part( path, "B", &clip );
     ClipCursor( NULL );
     pump();
     DestroyWindow( hwnd );
