@@ -588,22 +588,32 @@ void OnMainThread(dispatch_block_t block)
         }
         @finally
         {
-            finished = TRUE;
-            if (queue)
+            if (queue && call_quiet)
             {
                 /* GW2 on Mac (WINE_MACDRV_CALL=quiet): wake the caller through its kqueue, not
                    with a byte in the pipe the server watches. The server sees a byte at once and
                    sets the queue's driver bit, so the caller's next pump would drain nothing and
                    send one more set_queue_mask, even after the caller read the byte back. If the
-                   kqueue can't be triggered, the byte goes as before. */
+                   kqueue can't be triggered, the byte goes as before, under the queue's lock. The
+                   caller takes that lock once it sees finished, so it settles the pipe after the
+                   byte. */
                 struct kevent trigger;
 
                 EV_SET(&trigger, 0, EVFILT_USER, 0, NOTE_TRIGGER, 0, 0);
-                if (!call_quiet || kevent(queue->kq, &trigger, 1, NULL, 0, NULL) == -1)
+                [queue->eventsLock lock];
+                finished = TRUE;
+                if (kevent(queue->kq, &trigger, 1, NULL, 0, NULL) == -1)
                     [queue signalEventAvailable];
+                [queue->eventsLock unlock];
+            }
+            else if (queue)
+            {
+                finished = TRUE;
+                [queue signalEventAvailable];
             }
             else
             {
+                finished = TRUE;
                 dispatch_semaphore_signal(semaphore);
                 dispatch_release(semaphore);
             }

@@ -8,12 +8,15 @@
  * moves the cursor and reaches the driver (win32u calls it only for a move), and each is a
  * synchronous call to the main thread. Every BURST calls a thread activates its window and moves
  * it, and pumps its messages after every call, so focus and frame events reach the queues while
- * the other threads are waiting in their calls. The main thread waits for them. If a thread makes
- * no call for STUCK_MS, it prints how far each got and fails. Without GW2_TEST_CALLS, or without
- * the Mac driver, it says so and passes: the matrix runs every program.
+ * the other threads are waiting in their calls. The main thread waits for them. If a thread that
+ * is still running makes no call for STUCK_MS, or the threads aren't done in DEADLINE_MS, it
+ * prints how far each got and fails. Without GW2_TEST_CALLS, or without the Mac driver, it says
+ * so and passes: the matrix runs every program.
  *
- * The workflow counts the driver's handled events (channel event) besides, so the run shows that
- * events did arrive.
+ * It prints "workers start" and "workers done" around the threads' calls. The workflow counts the
+ * driver's handled events (channel event) between the two, so the run shows that events arrived
+ * while the threads made their calls. That makes it a stress test: it doesn't force any one
+ * interleaving, such as a wake that comes before the caller waits.
  *
  * Prints "gw2 test calls: passed" and exits 0, or names what failed and exits 1. */
 #include <stdio.h>
@@ -24,6 +27,7 @@
 #define CALLS    2000
 #define BURST    100
 #define STUCK_MS 10000
+#define DEADLINE_MS 30000
 
 static volatile LONG done[THREADS];
 static volatile LONG failed;
@@ -76,8 +80,9 @@ int main( void )
 {
     WNDCLASSW cls = { .lpfnWndProc = DefWindowProcW, .lpszClassName = L"gw2 test calls" };
     LONG last[THREADS] = {0};
+    DWORD moved[THREADS], start, now, rc;
     HANDLE threads[THREADS];
-    DWORD start, moved, rc;
+    const char *why;
     HWND probe;
     int i;
 
@@ -100,28 +105,43 @@ int main( void )
     }
     if (probe) DestroyWindow( probe );
 
+    printf( "gw2 test calls: workers start\n" );
     start = GetTickCount();
     for (i = 0; i < THREADS; i++)
+    {
+        moved[i] = start;
         if (!(threads[i] = CreateThread( NULL, 0, worker, (void *)(INT_PTR)i, 0, NULL )))
         {
             printf( "gw2 test calls: CreateThread failed (error %lu)\n", GetLastError() );
             return 1;
         }
-    for (moved = GetTickCount();;)
+    }
+    for (;;)
     {
-        rc = WaitForMultipleObjects( THREADS, threads, TRUE, 500 );
+        rc = WaitForMultipleObjects( THREADS, threads, TRUE, 200 );
         if (rc < WAIT_OBJECT_0 + THREADS) break;
+        now = GetTickCount();
+        why = NULL;
         for (i = 0; i < THREADS; i++)
-            if (done[i] != last[i]) { last[i] = done[i]; moved = GetTickCount(); }
-        if (GetTickCount() - moved > STUCK_MS)
+        {
+            if (done[i] != last[i])
+            {
+                last[i] = done[i];
+                moved[i] = now;
+            }
+            else if (now - moved[i] > STUCK_MS && WaitForSingleObject( threads[i], 0 ) == WAIT_TIMEOUT)
+                why = "a running thread made no call in 10 s: a caller is waiting for a wakeup that never came";
+        }
+        if (!why && now - start > DEADLINE_MS) why = "the threads weren't done in 30 s";
+        if (why)
         {
             for (i = 0; i < THREADS; i++)
                 printf( "gw2 test calls: thread %d made %ld of %d calls\n", i, done[i], CALLS );
-            printf( "gw2 test calls: no thread made a call in %d ms: a caller is waiting for a wakeup that "
-                    "never came\n", STUCK_MS );
+            printf( "gw2 test calls: %s\n", why );
             ExitProcess( 1 );
         }
     }
+    printf( "gw2 test calls: workers done\n" );
     if (failed) return 1;
     printf( "gw2 test calls: %d threads made %d synchronous calls each in %lu ms\n", THREADS, CALLS,
             GetTickCount() - start );
