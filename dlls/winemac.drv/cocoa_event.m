@@ -28,6 +28,7 @@
 #import "cocoa_event.h"
 #import "cocoa_app.h"
 #import "cocoa_window.h"
+#import "cocoa_calls.h"
 
 #pragma GCC diagnostic ignored "-Wdeclaration-after-statement"
 
@@ -155,6 +156,15 @@ static const OSType WineHotKeySignature = 'Wine';
             {
                 [self release];
                 return nil;
+            }
+
+            /* GW2 on Mac (WINE_MACDRV_CALL=quiet): OnMainThread's completion wakes the caller
+               through this event. If it can't be added, the completion writes its byte as before. */
+            if (call_quiet)
+            {
+                EV_SET(&kev, 0, EVFILT_USER, EV_ADD | EV_CLEAR, 0, 0, 0);
+                if (kevent(kq, &kev, 1, NULL, 0, NULL) == -1)
+                    WARN("%s: no user event in the kqueue: %s\n", debugstr_cf(self), strerror(errno));
             }
         }
         return self;
@@ -578,11 +588,32 @@ void OnMainThread(dispatch_block_t block)
         }
         @finally
         {
-            finished = TRUE;
-            if (queue)
+            if (queue && call_quiet)
+            {
+                /* GW2 on Mac (WINE_MACDRV_CALL=quiet): wake the caller through its kqueue, not
+                   with a byte in the pipe the server watches. The server sees a byte at once and
+                   sets the queue's driver bit, so the caller's next pump would drain nothing and
+                   send one more set_queue_mask, even after the caller read the byte back. If the
+                   kqueue can't be triggered, the byte goes as before, under the queue's lock. The
+                   caller takes that lock once it sees finished, so it settles the pipe after the
+                   byte. */
+                struct kevent trigger;
+
+                EV_SET(&trigger, 0, EVFILT_USER, 0, NOTE_TRIGGER, 0, 0);
+                [queue->eventsLock lock];
+                finished = TRUE;
+                if (kevent(queue->kq, &trigger, 1, NULL, 0, NULL) == -1)
+                    [queue signalEventAvailable];
+                [queue->eventsLock unlock];
+            }
+            else if (queue)
+            {
+                finished = TRUE;
                 [queue signalEventAvailable];
+            }
             else
             {
+                finished = TRUE;
                 dispatch_semaphore_signal(semaphore);
                 dispatch_release(semaphore);
             }
@@ -607,6 +638,16 @@ void OnMainThread(dispatch_block_t block)
                 if (!finished)
                     kevent(queue->kq, NULL, 0, &kev, 1, NULL);
             }
+        }
+
+        /* GW2 on Mac (WINE_MACDRV_CALL=quiet): the loop above read every byte while it looked for
+           queries, also those of the events it left queued. Leave one byte if an event waits, so
+           the server wakes the thread for it, else none. */
+        if (call_quiet)
+        {
+            [queue->eventsLock lock];
+            event_pipe_settle(queue->fds, [queue->events count] != 0);
+            [queue->eventsLock unlock];
         }
     }
     else

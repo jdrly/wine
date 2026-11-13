@@ -26,6 +26,7 @@
 #endif
 
 #include "config.h"
+#include "cocoa_calls.h"
 #include "macdrv.h"
 
 #include <IOKit/pwr_mgt/IOPMLib.h>
@@ -37,6 +38,18 @@ static pthread_mutex_t win_data_mutex;
 static CFMutableDictionaryRef win_datas;
 
 static unsigned int activate_on_focus_time;
+
+/* GW2 on Mac (WINE_MACDRV_VIEW=changes): changes whenever a Cocoa window or a client view comes or
+   goes, so that a client surface's record of what it sent to its view (struct
+   macdrv_client_surface) never matches a new object at an old one's address. Guarded by the window
+   data lock, never 0. */
+static unsigned int client_view_serial = 1;
+
+/* The window data lock must be held. */
+static void client_views_changed(void)
+{
+    if (!++client_view_serial) client_view_serial = 1;
+}
 
 
 /* per-monitor DPI aware NtUserSetWindowPos call */
@@ -491,6 +504,7 @@ static void create_cocoa_window(struct macdrv_win_data *data)
           wine_dbgstr_rect(&data->rects.visible), wine_dbgstr_rect(&data->rects.client));
 
     data->cocoa_window = macdrv_create_cocoa_window(&wf, frame, data->hwnd, thread_data->queue);
+    client_views_changed();
     if (!data->cocoa_window) goto done;
     if (data->shaped) set_shape_pending(data, TRUE);
 
@@ -525,6 +539,7 @@ static void destroy_cocoa_window(struct macdrv_win_data *data)
 
     macdrv_destroy_cocoa_window(data->cocoa_window);
     data->cocoa_window = 0;
+    client_views_changed();
     data->on_screen = FALSE;
     data->shape_pending = FALSE;
 }
@@ -1105,6 +1120,12 @@ static void macdrv_client_surface_detach(struct client_surface *client)
                 data->client_view = NULL;
             release_win_data(data);
         }
+
+        /* the view goes, and another can come at its address */
+        pthread_mutex_lock(&win_data_mutex);
+        surface->sent_serial = 0;
+        client_views_changed();
+        pthread_mutex_unlock(&win_data_mutex);
 
         /* the surface is going away; WineMetalLayer and mtld3d read it from the view */
         macdrv_set_view_d3dmetal_client_surface(surface->cocoa_view, NULL);
@@ -1830,9 +1851,9 @@ static void macdrv_client_surface_update(struct client_surface *client)
 {
     struct macdrv_client_surface *surface = impl_from_client_surface(client);
     HWND hwnd = client->hwnd, toplevel = client->toplevel, above_hwnd = NULL;
-    WineContentView *above_view = NULL;
+    WineContentView *above_view = NULL, *superview;
     struct macdrv_win_data *data;
-    bool moved;
+    bool moved, send;
 
     TRACE("%s\n", debugstr_client_surface(client));
 
@@ -1861,11 +1882,23 @@ static void macdrv_client_surface_update(struct client_surface *client)
     /* DXMT updates its surface for every frame, so only a view that moves
      * moves the client overlay. */
     moved = surface->presented && !EqualRect(&surface->view_rect, &client->monitor_rect);
+    superview = toplevel == hwnd ? NULL : data->client_view;
+    /* GW2 on Mac (WINE_MACDRV_VIEW=changes): each setter is a block for the main thread, so send
+       them only when something differs from what this surface sent last */
+    send = !view_changes || surface->sent_serial != client_view_serial ||
+           !EqualRect(&surface->view_rect, &client->monitor_rect) || surface->sent_superview != superview ||
+           surface->sent_window != data->cocoa_window || surface->sent_above != above_view;
     surface->view_rect = client->monitor_rect;
 
-    macdrv_set_view_frame(surface->cocoa_view, cgrect_from_rect(client->monitor_rect));
-    macdrv_set_view_superview(surface->cocoa_view, toplevel == hwnd ? NULL : data->client_view, data->cocoa_window,
-                              above_view, NULL);
+    if (send)
+    {
+        surface->sent_superview = superview;
+        surface->sent_window = data->cocoa_window;
+        surface->sent_above = above_view;
+        surface->sent_serial = client_view_serial;
+        macdrv_set_view_frame(surface->cocoa_view, cgrect_from_rect(client->monitor_rect));
+        macdrv_set_view_superview(surface->cocoa_view, superview, data->cocoa_window, above_view, NULL);
+    }
     release_win_data(data);
 
     if (moved) update_client_overlay(toplevel, false);

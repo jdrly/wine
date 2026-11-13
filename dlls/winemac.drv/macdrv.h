@@ -268,6 +268,13 @@ struct macdrv_client_surface
     bool                    presented;          /* has presented a frame */
     bool                    hidden;             /* see update_client_view_hidden, guarded by the window data lock */
     unsigned int            hidden_serial;      /* see update_client_view_hidden, guarded by the window data lock */
+    /* GW2 on Mac (WINE_MACDRV_VIEW=changes): what the last update sent to cocoa_view with its frame
+       view_rect, guarded by the window data lock. sent_serial is client_view_serial then, 0 before
+       the first update and after the detach. */
+    WineContentView        *sent_superview;
+    WineWindow             *sent_window;
+    WineContentView        *sent_above;
+    unsigned int            sent_serial;
 };
 
 extern struct macdrv_client_surface *impl_from_client_surface(struct client_surface *client);
