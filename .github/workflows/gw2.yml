@@ -36,6 +36,10 @@
 #     includes) the commit changes is the base build's, by its compile command, code, data,
 #     relocations and symbols, and the summary lists the other objects' changed functions and the
 #     changed inputs that touched them
+#   - on a pull request, before that, the commit its branch forked from, every object compiled
+#     again, and compare.py fork reports every function of the three files against this commit's
+#     by name, whichever object it is in: the same in place, moved with the same bytes and
+#     relocations, changed, new or gone (jdrly/gw2-on-mac#106). A report, never a gate.
 #   The per-function listing with masked addresses that follows a failed byte gate only names
 #   what differs; it is not the gate and never passes or fails a build.
 #   Artifacts ntdll-arm64-<commit> and macdrv-arm64-<commit>: ntdll.so or winemac.so, VERSION,
@@ -353,6 +357,25 @@ jobs:
           [[ $status == 1 ]] && grep -qF '`cocoa_window.m: -[WineContentView setColorImage:]`' "$RUNNER_TEMP/broken-winemac.md" &&
             ! grep '^  - `' "$RUNNER_TEMP/broken-winemac.md" | grep -v '^  - `cocoa_window\.m: '
 
+      # My build of the commit this branch forked from, for compare.py fork (jdrly/gw2-on-mac#106):
+      # the patched compare's base is the engine's commit, where my files don't exist, so it can't
+      # say whether a function moved to another file unchanged
+      - name: Build the commit this branch forked from
+        id: fork
+        if: ${{ !cancelled() && steps.base.outcome == 'success' && github.event_name == 'pull_request' }}
+        env:
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          fork=$(git -C "$SRC" merge-base "$COMMIT" "$PR_BASE")
+          "$GW2/wine.zsh" checkout "$fork"
+          rm -f "$BUILD"/dlls/ntdll/unix/*.o "$BUILD"/dlls/winemac.drv/*.o "$BUILD"/dlls/win32u/*.o "$BUILD"/dlls/win32u/dibdrv/*.o
+          "$GW2/wine.zsh" build
+          mkdir -p "$RUNNER_TEMP/fork-objects/ntdll" "$RUNNER_TEMP/fork-objects/winemac" "$RUNNER_TEMP/fork-objects/win32u/dibdrv"
+          cp -p "$BUILD"/dlls/ntdll/unix/*.o "$RUNNER_TEMP/fork-objects/ntdll/"
+          cp -p "$BUILD"/dlls/winemac.drv/*.o "$RUNNER_TEMP/fork-objects/winemac/"
+          cp -p "$BUILD"/dlls/win32u/*.o "$RUNNER_TEMP/fork-objects/win32u/"
+          cp -p "$BUILD"/dlls/win32u/dibdrv/*.o "$RUNNER_TEMP/fork-objects/win32u/dibdrv/"
+          echo "FORK=$fork" >>"$GITHUB_ENV"
       - name: Build this commit
         id: head
         if: ${{ !cancelled() && steps.base.outcome == 'success' }}
@@ -384,6 +407,12 @@ jobs:
               "$(cat "$RUNNER_TEMP/checkout-time")" \
               "${touched[@]}" >"$RUNNER_TEMP/compare-$lib.md" || status=1
             tee -a "$GITHUB_STEP_SUMMARY" <"$RUNNER_TEMP/compare-$lib.md"
+            # a report of its own file, so the Stage step's reading of compare-win32u.md stays the patched compare's
+            if [[ -n ${FORK:-} ]]; then
+              python3 -I "$GW2/compare.py" fork "$lib.so" "$RUNNER_TEMP/fork-objects/$lib" "$BUILD" "$FORK" \
+                >"$RUNNER_TEMP/fork-$lib.md" || status=1
+              tee -a "$GITHUB_STEP_SUMMARY" <"$RUNNER_TEMP/fork-$lib.md"
+            fi
           done
           exit "$status"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

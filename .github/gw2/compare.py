@@ -6,6 +6,7 @@
 #   compare.py patched <library> <mine> <engine-unix-dir> <source dir> <build dir> <base file>
 #                      <base objects> <base make log> <make log> <base Makefile> <Makefile>
 #                      <checkout time> [<changed file>...]
+#   compare.py fork <library> <fork objects> <build dir> <fork commit>
 #   compare.py selftest <engine-unix-dir>
 #
 # <library> is ntdll.so, winemac.so or win32u.so (LIBRARIES), <engine-unix-dir> the engine's
@@ -48,6 +49,13 @@
 #   With the baseline that makes the chain: the engine's file = my base build, byte for byte (or in
 #   its structure, with another toolchain), and my base build's objects = this build's, except the
 #   touched ones.
+# fork (jdrly/gw2-on-mac#106): a report, never a gate. On a pull request, my build of the commit
+#   the branch forked from, its objects copied to <fork objects>, against this commit's in <build
+#   dir>, built after it in the same tree. Every function of the library's objects is matched by name
+#   across objects, so a function that moved to another file shows as moved when every copy of it
+#   is one of the fork point's byte for byte (bytes and relocations, as patched compares them), and
+#   as changed otherwise. patched can't show that: its base is the engine's commit, where my files
+#   don't exist, so it lists each of them only as a new object.
 import bisect
 import contextlib
 import functools
@@ -925,14 +933,67 @@ def function_changes(base, head, label):
             removed.append(short + " (gone)")
         elif fb[name] != fh[name]:
             changed.append(short)
-            (cb, rb), (ch, rh) = fb[name], fh[name]
-            tb, th = {r[-1] for r in rb}, {r[-1] for r in rh}
-            cut = lambda ts: ", ".join(sorted(t[:60] for t in ts)[:3]) + (" …" if len(ts) > 3 else "") or "none"
-            CHANGED_HOW[short] = ("the same code with other branch distances" if branch_distances_only(cb, ch) else
-                                  f"other code, {len(cb)} / {len(ch)} bytes" if cb != ch else
-                                  f"the same code; relocation targets only the base's: {cut(tb - th)}; only mine: {cut(th - tb)}"
-                                  if tb != th else "the same code and targets, relocated at other places")
+            CHANGED_HOW[short] = changed_how(fb[name], fh[name])
     return changed, new, removed
+
+
+def changed_how(base, head):
+    """how two versions of a function, each (bytes, relocations), differ: other code, or the same
+    code with other relocation targets (those only the base's, and those only the head's) or the
+    same targets elsewhere"""
+    (cb, rb), (ch, rh) = base, head
+    tb, th = {r[-1] for r in rb}, {r[-1] for r in rh}
+    cut = lambda ts: ", ".join(sorted(t[:60] for t in ts)[:3]) + (" …" if len(ts) > 3 else "") or "none"
+    return ("the same code with other branch distances" if branch_distances_only(cb, ch) else
+            f"other code, {len(cb)} / {len(ch)} bytes" if cb != ch else
+            f"the same code; relocation targets only the base's: {cut(tb - th)}; only mine: {cut(th - tb)}"
+            if tb != th else "the same code and targets, relocated at other places")
+
+
+def fork_changes(base_objs, head_objs, load=MachO):
+    """my build of the commit a pull request forked from against my build of its head, from one tree
+    and one toolchain (jdrly/gw2-on-mac#106): every function of the library's objects by name,
+    through its bytes and relocations as function_changes() compares them, in whichever object it
+    is. <base_objs> and <head_objs> are object key -> path. A function whose objects differ from
+    the base's while each copy is one of the base's copies byte for byte has moved; a static inline
+    of a header has a copy in each object that calls it out of line. A copy in an object that had
+    the name in the base is held to that object's copy only, so two different statics of one name
+    stay apart, and two that swap objects both count as changed: the error goes toward listing
+    more, never toward hiding a change. Returns how many are the same
+    in place, and the moved, changed, new and gone ones as report lines; CHANGED_HOW says how each
+    changed one differs."""
+    def functions(objs):
+        out = {}
+        for key, path in sorted(objs.items()):
+            for name, body in object_functions(load(path)).items():
+                out.setdefault(name, {})[key] = body
+        return out
+
+    fb, fh = functions(base_objs), functions(head_objs)
+    same, moved, changed, new, gone = 0, [], [], [], []
+    for name in sorted(set(fb) | set(fh)):
+        short = name[1:] if name.startswith("_") else name
+        b, h = fb.get(name, {}), fh.get(name, {})
+        if not b:
+            new.append(f"{' '.join(sorted(h))}: {short} (new)")
+            continue
+        if not h:
+            gone.append(f"{' '.join(sorted(b))}: {short} (gone)")
+            continue
+        base_bodies = list(b.values())
+        held = True
+        for obj, body in sorted(h.items()):
+            if body == b.get(obj) or (obj not in b and body in base_bodies):
+                continue
+            held = False
+            line = f"{obj}: {short}" + ("" if obj in b else f" (was in {' '.join(sorted(b))})")
+            changed.append(line)
+            CHANGED_HOW[line] = changed_how(b.get(obj, base_bodies[0]), body)
+        if held and set(h) != set(b):
+            moved.append(f"{short}: {' '.join(sorted(b))} → {' '.join(sorted(h))}")
+        elif held:
+            same += 1
+    return same, moved, changed, new, gone
 
 
 def build_commands(log, lib):
@@ -1362,6 +1423,44 @@ def selftest(engine_dir):
     if got != ([], [], []):
         failed.append(f"touched object: __text at another address with the same functions, not {got}")
 
+    # the fork compare (jdrly/gw2-on-mac#106): two objects on each side, each function an ADRP and an
+    # ADD on _a (symbol 0) or _b (1), 8 bytes from the last. _f1 and _m stay; _f2 is changed on
+    # purpose, its ADD on x9; _f3 moves to b.o as it is; _g keeps its copy in a.o and gets one in
+    # b.o, as a header's static inline does; _h moves with its relocations on _b; _n goes, _k is new
+    def laid_out(funcs):
+        words, relocs = [], []
+        for i, (_, sym, other) in enumerate(funcs):
+            words += [0x90000008, 0x91000129 if other else 0x91000108]
+            relocs += [(8 * i, page | sym), (8 * i + 4, off | sym)]
+        return fake_object(struct.pack(f"<{len(words)}I", *words), relocs, b"",
+                           functions=tuple((n, 8 * i) for i, (n, _, _) in enumerate(funcs)))
+    objects = {"base a.o": laid_out([("_f1", 0, 0), ("_f2", 0, 0), ("_f3", 0, 0), ("_g", 0, 0), ("_h", 0, 0),
+                                     ("_n", 0, 0)]),
+               "base b.o": laid_out([("_m", 0, 0)]),
+               "head a.o": laid_out([("_f1", 0, 0), ("_f2", 0, 1), ("_g", 0, 0)]),
+               "head b.o": laid_out([("_m", 0, 0), ("_f3", 0, 0), ("_g", 0, 0), ("_h", 1, 0), ("_k", 0, 0)])}
+    try:
+        got = fork_changes({"a.o": "base a.o", "b.o": "base b.o"}, {"a.o": "head a.o", "b.o": "head b.o"},
+                           load=objects.get)
+    except Exception as e:
+        got = repr(e)
+    want = (2, ["f3: a.o → b.o", "g: a.o → a.o b.o"], ["a.o: f2", "b.o: h (was in a.o)"], ["b.o: k (new)"],
+            ["a.o: n (gone)"])
+    if got != want:
+        failed.append(f"fork compare: f2 changed, f3 and g moved, h changed on its way, k new and n gone, not {got}")
+    elif not (CHANGED_HOW["a.o: f2"].startswith("other code") and
+              CHANGED_HOW["b.o: h (was in a.o)"].startswith("the same code; relocation targets only the base's: _a")):
+        failed.append(f"fork compare: how f2 and h changed, not {CHANGED_HOW['a.o: f2']!r}, "
+                      f"{CHANGED_HOW['b.o: h (was in a.o)']!r}")
+    # two different statics named _s, one on _a in a.o and one on _b in b.o: kept, they are the same
+    # in place; swapped between the objects, each is held to its own object's and both changed
+    objects.update({"s a.o": laid_out([("_s", 0, 0)]), "s b.o": laid_out([("_s", 1, 0)])})
+    statics = lambda a, b: fork_changes({"a.o": "s a.o", "b.o": "s b.o"}, {"a.o": a, "b.o": b}, load=objects.get)
+    if statics("s a.o", "s b.o") != (1, [], [], [], []):
+        failed.append(f"fork compare: two statics of one name kept, not {statics('s a.o', 's b.o')}")
+    if statics("s b.o", "s a.o")[2] != ["a.o: s", "b.o: s"]:
+        failed.append(f"fork compare: two statics of one name swapped, not {statics('s b.o', 's a.o')}")
+
     # a string literal by its section and bytes: a string added before it renames its label (l_.str.1
     # to l_.str.2), which leaves the function as it is, with an addend or without. Other text,
     # another section with the same text, a literal without its NUL (other bytes up to the next NUL),
@@ -1747,20 +1846,42 @@ def selftest(engine_dir):
     for item in failed:
         print(f"- **FAIL**: {item}")
     print(f"selftest: {len(failed)} failed" if failed else
-          "selftest: the byte gate, the structural gate and the object compare see every change they must, and the masking fixtures hold")
+          "selftest: the byte gate, the structural gate, the object compare and the fork compare see every change they must, and the masking fixtures hold")
     return 1 if failed else 0
+
+
+def fork(lib, fork_dir, build_dir, commit):
+    """the fork mode's report: never a gate, naming why each listed function changed is the pull
+    request's job"""
+    spec = LIBRARIES[lib]
+    subdirs = spec.get("subdirs", ())
+    same, moved, changed, new, gone = fork_changes(object_files(fork_dir, subdirs),
+                                                   object_files(os.path.join(build_dir, spec["objects"]), subdirs))
+    print(f"### {lib} against my build of {commit}\n")
+    print(f"The commit this branch forked from and this one, built in one tree, every function of {lib}'s "
+          "objects compared by name through its bytes and relocations, wherever it is:\n")
+    print(f"- the same in place: {same}")
+    for title, items in (("moved, with the same bytes and relocations", moved), ("changed", changed),
+                         ("new", new), ("gone", gone)):
+        print(f"- {title}: {len(items)}")
+        for item in items:
+            print(f"  - `{item}`" + (f" ({CHANGED_HOW[item]})" if item in CHANGED_HOW else ""))
+    return 0
 
 
 def main():
     args = sys.argv[1:]
     if len(args) == 2 and args[0] == "selftest":
         return selftest(args[1])
+    if len(args) == 5 and args[0] == "fork" and args[1] in LIBRARIES:
+        return fork(*args[1:])
     if not ((args[:1] == ["baseline"] and (len(args) == 4 or (len(args) == 5 and args[4] in ("strict", "structural"))))
             or (len(args) >= 13 and args[0] == "patched")) or args[1] not in LIBRARIES:
         print("usage: compare.py baseline <library> <mine> <engine-unix-dir> [strict | structural]\n"
               "       compare.py patched <library> <mine> <engine-unix-dir> <source dir> <build dir> <base file> "
               "<base objects> <base make log> <make log> <base Makefile> <Makefile> <checkout time> "
               "[<changed file>...]\n"
+              "       compare.py fork <library> <fork objects> <build dir> <fork commit>\n"
               "       compare.py selftest <engine-unix-dir>\n"
               f"<library> is one of {', '.join(LIBRARIES)}", file=sys.stderr)
         return 2

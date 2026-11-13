@@ -1,5 +1,5 @@
 /*
- * GW2 on Mac: FEX's counters (FEX_PROFILESTATS=1) as heat.c and heatprof.c read them
+ * GW2 on Mac: FEX's counters (FEX_PROFILESTATS=1) as heatreq.c and heatprof.c read them
  *
  * No Wine header and nothing of the process: tests/gw2/native/fexstats.c builds it natively and
  * feeds it stats objects of its own.

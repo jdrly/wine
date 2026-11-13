@@ -203,7 +203,7 @@ static inline BOOL heat_skip_wake( unsigned int obj, const unsigned short *refco
 }
 
 /***********************************************************************
- *  the event pool (WINE_HEAT_EVPOOL), heat.c has the rules
+ *  the event pool (WINE_HEAT_EVPOOL), heatpool.c has the rules
  */
 extern BOOL heat_evpool_get_slow( HANDLE *handle, ACCESS_MASK access, const OBJECT_ATTRIBUTES *attr,
                                   EVENT_TYPE type, BOOLEAN state );
@@ -252,7 +252,7 @@ static inline void heat_evpool_forget( HANDLE handle )
 }
 
 /***********************************************************************
- *  the spins (WINE_HEAT_SPIN, jdrly/gw2-on-mac#45), heat.c has the rules
+ *  the spins (WINE_HEAT_SPIN, jdrly/gw2-on-mac#45), heatspin.c has the rules
  */
 enum heat_spin_kind { HEAT_SPIN_KIND_LOCK, HEAT_SPIN_KIND_EVENT, HEAT_SPIN_KIND_SEM, HEAT_SPIN_KINDS };
 /* a kind's switch is HEAT_SPIN_LOCK << kind */
