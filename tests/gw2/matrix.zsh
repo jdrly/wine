@@ -13,8 +13,10 @@
 #    WINE_HEAT_* variable; under mine with the variables set but WINE_HEAT_EXE naming another
 #    program. Neither of the last two may write a counters file. The engine skips the programs in
 #    $engine_bugs, which show a bug of its file. None runs leftover.exe, which fails its run on
-#    purpose (the workflow's step for jdrly/gw2-on-mac#128 runs it), or rundll.exe, which needs a
-#    compatdb rule to pass (the workflow's step for jdrly/gw2-on-mac#155 runs it).
+#    purpose (the workflow's step for jdrly/gw2-on-mac#128 runs it), rundll.exe, which needs a
+#    compatdb rule to pass (the workflow's step for jdrly/gw2-on-mac#155 runs it), or modeset.exe,
+#    which fails under the engine's win32u.so, which all three have (the workflow's step for
+#    jdrly/gw2-on-mac#159 runs it).
 # 3. (jdrly/gw2-on-mac#44) mutexall three runs under the engine's ntdll.so, each of which has to
 #    fail on the bug it shows, and three under mine, which have to pass. (#104) unreg three runs
 #    under the engine's ntdll.so, three under mine with counting, and three more with the
@@ -90,7 +92,7 @@ engine_bugs=(mutexall)
 quiet() {
   local name=$1 wine=$2 log=$3 left
   local -a programs=("$exes"/*.exe)
-  programs=(${programs:#*/(leftover|rundll).exe})
+  programs=(${programs:#*/(leftover|rundll|modeset).exe})
   shift 3
   [[ $wine == "$engine" ]] && programs=(${programs:#*/(${(~j:|:)engine_bugs}).exe})
   mkdir -p "$log"

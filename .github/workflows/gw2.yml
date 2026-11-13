@@ -53,8 +53,11 @@
 #   the engine with my winemac.so says whether the Mac driver starts on the runner;
 #   tests/gw2/native/frames.c and mouse_scale.c, built natively, test the driver's frame decision
 #   and its mouse speed factor (WINE_MACDRV_MOUSE_SCALE), and fexstats.c the reader of FEX's
-#   counters (jdrly/gw2-on-mac#111) and their tick rate (jdrly/gw2-on-mac#156); layered.exe under the
-#   engine with my winemac.so counts the frames WINE_MACDRV_SURFACE skips, where the driver starts; and
+#   counters (jdrly/gw2-on-mac#111) and their tick rate (jdrly/gw2-on-mac#156), and ratio.c win32u's
+#   make_ratio(), cut out of dlls/win32u/sysparams.c (jdrly/gw2-on-mac#159); modeset.exe changes the
+#   display mode with EmulateModeset Y at 192 DPI under the engine with my ntdll.so and my win32u.so,
+#   and has to fail on the engine's bug under the engine's win32u.so; layered.exe under the engine
+#   with my winemac.so counts the frames WINE_MACDRV_SURFACE skips, where the driver starts; and
 #   tests/gw2/matrix.zsh runs them all under the engine from the release tarball: with its own
 #   ntdll.so, and with mine in each WINE_HEAT_WAKE mode, with no WINE_HEAT_* variable and with
 #   them set for another program, and, when the build ships my win32u.so, SetCursor and the empty
@@ -516,7 +519,8 @@ jobs:
             echo '```'
           } | tee -a "$GITHUB_STEP_SUMMARY"
       # only the scripts and the test programs, not the whole Wine tree; the Mac driver's sources for
-      # the headers tests/gw2/native/*.c build, and ntdll's unix side for fexstats.c's
+      # the headers tests/gw2/native/*.c build, ntdll's unix side for fexstats.c's, and win32u for
+      # ratio.c's make_ratio()
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ env.COMMIT }}
@@ -525,6 +529,7 @@ jobs:
             tests/gw2
             dlls/winemac.drv
             dlls/ntdll/unix
+            dlls/win32u
           persist-credentials: false
       - name: zsh syntax
         run: for f in .github/gw2/*.zsh tests/gw2/*.zsh; do zsh -n "$f"; echo "ok $f"; done
@@ -634,6 +639,18 @@ jobs:
         run: |
           clang -std=gnu23 -O2 -Wall -Werror -o "$RUNNER_TEMP/fexstats" tests/gw2/native/fexstats.c
           "$RUNNER_TEMP/fexstats"
+      # jdrly/gw2-on-mac#159: make_ratio() and what comes before it (ratio_error(), or the engine's
+      # gcd()) cut out of dlls/win32u/sysparams.c as they are, built natively and run without Wine
+      - name: The DPI ratio, natively
+        if: github.event_name == 'pull_request'
+        run: |
+          mkdir "$RUNNER_TEMP/ratio-src"
+          awk '/^static (UINT64 ratio_error|UINT gcd)\(/ { on = 1 } on { print } /^static struct ratio make_ratio\(/ { seen = 1 }
+            on && seen && /^}/ { exit }' dlls/win32u/sysparams.c >"$RUNNER_TEMP/ratio-src/make_ratio.c"
+          grep -q '^static struct ratio make_ratio(' "$RUNNER_TEMP/ratio-src/make_ratio.c" ||
+            { echo "::error::make_ratio() isn't where ratio.c's cut looks for it in dlls/win32u/sysparams.c"; exit 1; }
+          clang -std=gnu23 -O2 -Wall -Werror -I"$RUNNER_TEMP/ratio-src" -o "$RUNNER_TEMP/ratio" tests/gw2/native/ratio.c
+          "$RUNNER_TEMP/ratio"
       # test 9 of jdrly/gw2-on-mac#62, natively: WINE_MACDRV_DRAIN's FIONREAD against poll, and
       # WINE_MACDRV_CALL's rule for the byte a synchronous call leaves (dlls/winemac.drv/cocoa_calls.h)
       - name: The event pipe, natively
@@ -754,6 +771,42 @@ jobs:
             (( status == 0 )) || { echo "::error::calls.exe failed with $mode"; exit 1; }
             (( events > 0 )) || { echo "::error::$mode: no event arrived, so calls.exe didn't stress the event path"; exit 1; }
           done
+      # jdrly/gw2-on-mac#159: modeset.exe with EmulateModeset Y at 192 DPI, under the engine with my
+      # ntdll.so and my win32u.so, where it has to pass, then with my ntdll.so and the engine's
+      # win32u.so, where it has to fail on the engine's bug: the abort, when this display offers a
+      # size whose ratio make_ratio() can't hold (1366x768 first), or else the cleared clip of a
+      # letterboxed mode. Only where the Mac driver starts.
+      - name: A mode change to 1366x768
+        if: github.event_name == 'pull_request'
+        run: |
+          if ! grep -qF 'gw2 test window: the Mac driver started' "$RUNNER_TEMP/window.txt"; then
+            echo "::warning::the Mac driver doesn't start on this runner, so modeset.exe needs the Mac run" |
+              tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          [[ -d $RUNNER_TEMP/win32u ]] || { echo "::error::the build shipped no win32u.so of mine"; exit 1; }
+          mine=0 engine=0
+          tests/gw2/run.zsh "$RUNNER_TEMP/win32u/wine" "$RUNNER_TEMP/modeset-mine" "$RUNNER_TEMP/tests/modeset.exe" \
+            >"$RUNNER_TEMP/modeset-mine.txt" || mine=1
+          tests/gw2/run.zsh "$RUNNER_TEMP/mine/wine" "$RUNNER_TEMP/modeset-engine" "$RUNNER_TEMP/tests/modeset.exe" \
+            >"$RUNNER_TEMP/modeset-engine.txt" || engine=1
+          for which in mine engine; do
+            { echo "### modeset.exe, $which win32u.so"; echo '```'; cat "$RUNNER_TEMP/modeset-$which.txt"; echo '```'; } |
+              tee -a "$GITHUB_STEP_SUMMARY"
+          done
+          (( mine == 0 )) || { echo "::error::modeset.exe failed under my win32u.so"; exit 1; }
+          if grep -qF 'gw2 test modeset: changing to ' "$RUNNER_TEMP/modeset-mine.txt"; then
+            want="the mode change ended the process"
+          else
+            echo "::warning::this runner's display offers no size whose DPI ratio make_ratio() can't hold, so only ratio.c shows the abort" |
+              tee -a "$GITHUB_STEP_SUMMARY"
+            want="not the mode's 0,0-"
+          fi
+          if (( engine == 0 )) || ! grep -qF "$want" "$RUNNER_TEMP/modeset-engine.txt"; then
+            echo "::error::under the engine's win32u.so modeset.exe didn't fail with \"$want\""
+            exit 1
+          fi
+          echo "ok    the engine's win32u.so fails with \"$want\"" | tee -a "$GITHUB_STEP_SUMMARY"
       # jdrly/gw2-on-mac#128: run.zsh's check for processes left behind. leftover.exe starts a Unix
       # process the wineserver doesn't know, without run.zsh's variable in its environment, and
       # exits. The run has to fail, name the process, and kill it. If run.zsh didn't, the step kills
