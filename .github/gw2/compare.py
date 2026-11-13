@@ -494,8 +494,8 @@ def masked(m, resolve, addr, size):
     brings, and UNKNOWN for a way where it holds something else. A use stands for all of its
     ADRPs' targets and counts as a use of each; where UNKNOWN is among them it also keeps its own
     offset as it is, since that may be the whole address. A BR this pass can't read as a jump table
-    or a tail call keeps every use's offset as it is from there on. Each loss of track makes a
-    function compare as changed, never as equal.
+    keeps every use's offset as it is from there on. Each loss of track makes a function compare
+    as changed, never as equal.
 
     A load's target is resolved with the width it reads, so a constant without a symbol is named by
     those bytes (resolver)."""
@@ -576,37 +576,6 @@ def masked(m, resolve, addr, size):
                     break
             return m.jump_table(table, 1 << size_bits, opc >= 2, base, addr, end, count)
 
-        def tail_call(i):
-            """whether a BR at words[i] leaves the function: a call through a pointer after the
-            epilogue (user_driver->pSystrayCall in win32u.so's system_tray_call). Right before
-            it, only restores from SP (LDP or LDR, at an offset or post-indexed) and ADD SP, SP,
-            #imm, with SP given back by the last of them and x29 and x30 restored together among
-            them; and the BR's register loaded by an LDR Xt, [Xn, #imm] in the 12 instructions
-            before those, with nothing else writing it. The frame is gone, so compiled code
-            doesn't come back into the function. Anything else, a BR without a frame among
-            them, stays a branch to anywhere (jdrly/gw2-on-mac#133)."""
-            def restore(w):  # 2: gives SP back, 1: a restore from SP at an offset, 0: neither
-                if w & 0xff8003ff == 0x910003ff:  # ADD SP, SP, #imm
-                    return 2
-                if (w >> 5) & 31 != 31:
-                    return 0
-                for op in (0xa8c00000, 0x6cc00000):  # LDP X or D, post-indexed
-                    if w & 0xffc00000 == op:
-                        return 2
-                if w & 0xffe00c00 in (0xf8400400, 0xfc400400):  # LDR X or D, post-indexed
-                    return 2
-                return 1 if w & 0xffc00000 in (0xa9400000, 0x6d400000, 0xf9400000, 0xfd400000) else 0
-            if not i or restore(words[i - 1]) != 2:
-                return False
-            j, frame = i - 1, False
-            while j >= 0 and restore(words[j]):
-                frame |= words[j] & 0xffc07fff in (0xa9407bfd, 0xa8c07bfd)  # LDP x29, x30, [SP, #imm] or [SP], #imm
-                j -= 1
-            reg = (words[i] >> 5) & 31
-            load = last_write(reg, j + 1, max(j - 11, 0))
-            return (frame and last_write(reg, i, j + 1) is None and load is not None
-                    and words[load] & 0xffc0001f == 0xf9400000 | reg)
-
         for i, w in enumerate(words):
             pc = addr + i * 4
             rd, rn = w & 31, (w >> 5) & 31
@@ -679,7 +648,7 @@ def masked(m, resolve, addr, size):
                     drop(*CALL_CLOBBERED)
                 elif w & 0xfffffc1f == 0xd61f0000:  # BR
                     targets = jump_table(i)
-                    if targets is None and not tail_call(i):
+                    if targets is None:
                         opaque = True  # where it goes is unknown: every use keeps its offset
                     for t in targets or ():
                         branch(t)
@@ -1246,29 +1215,12 @@ def fixtures():
     check("a BR that isn't a jump table's", stray(0x10), stray(0x20),
           {0x3010: "Q"}, {0x3020: "Q"}, {0x2000: [7 * 4]})
 
-    # jdrly/gw2-on-mac#133: a call through a pointer after the epilogue leaves the function, so the
-    # load after the BR, reached only by the CBZ, has one way in and its offset masked: the same
-    # target at another page offset is equal. A BR after anything less than an epilogue stays a branch to
-    # anywhere, and a tail call through another pointer is a change.
-    def tail(imm, load=0xf9400030, before=(0xa8c17bfd,)):  # ldr x16, [x1]; ldp x29, x30, [sp], #16
-        return [adrp(9, 1), 0xa9bf7bfd, 0xb4000000 | (3 + len(before)) << 5,  # x9 = page 0x1000; stp x29, x30,
-                load, *before, br(16),                        # [sp, #-16]!; cbz x0 to the LDR after br x16
-                0xf9400000 | imm // 8 << 10 | 9 << 5,         # ldr x0, [x9, #imm]
-                0xa8c17bfd, ret]
-    if not same(tail(0x10), tail(0x20), {0x1010: "X"}, {0x1020: "X"}):
-        failed.append("a load of one target at another page offset, after a tail call")
-    check("a tail call through another pointer", tail(0x10), tail(0x10, 0xf9400430), {0x1010: "X"}, {0x1010: "X"})
-    global_ptr = 0xf9400000 | 1 << 10 | 9 << 5 | 16  # ldr x16, [x9, #8]
-    check("a tail call through a pointer in another global", tail(0x10, global_ptr), tail(0x10, global_ptr),
-          {0x1008: "A", 0x1010: "X"}, {0x1008: "B", 0x1010: "X"})
-    for what, before in (("without the x29 and x30 pair", (0xa8c153f3,)),       # ldp x19, x20, [sp], #16
-                         ("with SP not given back", (0xa9407bfd,)),             # ldp x29, x30, [sp]
-                         ("with a MOV after the epilogue", (0xa8c17bfd, 0xaa0103e0)),  # mov x0, x1
-                         ("that restores the BR's register", (0xf94007f0, 0xa8c17bfd))):  # ldr x16, [sp, #8]
-        check(f"a BR after an epilogue {what}", tail(0x10, before=before), tail(0x20, before=before),
-              {0x1010: "X"}, {0x1020: "X"})
-    check("a BR after an epilogue on a register not loaded", tail(0x10, 0xaa0103f0), tail(0x20, 0xaa0103f0),  # mov x16, x1
-          {0x1010: "X"}, {0x1020: "X"})
+    # jdrly/gw2-on-mac#133: a load's offset is masked with its page, so the same target at another
+    # page offset is equal; another target isn't
+    load = lambda imm: [adrp(9, 1), 0xf9400000 | imm // 8 << 10 | 9 << 5, ret]  # ldr x0, [x9, #imm]
+    if not same(load(0x10), load(0x20), {0x1010: "X"}, {0x1020: "X"}):
+        failed.append("a load of one target at another page offset")
+    check("a load of another target", load(0x10), load(0x20), {0x1010: "X"}, {0x1020: "Y"})
 
     # two arrays without symbols that start alike, each also used at +4: a use of either stands
     # for all of it, not for the 4 bytes before the other use
