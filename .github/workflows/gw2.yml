@@ -66,7 +66,9 @@
 #   switches; calls.exe under the engine with my winemac.so makes synchronous calls to the main
 #   thread from four threads while events arrive, unset and with WINE_MACDRV_CALL=quiet.
 #   leftover.exe leaves a process behind, and tests/gw2/run.zsh has to fail its run, name the
-#   process and end it (jdrly/gw2-on-mac#128). A push to
+#   process and end it (jdrly/gw2-on-mac#128). rundll.exe has rundll32 call the entry point of a
+#   stand-in for arcdps's d3d11.dll: it has to fail with Wine's default order and pass with the app's
+#   compatdb rule for rundll32.exe (jdrly/gw2-on-mac#155). A push to
 #   gw2-on-mac runs only the prefix boot and
 #   smoke.exe, under the engine's ntdll.so and under mine: its tree is a merged pull request's head,
 #   which went through all of that in that pull request's run, and Publish names that run.
@@ -594,7 +596,12 @@ jobs:
             # gdi32 for layered.exe's bitmap; mingw's default libraries don't have it
             toolchains/llvm-mingw/bin/x86_64-w64-mingw32-clang -O2 -Wall -Werror -o "$RUNNER_TEMP/tests/$(basename "$c" .c).exe" "$c" -lgdi32
           done
-          ls "$RUNNER_TEMP/tests"
+          # rundll.exe's stand-in for arcdps, in a folder of its own next to it (jdrly/gw2-on-mac#155)
+          mkdir "$RUNNER_TEMP/tests/addon"
+          toolchains/llvm-mingw/bin/x86_64-w64-mingw32-windres -O coff -o "$RUNNER_TEMP/addon.res" tests/gw2/addon/d3d11.rc
+          toolchains/llvm-mingw/bin/x86_64-w64-mingw32-clang -O2 -Wall -Werror -shared -o "$RUNNER_TEMP/tests/addon/d3d11.dll" \
+            tests/gw2/addon/d3d11.c "$RUNNER_TEMP/addon.res"
+          ls "$RUNNER_TEMP/tests" "$RUNNER_TEMP/tests/addon"
       # whether the Mac driver starts on this runner, with my winemac.so in the engine (matrix.zsh
       # runs window.exe under the engine's own as well)
       - name: The Mac driver on the runner
@@ -775,6 +782,44 @@ jobs:
           fi
           while pgrep -f gw2-test-leftover >/dev/null; do sleep 0.2; done
           echo "ok    the process is gone"
+      # jdrly/gw2-on-mac#155: arcdps's crash window. rundll.exe has rundll32 call
+      # c_exceptionerrormsg in a stand-in for arcdps's d3d11.dll, under the engine with my ntdll.so.
+      # Without a rule the run has to fail on the missing entry point, with rundll32's d3d11 Wine's
+      # own (loaddll: builtin). With the app's rule for rundll32.exe in WINE_COMPATDB_FILE it has to
+      # pass, with rundll32's d3d11 the stand-in (native). compatdb.so reads that variable with
+      # getenv, so each run sets it for all of Wine, as the app does.
+      - name: rundll32 and an addon's d3d11.dll
+        if: github.event_name == 'pull_request'
+        run: |
+          prefix=$RUNNER_TEMP/rundll-prefix
+          rules=$RUNNER_TEMP/rundll.rules
+          echo 'exe=rundll32.exe;dll_overrides=d3d11,dxgi=n,b' >"$rules"
+          # d3d11_loaded <log>: how rundll32 loaded d3d11.dll (builtin or native), from loaddll's lines
+          d3d11_loaded() { tr -d '\r' <"$1" | sed -nE 's/.*loaddll:.*d3d11\.dll" at [0-9A-Fa-f]+: (builtin|native)$/\1/p' | sort -u | tr '\n' ' '; }
+          for mode in without with; do
+            status=0
+            if [[ $mode == with ]]; then export WINE_COMPATDB_FILE=$rules; else unset WINE_COMPATDB_FILE; fi
+            GW2_TEST_WINEDEBUG=-all,+loaddll,err+rundll32 tests/gw2/run.zsh "$RUNNER_TEMP/mine/wine" "$prefix" "$RUNNER_TEMP/tests/rundll.exe" \
+              >"$RUNNER_TEMP/rundll-$mode.txt" || status=$?
+            cp "$prefix/rundll.log" "$RUNNER_TEMP/rundll-$mode.log"
+            loaded=$(d3d11_loaded "$RUNNER_TEMP/rundll-$mode.log")
+            {
+              echo "### rundll.exe, $mode the rule for rundll32.exe"
+              echo '```'
+              grep -v 'loaddll:' "$RUNNER_TEMP/rundll-$mode.txt" || true
+              echo "rundll32's d3d11.dll: ${loaded:-no loaddll line}"
+              echo '```'
+            } | tee -a "$GITHUB_STEP_SUMMARY"
+            if [[ $mode == without ]]; then
+              tr -d '\r' <"$RUNNER_TEMP/rundll-$mode.log" | grep "^gw2 test rundll: the entry point didn't run (" >/dev/null ||
+                { echo "::error::without the rule: rundll.exe didn't fail on the missing entry point"; exit 1; }
+              (( status == 1 )) || { echo "::error::without the rule: run.zsh exited $status, not 1"; exit 1; }
+              [[ $loaded == "builtin " ]] || { echo "::error::without the rule: rundll32's d3d11.dll was \"$loaded\", not Wine's own alone"; exit 1; }
+            else
+              (( status == 0 )) || { echo "::error::with the rule: rundll.exe failed"; exit 1; }
+              [[ $loaded == "native " ]] || { echo "::error::with the rule: rundll32's d3d11.dll was \"$loaded\", not the stand-in alone"; exit 1; }
+            fi
+          done
       - name: Run them
         if: github.event_name == 'pull_request'
         run: |
