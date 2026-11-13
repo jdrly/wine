@@ -157,6 +157,15 @@ static const OSType WineHotKeySignature = 'Wine';
                 [self release];
                 return nil;
             }
+
+            /* GW2 on Mac (WINE_MACDRV_CALL=quiet): OnMainThread's completion wakes the caller
+               through this event. If it can't be added, the completion writes its byte as before. */
+            if (call_quiet)
+            {
+                EV_SET(&kev, 0, EVFILT_USER, EV_ADD | EV_CLEAR, 0, 0, 0);
+                if (kevent(kq, &kev, 1, NULL, 0, NULL) == -1)
+                    WARN("%s: no user event in the kqueue: %s\n", debugstr_cf(self), strerror(errno));
+            }
         }
         return self;
     }
@@ -579,16 +588,19 @@ void OnMainThread(dispatch_block_t block)
         }
         @finally
         {
-            /* GW2 on Mac (WINE_MACDRV_CALL=quiet): the caller takes the queue's lock once it sees
-               finished and before it settles the pipe, so this byte is in the pipe by then */
-            if (queue && call_quiet)
-                [queue->eventsLock lock];
             finished = TRUE;
             if (queue)
             {
-                [queue signalEventAvailable];
-                if (call_quiet)
-                    [queue->eventsLock unlock];
+                /* GW2 on Mac (WINE_MACDRV_CALL=quiet): wake the caller through its kqueue, not
+                   with a byte in the pipe the server watches. The server sees a byte at once and
+                   sets the queue's driver bit, so the caller's next pump would drain nothing and
+                   send one more set_queue_mask, even after the caller read the byte back. If the
+                   kqueue can't be triggered, the byte goes as before. */
+                struct kevent trigger;
+
+                EV_SET(&trigger, 0, EVFILT_USER, 0, NOTE_TRIGGER, 0, 0);
+                if (!call_quiet || kevent(queue->kq, &trigger, 1, NULL, 0, NULL) == -1)
+                    [queue signalEventAvailable];
             }
             else
             {
@@ -618,10 +630,9 @@ void OnMainThread(dispatch_block_t block)
             }
         }
 
-        /* GW2 on Mac (WINE_MACDRV_CALL=quiet): the main thread's byte for this call is still in
-           the pipe. The server sees the pipe readable, so the thread's next pump would drain
-           nothing and send one more set_queue_mask. Leave one byte if an event waits, else none.
-           The loop above may have read the bytes of events it left queued, this call's own too. */
+        /* GW2 on Mac (WINE_MACDRV_CALL=quiet): the loop above read every byte while it looked for
+           queries, also those of the events it left queued. Leave one byte if an event waits, so
+           the server wakes the thread for it, else none. */
         if (call_quiet)
         {
             [queue->eventsLock lock];

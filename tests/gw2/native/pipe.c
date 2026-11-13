@@ -7,9 +7,8 @@
  *    bytes. The driver's queue closes both ends together (-[WineEventQueue dealloc]), so its pump
  *    never meets it.
  * 2. WINE_MACDRV_CALL=quiet: event_pipe_settle after a synchronous call. With no event queued the
- *    pipe ends empty, from the call's one byte, from 100 left over, and from none. With one queued
- *    it ends with one byte: from the call's, from that and the event's own, and from none, when
- *    the wait loop read both.
+ *    pipe ends empty, from one byte, from 100 left over, and from none. With one queued it ends
+ *    with one byte: from one, from two, and from none, when the wait loop read the event's byte.
  *
  * Prints "gw2 test pipe: passed" and exits 0, or names each case that failed and exits 1. */
 #include <fcntl.h>
@@ -106,11 +105,11 @@ int main( void )
     bytes_case( "one byte, the write end closed", 1, 1, 0 );
     bytes_case( "nothing, the write end closed", 0, 1, 1 );
 
-    settle_case( "the call's byte, no event", 1, 0, 0 );
+    settle_case( "one byte, no event", 1, 0, 0 );
     settle_case( "100 bytes, no event", 100, 0, 0 );
     settle_case( "no byte, no event", 0, 0, 0 );
-    settle_case( "the call's byte, one event", 1, 1, 1 );
-    settle_case( "the call's byte and the event's, one event", 2, 1, 1 );
+    settle_case( "one byte, one event", 1, 1, 1 );
+    settle_case( "two bytes, one event", 2, 1, 1 );
     settle_case( "no byte, one event", 0, 1, 1 );
 
     if (failed)

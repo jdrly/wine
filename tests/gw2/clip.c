@@ -7,7 +7,8 @@
  * waits for it. The main thread wakes the caller with a byte in its event pipe, and the caller
  * leaves it there. The server sees the pipe readable, so a later pump drains nothing and sends a
  * set_queue_mask with poll_events. With CLIP=changes only the first two calls go to the main
- * thread: the first starts the clipping, the second finds it. With CALL=quiet no byte stays.
+ * thread: the first starts the clipping, the second finds it. With CALL=quiet the main thread wakes
+ * the caller through its kqueue, and no byte goes into the pipe.
  *
  * The thread first releases a semaphore RELEASES times, so that it is the game thread by the
  * session report's rule (the most releases). It shows a window, makes it the foreground window

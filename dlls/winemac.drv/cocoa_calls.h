@@ -7,8 +7,9 @@
  *   main thread only when they differ from what that surface last sent (window.c).
  * - WINE_MACDRV_CLIP=changes: ClipCursor doesn't call the main thread for the rectangle it applied
  *   last, while nothing has changed the clipping since (mouse.c).
- * - WINE_MACDRV_CALL=quiet: after a synchronous call to the main thread, the caller's event pipe
- *   holds one byte if its queue holds an event, else none (cocoa_event.m).
+ * - WINE_MACDRV_CALL=quiet: the main thread wakes the caller of a synchronous call through the
+ *   caller's kqueue instead of a byte in its event pipe, which the server watches. Afterwards the
+ *   pipe holds one byte if the caller's queue holds an event, else none (cocoa_event.m).
  * - WINE_MACDRV_DRAIN=fionread: ProcessEvents asks the event pipe for its byte count instead of
  *   polling it (event.c).
  * The pipe functions have no Wine or Cocoa type, so tests/gw2/native/pipe.c builds them natively.
