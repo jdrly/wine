@@ -62,7 +62,7 @@ enum heat_counter
     HC_RELEASE,      /* semaphore releases */
     HC_WAKE_SKIPPED, /* releases of a private semaphore with no waiter here: no wake call */
     HC_WAKE_ONE,     /* wake-one calls of WINE_HEAT_WAKE=one that woke a thread */
-    HC_WAKE_NONE,    /* wake calls that found no waiter */
+    HC_WAKE_NONE,    /* wake calls on a semaphore or mutex that found no waiter (events: HC_EVENT_WAKE_NONE) */
     HC_WOKEN,        /* single waits woken */
     HC_SPURIOUS,     /* ... that found nothing to take and slept again */
     HC_EVENT_CREATE, /* NtCreateEvent */
@@ -88,6 +88,18 @@ enum heat_counter
     HC_SSPIN_HIT, HC_SSPIN_MISS,  /* WINE_HEAT_SPIN=sem */
     HC_SPIN_OFF,     /* waits that didn't spin: the thread's spins of that kind missed 4 times in a row */
     HC_SPIN_SCOPED,  /* waits that didn't spin: the scope leaves out the thread's priority */
+    /* jdrly/gw2-on-mac#99 */
+    HC_WAIT_SLEEP,   /* sleeps in msync_wait_single and msync_wait_multiple, with HT_WAIT */
+    HC_ALERT,        /* NtAlertThreadByThreadId */
+    HC_ALERT_WAKE,   /* ... that made the wake call, with HT_ALERT */
+    HC_LOCK_5US, HC_LOCK_20US, HC_LOCK_100US, HC_LOCK_1MS, HC_LOCK_LONG,  /* lock sleeps by length */
+    HC_WAIT_5US, HC_WAIT_20US, HC_WAIT_100US, HC_WAIT_1MS, HC_WAIT_LONG,  /* wait sleeps by length */
+    HC_EVENT_SET,       /* msync_set_event_obj */
+    HC_EVENT_WAKE,      /* wake calls on an event, a set's or a pulse's, that woke a thread */
+    HC_EVENT_WAKE_NONE, /* ... that found none */
+    HC_WAIT,         /* msync_wait_objs */
+    HC_WAIT_TIMED,   /* ... with a timeout that is neither infinite nor zero */
+    HC_WAIT_POLL,    /* ... with a zero timeout */
     HC_NB
 };
 
@@ -95,6 +107,7 @@ enum heat_timer
 {
     HT_SERVER, HT_YIELD,
     HT_SPIN,  /* jdrly/gw2-on-mac#45 */
+    HT_LOCK, HT_WAIT, HT_WAKE, HT_ALERT,  /* jdrly/gw2-on-mac#99 */
     HT_NB
 };
 
@@ -108,6 +121,13 @@ extern void heat_add( enum heat_counter c );
 extern unsigned long long heat_now(void);
 extern void heat_time( enum heat_counter c, enum heat_timer t, unsigned long long start );
 extern void heat_yield_done( unsigned long long start );
+/* jdrly/gw2-on-mac#99 */
+extern void heat_lock_slept( unsigned long long start );
+extern void heat_wait_slept( unsigned long long start );
+extern void heat_wake_done( BOOL event, BOOL found, unsigned long long start );
+extern void heat_add_time( enum heat_timer t, unsigned long long start );
+extern void heat_wait_counted( const LARGE_INTEGER *timeout );
+extern void heat_named( const char *name );
 extern void heat_mark( HANDLE handle, unsigned char flag );
 extern void heat_unmark( HANDLE handle, unsigned char flags );
 extern void heat_sleep_on( unsigned int obj );
@@ -131,6 +151,18 @@ static inline void heat_count( enum heat_counter c )
 static inline unsigned long long heat_start(void)
 {
     return (heat_mode & HEAT_COUNT) ? heat_now() : 0;
+}
+
+/* msync_wait_objs, on entry, with the caller's timeout (jdrly/gw2-on-mac#99) */
+static inline void heat_wait_begun( const LARGE_INTEGER *timeout )
+{
+    if (heat_mode & HEAT_COUNT) heat_wait_counted( timeout );
+}
+
+/* set_native_thread_name named this thread <name> (jdrly/gw2-on-mac#99) */
+static inline void heat_thread_named( const char *name )
+{
+    if (heat_mode & HEAT_COUNT) heat_named( name );
 }
 
 /* NtCreateSemaphore made it: private if unnamed, without a root directory and not inheritable */

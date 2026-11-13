@@ -23,7 +23,8 @@
 # 5. (jdrly/gw2-on-mac#43) prof.exe under mine as WINE_HEAT_EXE with WINE_HEAT_PROF=1 and
 #    FEX_PROFILESTATS=1, once, 8 seconds. Block 2 runs it for a second with the sampler unset and set
 #    for another program, where no file of the sampler's may appear either.
-# 6. (jdrly/gw2-on-mac#60) requests three runs under mine with counting.
+# 6. (jdrly/gw2-on-mac#60) requests three runs under mine with counting. Beside it,
+#    (jdrly/gw2-on-mac#99) timers three runs under mine with counting.
 # 7. (jdrly/gw2-on-mac#61) with <win32u-wine>: setcursor, then requests and peekyield with
 #    counting, under the engine's win32u.so with WINE_WIN32U_SETCURSOR=shm and
 #    WINE_WIN32U_PEEK_YIELD=off, and under mine with neither, with only the first and with only the
@@ -207,7 +208,22 @@ requests() {
   done
 }
 
+# jdrly/gw2-on-mac#99: timers beside it. It checks counts only, no rates. Block 2 ran it without counting.
+timers() {
+  local n log
+  for n in 1 2 3; do
+    print -r -- "run $n"
+    log=$work/log-timers-$n
+    mkdir -p "$log"
+    env -u WINE_HEAT_WAKE -u WINE_HEAT_MSYNC_UNREG -u WINE_HEAT_EVPOOL -u WINE_HEAT_SPIN -u WINE_HEAT_PROF \
+      -u WINE_WIN32U_SETCURSOR -u WINE_WIN32U_PEEK_YIELD -u GW2_TEST_SETCURSOR_SKIPS -u GW2_TEST_PEEK_NO_YIELD \
+      WINE_HEAT_EXE=timers.exe WINE_HEAT_COUNT=1 WINE_HEAT_LOG=$log \
+      GW2_TEST_SECONDS=300 "$run" "$mine" "$work/prefix-timers" "$exes/timers.exe"
+  done
+}
+
 side requests requests
+side timers timers
 collect
 
 # 7. jdrly/gw2-on-mac#61
