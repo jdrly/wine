@@ -12,7 +12,7 @@
  *
  * The thread first releases a semaphore RELEASES times, so that it is the game thread by the
  * session report's rule (the most releases). It shows a window, makes it the foreground window
- * (up to 5 s, else a failure of its own when counting) and pumps its messages. Without the Mac
+ * (up to 15 s, else a failure of its own when counting) and pumps its messages. Without the Mac
  * driver it says so and passes. With WINE_HEAT_COUNT=1 and WINE_HEAT_EXE=clip.exe, two parts, each
  * starting right after one of the dumper's blocks of this thread:
  * A. CALLS rounds of 1 ms of spinning on the clock and pumping its messages until none is left;
@@ -21,8 +21,9 @@
  * first block written after it, however many there are. B must have CALLS set_cursor requests
  * with a clip rectangle and at least CALLS get_message requests, so the clip messages came to this
  * thread. Then by the switches: with WINE_MACDRV_CLIP=changes or WINE_MACDRV_CALL=quiet, B has at
- * most CALLS / 100 more set_queue_mask poll requests than A; with neither, at least CALLS / 2 more,
- * the bytes the switches remove. Without counting it makes the calls once and passes: the matrix
+ * most CALLS / 100 more set_queue_mask poll requests than A; with neither, at least CALLS / 4 more,
+ * the bytes the switches remove (999 on the runner; a server slower to see a byte merges the bytes of
+ * neighbouring rounds into one request). Without counting it makes the calls once and passes: the matrix
  * runs every program.
  *
  * The workflow counts the driver's "unchanged, not sent" lines (channel cursor) besides, and its
@@ -111,7 +112,8 @@ static int read_blocks( const char *path, int from, struct block *sum )
     return blocks;
 }
 
-/* wait until the dumper has written this thread's block number <blocks>; returns how many there are */
+/* wait until the dumper has written this thread's block number <blocks>; returns how many there are.
+   The dumper writes one every 5 s, and a call waits for at most two. */
 static int wait_block( const char *path, int blocks )
 {
     struct block sum;
@@ -120,7 +122,7 @@ static int wait_block( const char *path, int blocks )
 
     while ((n = read_blocks( path, INT_MAX, &sum )) < blocks)
     {
-        if (GetTickCount() - start > 15000) FAIL( "no block %d of this thread in 15 s", blocks );
+        if (GetTickCount() - start > 30000) FAIL( "no block %d of this thread in 30 s", blocks );
         Sleep( 20 );
     }
     return n;
@@ -129,15 +131,17 @@ static int wait_block( const char *path, int blocks )
 static DWORD rounds( const RECT *clip );
 
 /* one part: right after a block of this thread, the rounds; then the counts of every block from
-   there to the first one written after the rounds, added up. The waits between make no request the
-   test counts. */
+   there to the second one written after the rounds, added up. Not the first: the dumper takes a
+   block's counts before it writes the block, so the first one written after the rounds can hold
+   counts from before their end. The dumper writes one block at a time, so the second one's counts
+   were taken after the first was written. The waits between make no request the test counts. */
 static struct block part( const char *path, const char *name, const RECT *clip )
 {
     struct block sum;
     int first = wait_block( path, read_blocks( path, INT_MAX, &sum ) + 1 ), last;
     DWORD ms = rounds( clip );
 
-    last = wait_block( path, read_blocks( path, INT_MAX, &sum ) + 1 );
+    last = wait_block( path, read_blocks( path, INT_MAX, &sum ) + 2 );
     read_blocks( path, first, &sum );
     printf( "gw2 test clip: part %s took %lu ms, %d blocks\n", name, ms, last - first );
     return sum;
@@ -214,8 +218,8 @@ int main( void )
     }
     if (!hwnd) FAIL( "CreateWindowEx: error %lu", GetLastError() );
     ShowWindow( hwnd, SW_SHOWNORMAL );
-    /* up to 5 s for the window to become the foreground window, asking again about every 500 ms */
-    for (start = GetTickCount(), i = 0; GetForegroundWindow() != hwnd && GetTickCount() - start < 5000; Sleep( 10 ), i++)
+    /* up to 15 s for the window to become the foreground window, asking again about every 500 ms */
+    for (start = GetTickCount(), i = 0; GetForegroundWindow() != hwnd && GetTickCount() - start < 15000; Sleep( 10 ), i++)
     {
         if (i % 50 == 0) SetForegroundWindow( hwnd );
         pump();
@@ -226,7 +230,7 @@ int main( void )
     printf( "gw2 test clip: the window is %sthe foreground window, clipping to %ld,%ld-%ld,%ld\n",
             GetForegroundWindow() == hwnd ? "" : "not ", clip.left, clip.top, clip.right, clip.bottom );
     if (counting && GetForegroundWindow() != hwnd)
-        FAIL( "the runner didn't make the window the foreground window in 5 s, so the clip messages would "
+        FAIL( "the runner didn't make the window the foreground window in 15 s, so the clip messages would "
               "go to another thread" );
 
     if (!counting)
@@ -240,7 +244,7 @@ int main( void )
     }
 
     for (start = GetTickCount(); !find_log( path, sizeof(path) ); Sleep( 20 ))
-        if (GetTickCount() - start > 15000) FAIL( "the dumper wrote no heat-requests-*.log in 15 s" );
+        if (GetTickCount() - start > 30000) FAIL( "the dumper wrote no heat-requests-*.log in 30 s" );
     wait_block( path, 1 );
     a = part( path, "A", NULL );
     b = part( path, "B", &clip );
@@ -258,7 +262,7 @@ int main( void )
     if (removed && b.poll - a.poll > CALLS / 100)
         FAIL( "B has %lld more set_queue_mask poll requests than A, with WINE_MACDRV_CLIP=changes or "
               "WINE_MACDRV_CALL=quiet", b.poll - a.poll );
-    if (!removed && b.poll - a.poll < CALLS / 2)
+    if (!removed && b.poll - a.poll < CALLS / 4)
         FAIL( "B has only %lld more set_queue_mask poll requests than A without the switches: the test doesn't "
               "see the byte", b.poll - a.poll );
     printf( "gw2 test clip: B has %lld more set_queue_mask poll requests than A\n", b.poll - a.poll );

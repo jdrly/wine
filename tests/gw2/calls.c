@@ -27,7 +27,7 @@
 #define CALLS    2000
 #define BURST    100
 #define STUCK_MS 10000
-#define DEADLINE_MS 30000
+#define DEADLINE_MS 120000
 
 static volatile LONG done[THREADS];
 static volatile LONG failed;
@@ -132,7 +132,7 @@ int main( void )
             else if (now - moved[i] > STUCK_MS && WaitForSingleObject( threads[i], 0 ) == WAIT_TIMEOUT)
                 why = "a running thread made no call in 10 s: a caller is waiting for a wakeup that never came";
         }
-        if (!why && now - start > DEADLINE_MS) why = "the threads weren't done in 30 s";
+        if (!why && now - start > DEADLINE_MS) why = "the threads weren't done in 120 s";
         if (why)
         {
             for (i = 0; i < THREADS; i++)

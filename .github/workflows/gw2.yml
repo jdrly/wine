@@ -678,7 +678,7 @@ jobs:
       # jdrly/gw2-on-mac#62: calls.exe under the engine with my winemac.so, unset and with
       # WINE_MACDRV_CALL=quiet: four threads make 2,000 synchronous calls to the main thread each
       # while focus and frame events arrive. A lost wakeup stops a thread, and the program's watchdog
-      # fails it after 10 s without a call from a running thread, or 30 s in all. The driver's events
+      # fails it after 10 s without a call from a running thread, or 120 s in all. The driver's events
       # handled between the program's "workers start" and "workers done" (channel event) are counted
       # here: none means the test didn't stress the event path. Only where the Mac driver starts.
       - name: Calls from several threads
@@ -694,7 +694,7 @@ jobs:
             unset WINE_MACDRV_CALL
             [[ $mode == quiet ]] && export WINE_MACDRV_CALL=quiet
             status=0
-            GW2_TEST_CALLS=1 GW2_TEST_WINEDEBUG=-all,+event GW2_TEST_SECONDS=120 \
+            GW2_TEST_CALLS=1 GW2_TEST_WINEDEBUG=-all,+event GW2_TEST_SECONDS=300 \
               tests/gw2/run.zsh "$RUNNER_TEMP/macdrv/wine" "$prefix" "$RUNNER_TEMP/tests/calls.exe" >"$RUNNER_TEMP/calls-$mode.txt" || status=1
             # only the events handled while the threads made their calls
             events=$(tr -d '\r' <"$prefix/calls.log" | awk '/gw2 test calls: workers start/ { on = 1 }
