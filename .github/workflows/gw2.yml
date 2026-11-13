@@ -717,9 +717,10 @@ jobs:
           done
       # jdrly/gw2-on-mac#128: run.zsh's check for processes left behind. leftover.exe starts a Unix
       # process the wineserver doesn't know, without run.zsh's variable in its environment, and
-      # exits. The run has to fail, name the process, and end it. kill -9 returns before the kernel
-      # has ended the process, so the step waits for it to go: until it is gone, 60 s at most,
-      # which only keeps a kill that didn't happen from holding the job.
+      # exits. The run has to fail, name the process, and kill it. If run.zsh didn't, the step kills
+      # it and fails at once. kill -9 returns before the kernel has ended the process, so the step
+      # then waits until it is gone, with no time limit of its own: SIGKILL can't be caught, and
+      # only a process stuck in the kernel would hold the job until its 30 minutes.
       - name: A process left behind
         if: github.event_name == 'pull_request'
         run: |
@@ -727,20 +728,21 @@ jobs:
           tests/gw2/run.zsh "$RUNNER_TEMP/engine/wine" "$RUNNER_TEMP/leftover-prefix" "$RUNNER_TEMP/tests/leftover.exe" \
             >"$RUNNER_TEMP/leftover.txt" || status=$?
           cat "$RUNNER_TEMP/leftover.txt"
-          gone=0
-          for _ in $(seq 300); do
-            pgrep -f gw2-test-leftover >/dev/null || { gone=1; break; }
-            sleep 0.2
-          done
-          if (( !gone )); then
+          why=
+          if ! grep -qxF 'ok    leftover' "$RUNNER_TEMP/leftover.txt"; then
+            why="leftover.exe itself failed"
+          elif ! grep -qE '^ +[0-9]+ .*perl.* gw2-test-leftover$' "$RUNNER_TEMP/leftover.txt"; then
+            why="run.zsh didn't name the process leftover.exe left"
+          elif (( status != 1 )); then
+            why="run.zsh exited $status for a run that left a process, not 1"
+          fi
+          if [[ -n $why ]]; then
             pkill -9 -f gw2-test-leftover || true
-            echo "::error::the process leftover.exe left was still running after run.zsh"
+            echo "::error::$why"
             exit 1
           fi
-          grep -qxF 'ok    leftover' "$RUNNER_TEMP/leftover.txt" || { echo "::error::leftover.exe itself failed"; exit 1; }
-          grep -qE '^ +[0-9]+ .*perl.* -e sleep gw2-test-leftover$' "$RUNNER_TEMP/leftover.txt" ||
-            { echo "::error::run.zsh didn't name the process leftover.exe left"; exit 1; }
-          (( status == 1 )) || { echo "::error::run.zsh exited $status for a run that left a process, not 1"; exit 1; }
+          while pgrep -f gw2-test-leftover >/dev/null; do sleep 0.2; done
+          echo "ok    the process is gone"
       - name: Run them
         if: github.event_name == 'pull_request'
         run: |

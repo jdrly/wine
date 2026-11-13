@@ -45,7 +45,9 @@ run_limited() {
 
 # the pids of this run's processes: the live ones in its groups, and the ones with the mark in
 # their environment (macOS's ps -E prints it after the command). A zombie (Z) or a process on its
-# way out (E) is ending already, often one the wineserver killed.
+# way out (E) is ending already. Wine starts services.exe, what it runs, explorer and conhost
+# detached, each in a session of its own, so in a run that leaves nothing no process the wineserver
+# knows is in a group by then, and none that it only just killed can count.
 ours() {
   local line f
   for line in ${(f)"$(ps -ax -o pid=,pgid=,stat=)"}; do
