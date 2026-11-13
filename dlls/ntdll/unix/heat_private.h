@@ -88,6 +88,7 @@ extern struct heat_row *heat_rows HEAT_HIDDEN;
 extern unsigned int heat_nrows HEAT_HIDDEN;
 extern __thread struct heat_row *heat_self HEAT_HIDDEN;
 extern mach_timebase_info_data_t heat_timebase HEAT_HIDDEN;
+extern struct heat_fex_clock heat_fex_started HEAT_HIDDEN;
 
 static inline struct heat_row *heat_row(void)
 {

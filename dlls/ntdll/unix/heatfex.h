@@ -26,13 +26,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <mach/mach_time.h>
 
 /* FEX_PROFILESTATS=1: the shared memory object fex-<pid>-stats
  * (Source/Windows/UnixLib/FEXUnixLib.cpp:154-157), a ThreadStatsHeader and then ThreadStats slots
  * (FEXCore/include/FEXCore/Utils/SHMStats.h:45-78). A slot with TID 0 is free. Times are in
- * CNTVCT_EL0 ticks, the counter mach_absolute_time() reads. My FEX fork asserts each of these
- * against FEX's own types (Source/Windows/Common/GW2ContractStats.h). The object's Size grows as
- * slots are given out, so the walk to Size reads only the part in use.
+ * CNTVCT_EL0 ticks (GetCycleCounter(), SHMStats.h:18), whose rate heat_fex_ms() measures. My FEX
+ * fork asserts each of these against FEX's own types (Source/Windows/Common/GW2ContractStats.h).
+ * The object's Size grows as slots are given out, so the walk to Size reads only the part in use.
  *
  * Two versions, and FEX only appends to a slot (SHMStats.h:45), so the reader takes a slot at least
  * as large as its version's and reads the fields it knows by offset:
@@ -92,6 +93,33 @@ static const struct heat_fex_field heat_fex_fields[HEAT_FEX_FIELDS] =
     { "tso_switches", HEAT_FEX_STATS_TSO, 0 }, { "native_exits", HEAT_FEX_STATS_EXITS, 0 },
     { "code_buffer_moves", HEAT_FEX_STATS_CODEBUF, 0 }, { "l1_resizes", HEAT_FEX_STATS_L1, 0 },
 };
+
+/* FEX's clock against Mach's, read together (jdrly/gw2-on-mac#156) */
+struct heat_fex_clock
+{
+    unsigned long long cnt;   /* CNTVCT_EL0, as FEX reads it */
+    unsigned long long mach;  /* mach_absolute_time() */
+};
+
+/* one instruction a line: Apple's assembler takes ';' for the start of a comment */
+static inline void heat_fex_clock_read( struct heat_fex_clock *c )
+{
+    c->mach = mach_absolute_time();
+    __asm__ volatile( "isb\n\tmrs %0, CNTVCT_EL0" : "=r"(c->cnt) );
+}
+
+/* Milliseconds per FEX tick, from a reading at <start> and one at <now>, <mach_ms> being
+ * milliseconds per Mach tick. FEX counts in CNTVCT_EL0 ticks, and on my M5 Max they aren't Mach's:
+ * mach_absolute_time() runs at 24 MHz there (hw.tbfrequency), and FEX's times only fit a 1 GHz
+ * counter (jdrly/gw2-on-mac#156). CNTFRQ_EL0 states a rate; the reader measures the one the counter
+ * keeps instead, over everything since <start>. heat_init takes <start> and the lines come every
+ * 5 s from then, so the time between the two reads of a pair, nanoseconds unless the thread is
+ * preempted right there, is a part in a million of that. 0 when the counter didn't move. */
+static inline double heat_fex_ms( const struct heat_fex_clock *start, const struct heat_fex_clock *now, double mach_ms )
+{
+    if (now->cnt <= start->cnt) return 0;
+    return mach_ms * (double)(now->mach - start->mach) / (double)(now->cnt - start->cnt);
+}
 
 /* <tid>'s slot in the stats object at <base>, <bytes> long and at least HEAT_FEX_STATS_HEADER.
  * 1 and *slot: found. 0: no slot of that thread. -1: a version or slot size this reader doesn't
