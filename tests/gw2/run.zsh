@@ -46,8 +46,11 @@ run_limited() {
 # the pids of this run's processes: the live ones in its groups, and the ones with the mark in
 # their environment (macOS's ps -E prints it after the command). A zombie (Z) or a process on its
 # way out (E) is ending already. Wine starts services.exe, what it runs, explorer and conhost
-# detached, each in a session of its own, so in a run that leaves nothing no process the wineserver
-# knows is in a group by then, and none that it only just killed can count.
+# detached, each in a session of its own, so in a run that leaves nothing the only process the
+# wineserver knew that can still be in a group is a child a program waited for (wakes.c's). The
+# wineserver waits until that child's pid is gone, unless the child stalls half a second between
+# closing its socket and exit(): then the wineserver kills it and stops waiting, and the check would
+# count it.
 ours() {
   local line f
   for line in ${(f)"$(ps -ax -o pid=,pgid=,stat=)"}; do
