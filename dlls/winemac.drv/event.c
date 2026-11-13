@@ -25,6 +25,7 @@
 #endif
 
 #include "config.h"
+#include "cocoa_calls.h"
 #include "macdrv.h"
 
 #include <poll.h>
@@ -338,6 +339,9 @@ void macdrv_handle_event(const macdrv_event *event)
         macdrv_client_surface_presented(event);
         break;
     case DISPLAYS_CHANGED:
+        /* GW2 on Mac (WINE_MACDRV_CLIP=changes): whether a rectangle clips at all depends on the
+           displays (macdrv_clip_cursor) */
+        __atomic_fetch_add(&clip_serial, 1, __ATOMIC_RELEASE);
         macdrv_displays_changed(event);
         break;
     case HOTKEY_PRESS:
@@ -433,6 +437,10 @@ void macdrv_handle_event(const macdrv_event *event)
 static int check_fd_events( int fd, int events )
 {
     struct pollfd pfd = {.fd = fd, .events = events};
+    int count;
+
+    /* GW2 on Mac (WINE_MACDRV_DRAIN=fionread): the caller asks only whether a byte waits */
+    if (drain_fionread && (count = event_pipe_bytes( fd )) >= 0) return count ? events & POLLIN : 0;
     if (poll( &pfd, 1, 0 ) <= 0) return 0;
     return pfd.revents;
 }

@@ -25,6 +25,7 @@
 #endif
 
 #include "config.h"
+#include "cocoa_calls.h"
 #include "macdrv.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(cursor);
@@ -32,6 +33,13 @@ WINE_DEFAULT_DEBUG_CHANNEL(cursor);
 
 static pthread_mutex_t cursor_cache_mutex = PTHREAD_MUTEX_INITIALIZER;
 static CFMutableDictionaryRef cursor_cache;
+
+/* GW2 on Mac (WINE_MACDRV_CLIP=changes): the rectangle ClipCursor last passed to the main thread,
+   whether that succeeded, and clip_serial before that call. */
+static pthread_mutex_t clip_mutex = PTHREAD_MUTEX_INITIALIZER;
+static bool clip_applied;
+static CGRect clip_applied_rect;
+static unsigned int clip_applied_serial;
 
 
 struct system_cursors
@@ -661,7 +669,10 @@ void macdrv_DestroyCursorIcon(HCURSOR cursor)
  */
 BOOL macdrv_ClipCursor(const RECT *clip, BOOL reset)
 {
+    unsigned int serial = 0;
+    bool unchanged;
     CGRect rect;
+    BOOL ret;
 
     TRACE("%s %u\n", wine_dbgstr_rect(clip), reset);
 
@@ -676,7 +687,36 @@ BOOL macdrv_ClipCursor(const RECT *clip, BOOL reset)
     /* FIXME: This needs to be done not just in this process but in all of the
        ones for this WINEPREFIX.  Broadcast a message to do that. */
 
-    return macdrv_clip_cursor(rect);
+    /* GW2 on Mac (WINE_MACDRV_CLIP=changes): the main thread would find the clipping it has. The
+       record holds while clip_serial is what it was before the call that made it, so a call that
+       changed the clipping, or anything that did since, sends the next one too. A reset always
+       goes, and so does a call after a failed one. */
+    if (clip_changes)
+    {
+        serial = __atomic_load_n(&clip_serial, __ATOMIC_ACQUIRE);
+        pthread_mutex_lock(&clip_mutex);
+        unchanged = !reset && clip_applied && clip_applied_serial == serial &&
+                    CGRectEqualToRect(clip_applied_rect, rect);
+        pthread_mutex_unlock(&clip_mutex);
+        if (unchanged)
+        {
+            TRACE("unchanged, not sent\n");
+            return TRUE;
+        }
+    }
+
+    ret = macdrv_clip_cursor(rect);
+
+    if (clip_changes)
+    {
+        if (!ret) WARN("%s not applied\n", wine_dbgstr_cgrect(rect));
+        pthread_mutex_lock(&clip_mutex);
+        clip_applied = ret;
+        clip_applied_rect = rect;
+        clip_applied_serial = serial;
+        pthread_mutex_unlock(&clip_mutex);
+    }
+    return ret;
 }
 
 

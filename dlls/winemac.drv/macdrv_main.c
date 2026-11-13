@@ -25,6 +25,7 @@
 #endif
 
 #include "config.h"
+#include "cocoa_calls.h"
 #include "macdrv.h"
 #include "surface_frame.h"
 #include "gcmouse_scale.h"
@@ -56,6 +57,10 @@ bool use_gcmouse = false;  /* from compatdb, see setup_options */
 bool surface_copy = false;  /* WINE_MACDRV_SURFACE, see setup_options */
 bool surface_skip = false;
 double gcmouse_scale = 1;  /* WINE_MACDRV_MOUSE_SCALE, see setup_options */
+bool view_changes = false;  /* WINE_MACDRV_VIEW and the next three, see cocoa_calls.h */
+bool clip_changes = false;
+bool call_quiet = false;
+bool drain_fionread = false;
 /* Where the input method window goes, in client coordinates of the focus
    window, for a program that never places it; unset by default. */
 bool ime_fallback_position_set = false;
@@ -270,6 +275,17 @@ static inline DWORD get_config_key(HKEY defkey, HKEY appkey, const char *name,
 }
 
 
+/* GW2 on Mac: whether the variable <name>, whose value is <str>, is set to <value>. Another value
+   is logged and counts as unset. */
+static bool switch_is(const char *name, const char *str, const char *value)
+{
+    if (!str) return false;
+    if (!strcmp(str, value)) return true;
+    ERR("%s=%s is not %s\n", name, debugstr_a(str), value);
+    return false;
+}
+
+
 /***********************************************************************
  *              setup_options
  *
@@ -378,6 +394,12 @@ static void setup_options(void)
        the game's mouse-look. A compatdb rule's env= sets it too. */
     if ((mouse_scale = getenv("WINE_MACDRV_MOUSE_SCALE")) && !gcmouse_parse_scale(mouse_scale, &gcmouse_scale))
         ERR("WINE_MACDRV_MOUSE_SCALE=%s is not a number above 0 and up to 100, using 1\n", debugstr_a(mouse_scale));
+
+    /* GW2 on Mac: fewer calls to the Cocoa main thread (cocoa_calls.h) */
+    view_changes = switch_is("WINE_MACDRV_VIEW", getenv("WINE_MACDRV_VIEW"), "changes");
+    clip_changes = switch_is("WINE_MACDRV_CLIP", getenv("WINE_MACDRV_CLIP"), "changes");
+    call_quiet = switch_is("WINE_MACDRV_CALL", getenv("WINE_MACDRV_CALL"), "quiet");
+    drain_fionread = switch_is("WINE_MACDRV_DRAIN", getenv("WINE_MACDRV_DRAIN"), "fionread");
 
     /* "x,y" */
     if (!get_config_key(hkey, appkey, "IMEFallbackPosition", buffer, sizeof(buffer)))
