@@ -1,9 +1,9 @@
 /*
- * GW2 on Mac: the server's requests by name, for heat.c's request counts (jdrly/gw2-on-mac#60)
+ * GW2 on Mac: the server's requests by name, for heatreq.c's request counts (jdrly/gw2-on-mac#60)
  *
  * The names of enum request in include/wine/server_protocol.h, in its order, as tools/make_requests
  * writes them into server/request_trace.h for the server's trace. ntdll has no such list of its
- * own. heat.c turns each into "[REQ_<name>] = <name>", so a name the enum lacks doesn't compile,
+ * own. heatreq.c turns each into "[REQ_<name>] = <name>", so a name the enum lacks doesn't compile,
  * and checks that the list has as many as the enum. After a change to server/protocol.def, write
  * it again from the enum.
  *

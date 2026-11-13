@@ -1,4 +1,4 @@
-/* gw2 (jdrly/gw2-on-mac#60): heat.c's server requests by code, and its splits of set_cursor,
+/* gw2 (jdrly/gw2-on-mac#60): heatreq.c's server requests by code, and its splits of set_cursor,
  * get_message and set_queue_mask.
  *
  * The main thread first releases a semaphore of its own RELEASES times, so that it is the game

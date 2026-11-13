@@ -48,7 +48,7 @@
  * 10% of them and the case fails, because it no longer tests enough pulses. A failure says which
  * it was: a wait that returned another status (with it), or a waiter that didn't come back (with
  * the last round it finished). It is stress coverage, not proof; the proof that a pulse during a spin is kept is the
- * argument in heat.c. The sweep runs from a quarter of the spin's time to past its end, so pulses
+ * argument in heatspin.c. The sweep runs from a quarter of the spin's time to past its end, so pulses
  * land in the spin, at its end and in the sleep after it. The waiter's hits under event spin show
  * pulses taken during a spin.
  *
