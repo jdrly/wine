@@ -23,6 +23,10 @@
  * with WINE_WIN32U_SETCURSOR=shm (jdrly/gw2-on-mac#61), the repeats make no request: 10 set_cursor
  * requests, each run's first call, and 0 repeats.
  *
+ * With FEX_PROFILESTATS=1 as well (jdrly/gw2-on-mac#111), each of this thread's blocks has FEX's
+ * line right after its requests line, with the twelve names in their order, and the blocks add up to
+ * at least one block compiled. Without it, no block has a fex line.
+ *
  * Prints "gw2 test requests: passed" and exits 0, or names what failed and exits 1. */
 #include <stdio.h>
 #include <stdlib.h>
@@ -99,13 +103,37 @@ static long long field( const char *line, const char *name )
     return (p = strstr( line, key )) ? _atoi64( p + strlen( key ) ) : 0;
 }
 
+/* jdrly/gw2-on-mac#111: the fex line's first names, in this order */
+static const char * const fex_names[] = { "jit_ms", "jit", "miss", "rlock_ms", "wlock_ms", "smc", "sigbus", "float",
+                                          "signal_ms", "dcache_hit", "dcache_miss", "dcache_ms" };
+
+/* a block's fex line: its names checked, its jit count added to <jit> */
+static void check_fex( const char *line, long long *jit )
+{
+    const char *p = line + 3;
+    char name[32], value[32];
+    unsigned int i;
+    int n;
+
+    if (strncmp( line, "fex ", 4 ) || !strncmp( line, "fex has no slot", 15 ) || !strncmp( line, "fex stats ", 10 ))
+        FAIL( "the line after this thread's requests line isn't FEX's counters: %s", line );
+    for (i = 0; i < sizeof(fex_names) / sizeof(fex_names[0]); i++)
+    {
+        if (sscanf( p, " %31s %31s%n", name, value, &n ) != 2 || strcmp( name, fex_names[i] ))
+            FAIL( "the fex line's field %u isn't %s: %s", i + 1, fex_names[i], line );
+        if (i == 1) *jit += _atoi64( value );
+        p += n;
+    }
+}
+
 static void check_log(void)
 {
     char path[MAX_PATH * 2], want[64], line[512];
     long long blocks = 0, req_cursor = 0, req_message = 0, req_mask = 0, handle = 0, repeat = 0, others = 0;
-    long long app1 = 0, app2 = 0, other = 0, internal = 0, poll = 0, nopoll = 0;
+    long long app1 = 0, app2 = 0, other = 0, internal = 0, poll = 0, nopoll = 0, fex_lines = 0, jit = 0;
     double cursor_ms = 0;
     BOOL mine = FALSE, skips = env_is( "GW2_TEST_SETCURSOR_SKIPS", "1" );
+    BOOL fex = env_is( "FEX_PROFILESTATS", "1" ), first = FALSE;
     long long want_cursor = skips ? ROUNDS * 2 : ROUNDS * (2 + A_RUN), want_repeat = skips ? 0 : ROUNDS * A_RUN;
     FILE *f;
 
@@ -114,9 +142,24 @@ static void check_log(void)
     snprintf( want, sizeof(want), "requests thread %04lx ", GetCurrentThreadId() );
     while (fgets( line, sizeof(line), f ))
     {
+        BOOL after = first;  /* the line right after a requests line */
+
+        first = FALSE;
         if (!strncmp( line, "requests thread ", 16 ))
         {
             if ((mine = !strncmp( line, want, strlen( want ) ))) blocks++;
+            first = TRUE;
+            continue;
+        }
+        if (!strncmp( line, "fex ", 4 ))
+        {
+            if (!fex) FAIL( "a fex line without FEX_PROFILESTATS: %s", line );
+            if (!after) FAIL( "a fex line that doesn't follow a requests line: %s", line );
+        }
+        if (mine && after && fex)
+        {
+            check_fex( line, &jit );
+            fex_lines++;
             continue;
         }
         if (!mine) continue;
@@ -153,7 +196,11 @@ static void check_log(void)
             "other %lld; message 0x8001 %lld 0x8002 %lld; set_queue_mask poll %lld nopoll %lld\n",
             blocks, req_cursor, cursor_ms, req_message, req_mask, handle, repeat, others, internal, other,
             app1, app2, poll, nopoll );
+    if (fex) printf( "gw2 test requests: %lld fex lines of this thread, jit %lld\n", fex_lines, jit );
     if (!blocks) FAIL( "no block of this thread: it isn't the game thread" );
+    if (fex && (fex_lines != blocks || !jit))
+        FAIL( "%lld fex lines in %lld blocks of this thread, jit %lld: each block needs one, and FEX compiled code",
+              fex_lines, blocks, jit );
     /* the splits count every request of a block, the req lines only a block's twelve most frequent,
        where the 10 requests with skips may not be */
     if (req_cursor != want_cursor && !(skips && !req_cursor))

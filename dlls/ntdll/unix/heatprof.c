@@ -3,7 +3,7 @@
  *
  * Off unless WINE_HEAT_PROF=1 is set for WINE_HEAT_EXE (heat.c decides, in heat_init()). Then a
  * thread of its own that runs no Windows code, with every signal blocked, waits until FEX is
- * loaded, checks that it is the FEX heatprof.h was read from, and only then installs a SIGPROF
+ * loaded, checks that it is a FEX it knows (heatprof.h says which), and only then installs a SIGPROF
  * handler. It sends SIGPROF about WINE_HEAT_PROF_HZ (default 1000) times a second, at random
  * intervals of half to one and a half of the mean on a timer macOS doesn't coalesce, to the game
  * thread, the busiest unnamed thread that started in the exe, and with WINE_HEAT_PROF_THREADS
@@ -91,6 +91,7 @@
 #include "unix_private.h"
 #include "heat.h"
 #include "heatprof.h"
+#include "heatfex.h"
 
 #define HEAT_PROF_TARGETS 3     /* 0 game, 1 render, 2 worker */
 #define HEAT_PROF_RING    512   /* samples a target's ring holds */
@@ -143,6 +144,9 @@ static mach_timebase_info_data_t heat_prof_timebase;
 static char heat_prof_bin_path[1024], heat_prof_txt_path[1024];
 static FILE *heat_prof_bin, *heat_prof_txt;
 static ULONG_PTR heat_prof_exe_lo, heat_prof_exe_hi;
+/* WINE_HEAT_PROF_FEX (jdrly/gw2-on-mac#111): the FEX of mine it names; size 0 for none */
+static unsigned char heat_prof_fex_guid[16];
+static unsigned int heat_prof_fex_age, heat_prof_fex_size;
 
 static double heat_prof_seconds(void)
 {
@@ -513,8 +517,11 @@ static BOOL heat_prof_fex_pinned( ULONG_PTR base, char *found, size_t size )
             continue;
         for (j = 0, len = 0; j < 16; j++) len += snprintf( found + len, size - len, "%02x", cv.guid[j] );
         snprintf( found + len, size - len, "%x size %#x", (unsigned int)cv.age, (unsigned int)nt.OptionalHeader.SizeOfImage );
-        return !memcmp( cv.guid, HEAT_FEX_PIN_GUID, 16 ) && cv.age == HEAT_FEX_PIN_AGE &&
-               nt.OptionalHeader.SizeOfImage == HEAT_FEX_PIN_SIZE;
+        if (!memcmp( cv.guid, HEAT_FEX_PIN_GUID, 16 ) && cv.age == HEAT_FEX_PIN_AGE &&
+            nt.OptionalHeader.SizeOfImage == HEAT_FEX_PIN_SIZE)
+            return TRUE;
+        return heat_prof_fex_size && !memcmp( cv.guid, heat_prof_fex_guid, 16 ) && cv.age == heat_prof_fex_age &&
+               nt.OptionalHeader.SizeOfImage == heat_prof_fex_size;
     }
     return FALSE;
 }
@@ -903,55 +910,52 @@ static void *heat_prof_main( void *arg )
 /***********************************************************************
  *  FEX's counters (FEX_PROFILESTATS=1)
  *
- * heat_dump() calls this every 5 seconds and at exit, under its lock: the game thread's FEX
- * counters, as the difference from the last call for the same thread.
+ * heat_prof_fex_map() maps FEX's stats object for heat.c's requests log too (jdrly/gw2-on-mac#111).
+ * heat_dump() calls heat_prof_fex_stats() every 5 seconds and at exit, under its lock: the game
+ * thread's FEX counters, as the difference from the last call for the same thread.
  */
-int heat_prof_fex_stats( char *buf, int size )
+
+/* fex-<pid>-stats, mapped read-only with its size in <size>, or NULL: FEX keeps none, or hasn't
+ * sized it yet. The caller unmaps it. */
+const unsigned char *heat_prof_fex_map( size_t *size )
 {
-    static const unsigned int at[] = { HEAT_FEX_STATS_JIT_TIME, HEAT_FEX_STATS_JIT_COUNT, HEAT_FEX_STATS_MISS,
-                                       HEAT_FEX_STATS_RLOCK, HEAT_FEX_STATS_WLOCK, HEAT_FEX_STATS_SMC,
-                                       HEAT_FEX_STATS_SIGBUS, HEAT_FEX_STATS_FLOAT, HEAT_FEX_STATS_SIG_TIME };
-    static unsigned long long prev[ARRAY_SIZE(at)], prev_t;
-    static DWORD prev_tid;
-    unsigned long long v[ARRAY_SIZE(at)], d[ARRAY_SIZE(at)], now = mach_absolute_time();
-    DWORD tid = __atomic_load_n( &heat_prof_targets[0].tid, __ATOMIC_RELAXED );
-    const unsigned char *base, *slot = NULL;
-    unsigned int used = 0, off, i, slot_tid = 0, slot_size = 0;
     char name[32];
     struct stat st;
-    int fd, len = 0;
+    void *base = MAP_FAILED;
+    int fd;
+
+    snprintf( name, sizeof(name), "fex-%d-stats", getpid() );
+    if ((fd = shm_open( name, O_RDONLY, 0 )) == -1) return NULL;
+    if (!fstat( fd, &st ) && st.st_size >= HEAT_FEX_STATS_HEADER)
+        base = mmap( NULL, st.st_size, PROT_READ, MAP_SHARED, fd, 0 );
+    close( fd );
+    if (base == MAP_FAILED) return NULL;
+    *size = st.st_size;
+    return base;
+}
+
+int heat_prof_fex_stats( char *buf, int size )
+{
+    static unsigned long long prev[HEAT_FEX_FIELDS_OLD], prev_t;
+    static DWORD prev_tid;
+    unsigned long long v[HEAT_FEX_FIELDS_OLD], d[HEAT_FEX_FIELDS_OLD], now = mach_absolute_time();
+    DWORD tid = __atomic_load_n( &heat_prof_targets[0].tid, __ATOMIC_RELAXED );
+    const unsigned char *base, *slot = NULL;
+    unsigned int i, slot_size, slots;
+    size_t bytes;
+    int len = 0, found;
     double ms = (double)heat_prof_timebase.numer / heat_prof_timebase.denom / 1e6;
 
-    if (!tid || size <= 0) return 0;
-    snprintf( name, sizeof(name), "fex-%d-stats", getpid() );
-    if ((fd = shm_open( name, O_RDONLY, 0 )) == -1) return 0;
-    if (fstat( fd, &st ) || st.st_size < HEAT_FEX_STATS_HEADER ||
-        (base = mmap( NULL, st.st_size, PROT_READ, MAP_SHARED, fd, 0 )) == MAP_FAILED)
-    {
-        close( fd );
-        return 0;
-    }
-    close( fd );
-    memcpy( &slot_size, base + HEAT_FEX_STATS_H_SLOT, 2 );
-    slot_size &= 0xffff;
-    memcpy( &used, base + HEAT_FEX_STATS_H_SIZE, 4 );
-    if (used > st.st_size) used = st.st_size;
-    if (base[HEAT_FEX_STATS_H_VERSION] == HEAT_FEX_STATS_VERSION && slot_size == HEAT_FEX_STATS_SLOT)
-    {
-        for (off = HEAT_FEX_STATS_HEADER; off + HEAT_FEX_STATS_SLOT <= used; off += HEAT_FEX_STATS_SLOT)
-        {
-            memcpy( &slot_tid, base + off + HEAT_FEX_STATS_TID, 4 );
-            if (slot_tid == tid) { slot = base + off; break; }
-        }
-    }
-    else len = snprintf( buf, size, "fex stats version %u slot %u, not %u and %u\n", base[HEAT_FEX_STATS_H_VERSION],
-                         slot_size, HEAT_FEX_STATS_VERSION, HEAT_FEX_STATS_SLOT );
-    if (slot)
+    if (!tid || size <= 0 || !(base = heat_prof_fex_map( &bytes ))) return 0;
+    found = heat_fex_find( base, bytes, tid, &slot, &slot_size, &slots );
+    if (found == -1)
+        len = snprintf( buf, size, "fex stats version %u slot %u\n", base[HEAT_FEX_STATS_H_VERSION], slot_size );
+    else if (found)
     {
         BOOL same = tid == prev_tid;
-        for (i = 0; i < ARRAY_SIZE(at); i++)
+        for (i = 0; i < HEAT_FEX_FIELDS_OLD; i++)
         {
-            memcpy( &v[i], slot + at[i], 8 );
+            memcpy( &v[i], slot + heat_fex_fields[i].at, 8 );
             d[i] = same ? v[i] - prev[i] : v[i];
             prev[i] = v[i];
         }
@@ -967,9 +971,8 @@ int heat_prof_fex_stats( char *buf, int size )
     }
     /* FEX gives a slot to each thread at its start while it has room; on macOS it can't grow the
      * object past its first size */
-    else if (!len) len = snprintf( buf, size, "fex thread %04x has no slot of %u\n", (unsigned int)tid,
-                                   used > HEAT_FEX_STATS_HEADER ? (used - HEAT_FEX_STATS_HEADER) / HEAT_FEX_STATS_SLOT : 0 );
-    munmap( (void *)base, st.st_size );
+    else len = snprintf( buf, size, "fex thread %04x has no slot of %u\n", (unsigned int)tid, slots );
+    munmap( (void *)base, bytes );
     return len < size ? len : size - 1;
 }
 
@@ -1010,6 +1013,9 @@ BOOL heat_prof_init( const char *dir )
         if (n == 6 && !strncmp( p, "render", 6 )) heat_prof_want |= 1 << 1;
         else if (n == 6 && !strncmp( p, "worker", 6 )) heat_prof_want |= 1 << 2;
     }
+    /* jdrly/gw2-on-mac#111: heatfex.h has the form; a value not in it names no FEX */
+    if ((p = getenv( "WINE_HEAT_PROF_FEX" )))
+        heat_fex_parse_id( p, heat_prof_fex_guid, &heat_prof_fex_age, &heat_prof_fex_size );
     rings = mmap( NULL, HEAT_PROF_TARGETS * HEAT_PROF_RING * sizeof(*rings), PROT_READ | PROT_WRITE,
                   MAP_PRIVATE | MAP_ANON, -1, 0 );
     if (rings == MAP_FAILED) return FALSE;

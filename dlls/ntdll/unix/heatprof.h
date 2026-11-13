@@ -23,9 +23,16 @@
  *  FEX, as the sampler reads it
  *
  * Every offset and value the sampler takes from FEX's memory, read from FEX at 9d4fa4b46b1 (the
- * commit Mach9 0.3.1 pins). FEX's source isn't in this tree, so nothing checks these at build
- * time. The sampler refuses to start unless the process runs that FEX: libarm64ecfex.dll's
- * CodeView record and image size must be the ones below.
+ * commit Mach9 0.3.1 pins). FEX's source isn't in this tree, so nothing here checks these at build
+ * time. My FEX fork does: its Source/Windows/Common/GW2Contract.h fails the fork's build when one
+ * of them moves (jdrly/gw2-on-mac#109).
+ *
+ * The sampler refuses to start unless libarm64ecfex.dll's CodeView record and image size are those
+ * of a FEX it knows: the engine's, below, or the one WINE_HEAT_PROF_FEX names (jdrly/gw2-on-mac#111),
+ * "<the GUID's 32 hex digits, in file order>:<age>:<SizeOfImage>". The app sets that for my FEX
+ * from the line "libarm64ecfex.dll: build id ..." of its VERSION, and a build of my fork has these
+ * offsets or doesn't build. A build id can't tell a FEX of mine from another, so the variable is
+ * what says "this one is mine".
  */
 
 /* Mach9 v0.3.1's lib/wine/aarch64-windows/libarm64ecfex.dll (sha256 99eb322e...): its CodeView
@@ -65,26 +72,8 @@
 #define HEAT_FEX_TAIL_COPY       40   /* sizeof(JITCodeTail) */
 #define HEAT_FEX_TAIL_ID         32   /* the bytes before SpinLockFutex, which FEX changes in place */
 
-/* FEX_PROFILESTATS=1: the shared memory object fex-<pid>-stats
- * (Source/Windows/UnixLib/FEXUnixLib.cpp:154-157), a ThreadStatsHeader and then ThreadStats slots
- * (FEXCore/include/FEXCore/Utils/SHMStats.h:45-78). A slot with TID 0 is free. Times are in
- * CNTVCT_EL0 ticks, the counter mach_absolute_time() reads. */
-#define HEAT_FEX_STATS_VERSION   2
-#define HEAT_FEX_STATS_HEADER    64   /* sizeof(ThreadStatsHeader) */
-#define HEAT_FEX_STATS_SLOT      112  /* sizeof(ThreadStats), also ThreadStatsHeader::ThreadStatsSize */
-#define HEAT_FEX_STATS_H_VERSION 0    /* uint8_t Version */
-#define HEAT_FEX_STATS_H_SLOT    2    /* uint16_t ThreadStatsSize */
-#define HEAT_FEX_STATS_H_SIZE    56   /* uint32_t Size: the bytes in use */
-#define HEAT_FEX_STATS_TID       4    /* uint32_t TID: the Windows thread id */
-#define HEAT_FEX_STATS_JIT_TIME  8    /* AccumulatedJITTime: compiling */
-#define HEAT_FEX_STATS_SIG_TIME  16   /* AccumulatedSignalTime */
-#define HEAT_FEX_STATS_SIGBUS    24   /* AccumulatedSIGBUSCount */
-#define HEAT_FEX_STATS_SMC       32   /* AccumulatedSMCCount: writes to pages with translated code */
-#define HEAT_FEX_STATS_FLOAT     40   /* AccumulatedFloatFallbackCount */
-#define HEAT_FEX_STATS_MISS      48   /* AccumulatedCacheMissCount: lookup cache misses */
-#define HEAT_FEX_STATS_RLOCK     56   /* AccumulatedCacheReadLockTime */
-#define HEAT_FEX_STATS_WLOCK     64   /* AccumulatedCacheWriteLockTime */
-#define HEAT_FEX_STATS_JIT_COUNT 72   /* AccumulatedJITCount: blocks compiled */
+/* FEX_PROFILESTATS=1: FEX's stats object, its layout in heatfex.h (HEAT_FEX_STATS_*), which a
+ * native test builds without Wine */
 
 /***********************************************************************
  *  the sample file, heat-prof-<pid>.bin
@@ -147,6 +136,7 @@ struct heat_prof_rec
 struct thread_data;
 extern BOOL heat_prof_init( const char *dir );
 extern int heat_prof_fex_stats( char *buf, int size );
+extern const unsigned char *heat_prof_fex_map( size_t *size );
 extern void heat_prof_thread_lock(void);
 extern void heat_prof_thread_add( struct thread_data *data, pthread_t thread );
 extern void heat_prof_thread_gone( struct thread_data *data );
