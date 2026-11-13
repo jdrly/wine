@@ -177,6 +177,7 @@ int heat_req_block( char *buf, size_t size, unsigned int row, double now,
     unsigned long long n[REQ_NB_REQUESTS], t[REQ_NB_REQUESTS], s[HS_NB], m[HEAT_MSGS], hc[HC_NB], ht[HT_NB];
     struct heat_req_row *cur = &heat_reqs[row], *prev = &heat_reqs_prev[row];
     unsigned int i, k, msgs = __atomic_load_n( &cur->msgs, __ATOMIC_ACQUIRE );
+    struct heat_fex_clock clock;
     int len;
 
     heat_req_delta( n, cur->n, prev->n, REQ_NB_REQUESTS );
@@ -190,8 +191,11 @@ int heat_req_block( char *buf, size_t size, unsigned int row, double now,
                     (long long)time( NULL ) );
     prev->printed = now;
     if (fex && len < size)
+    {
+        heat_fex_clock_read( &clock );
         len += heat_fex_line( buf + len, size - len, fex, fex_size, tid, prev->fex,
-                              (double)heat_timebase.numer / heat_timebase.denom / 1e6 );
+                              heat_fex_ms( &heat_fex_started, &clock, (double)heat_timebase.numer / heat_timebase.denom / 1e6 ) );
+    }
     if (len < size) len += snprintf( buf + len, size - len, "counters" );
     for (i = 0; i < HC_NB && len < size; i++)
         if (hc[i]) len += snprintf( buf + len, size - len, " %s %llu", heat_counter_names[i], hc[i] );

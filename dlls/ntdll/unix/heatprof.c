@@ -141,6 +141,7 @@ static unsigned int heat_prof_hz = 1000;
 static int heat_prof_own[2];             /* the sampler thread's pipe, after atexit() with heat_prof_file_lock */
 static unsigned long long *heat_prof_named;
 static mach_timebase_info_data_t heat_prof_timebase;
+static struct heat_fex_clock heat_prof_fex_started;  /* jdrly/gw2-on-mac#156 */
 static char heat_prof_bin_path[1024], heat_prof_txt_path[1024];
 static FILE *heat_prof_bin, *heat_prof_txt;
 static ULONG_PTR heat_prof_exe_lo, heat_prof_exe_hi;
@@ -943,10 +944,13 @@ int heat_prof_fex_stats( char *buf, int size )
     const unsigned char *base, *slot = NULL;
     unsigned int i, slot_size, slots;
     size_t bytes;
+    struct heat_fex_clock clock;
     int len = 0, found;
-    double ms = (double)heat_prof_timebase.numer / heat_prof_timebase.denom / 1e6;
+    double ms = (double)heat_prof_timebase.numer / heat_prof_timebase.denom / 1e6, fex_ms;
 
     if (!tid || size <= 0 || !(base = heat_prof_fex_map( &bytes ))) return 0;
+    heat_fex_clock_read( &clock );
+    fex_ms = heat_fex_ms( &heat_prof_fex_started, &clock, ms );
     found = heat_fex_find( base, bytes, tid, &slot, &slot_size, &slots );
     if (found == -1)
         len = snprintf( buf, size, "fex stats version %u slot %u\n", base[HEAT_FEX_STATS_H_VERSION], slot_size );
@@ -964,8 +968,8 @@ int heat_prof_fex_stats( char *buf, int size )
         else len = snprintf( buf, size, "fex thread %04x total", (unsigned int)tid );
         if (len < size)
             len += snprintf( buf + len, size - len, " jit_ms %.3f jit %llu miss %llu rlock_ms %.3f wlock_ms %.3f "
-                             "smc %llu sigbus %llu float %llu signal_ms %.3f\n", d[0] * ms, d[1], d[2], d[3] * ms,
-                             d[4] * ms, d[5], d[6], d[7], d[8] * ms );
+                             "smc %llu sigbus %llu float %llu signal_ms %.3f\n", d[0] * fex_ms, d[1], d[2], d[3] * fex_ms,
+                             d[4] * fex_ms, d[5], d[6], d[7], d[8] * fex_ms );
         prev_tid = tid;
         prev_t = now;
     }
@@ -1030,6 +1034,7 @@ BOOL heat_prof_init( const char *dir )
         if (!heat_prof_pipe( heat_prof_targets[k].pipe )) return FALSE;
     }
     mach_timebase_info( &heat_prof_timebase );
+    heat_fex_clock_read( &heat_prof_fex_started );
     snprintf( heat_prof_bin_path, sizeof(heat_prof_bin_path), "%s/heat-prof-%d.bin", dir, getpid() );
     snprintf( heat_prof_txt_path, sizeof(heat_prof_txt_path), "%s/heat-prof-%d.txt", dir, getpid() );
 

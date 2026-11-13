@@ -116,6 +116,7 @@ struct heat_row *heat_rows;
 unsigned int heat_nrows;
 __thread struct heat_row *heat_self;
 mach_timebase_info_data_t heat_timebase;
+struct heat_fex_clock heat_fex_started;  /* jdrly/gw2-on-mac#156 */
 static char heat_log_path[1024];
 static char heat_exe[256];
 static unsigned long long heat_started;
@@ -506,6 +507,7 @@ void heat_init(void)
     {
         mach_timebase_info( &heat_timebase );
         heat_started = heat_now();
+        heat_fex_clock_read( &heat_fex_started );
         snprintf( heat_exe, sizeof(heat_exe), "%s", exe );
         snprintf( heat_log_path, sizeof(heat_log_path), "%s/heat-%d.log", dir && *dir ? dir : "/tmp", getpid() );
     }
