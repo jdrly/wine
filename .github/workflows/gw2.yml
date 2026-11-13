@@ -47,7 +47,8 @@
 # tests: tests/gw2/*.c built for Win64 x86_64 with llvm-mingw. On a pull request, window.exe under
 #   the engine with my winemac.so says whether the Mac driver starts on the runner;
 #   tests/gw2/native/frames.c and mouse_scale.c, built natively, test the driver's frame decision
-#   and its mouse speed factor (WINE_MACDRV_MOUSE_SCALE); layered.exe under the engine with my
+#   and its mouse speed factor (WINE_MACDRV_MOUSE_SCALE), and fexstats.c the reader of FEX's
+#   counters (jdrly/gw2-on-mac#111); layered.exe under the engine with my
 #   winemac.so counts the frames WINE_MACDRV_SURFACE skips, where the driver starts; and
 #   tests/gw2/matrix.zsh runs them all under the engine from the release tarball: with its own
 #   ntdll.so, and with mine in each WINE_HEAT_WAKE mode, with no WINE_HEAT_* variable and with
@@ -475,7 +476,7 @@ jobs:
             echo '```'
           } | tee -a "$GITHUB_STEP_SUMMARY"
       # only the scripts and the test programs, not the whole Wine tree; the Mac driver's sources for
-      # the headers tests/gw2/native/*.c build
+      # the headers tests/gw2/native/*.c build, and ntdll's unix side for fexstats.c's
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ env.COMMIT }}
@@ -483,6 +484,7 @@ jobs:
             .github/gw2
             tests/gw2
             dlls/winemac.drv
+            dlls/ntdll/unix
           persist-credentials: false
       - name: zsh syntax
         run: for f in .github/gw2/*.zsh tests/gw2/*.zsh; do zsh -n "$f"; echo "ok $f"; done
@@ -574,6 +576,13 @@ jobs:
         run: |
           clang -std=gnu23 -O2 -Wall -Werror -o "$RUNNER_TEMP/mouse_scale" tests/gw2/native/mouse_scale.c
           "$RUNNER_TEMP/mouse_scale"
+      # jdrly/gw2-on-mac#111: the requests log's fex line, built natively from
+      # dlls/ntdll/unix/heatfex.h and run on stats objects of FEX's versions 2 and 3
+      - name: FEX's counters, natively
+        if: github.event_name == 'pull_request'
+        run: |
+          clang -std=gnu23 -O2 -Wall -Werror -o "$RUNNER_TEMP/fexstats" tests/gw2/native/fexstats.c
+          "$RUNNER_TEMP/fexstats"
       # test 12: layered.exe's 600 frames, every third new, under the engine with my winemac.so and
       # the macsurface channel on. The driver's line at the 600th flush has to say 400 skipped with
       # WINE_MACDRV_SURFACE=copy,skip, and 0 with copy and unset. Only where the Mac driver starts,

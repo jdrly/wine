@@ -11,6 +11,8 @@
  *                         every 5 seconds and at exit. No clock is read while it is off.
  *                         The server requests of the game thread and two more go to
  *                         heat-requests-<pid>.log (jdrly/gw2-on-mac#60, "server requests" below).
+ *                         With FEX_PROFILESTATS=1 each of those blocks has its thread's FEX
+ *                         counters (jdrly/gw2-on-mac#111).
  *   WINE_HEAT_WAKE=one    a semaphore release of count n makes at most n wake-one calls and
  *                         stops at the first that finds no waiter. msync wakes every waiter on
  *                         every release. Events and mutexes keep that.
@@ -93,6 +95,7 @@
 #include "heat.h"
 #include "heatprof.h"
 #include "heatreq.h"
+#include "heatfex.h"
 
 unsigned int heat_mode;
 
@@ -350,6 +353,11 @@ static void heat_dump(void)
  * Each block is the change since that thread's last block:
  *
  *   requests thread 01a4 from 115.0 to 120.0 time 1762912345
+ *   fex jit_ms 812.375 jit 20411 miss 5120 ... dcache_ms 0.000   with FEX_PROFILESTATS=1, the
+ *                                              thread's FEX counters (jdrly/gw2-on-mac#111): the
+ *                                              change since its last block's line, or "fex has no
+ *                                              slot of <n>", or "fex stats version <v> slot <bytes>"
+ *                                              for a stats object this file doesn't read (heatfex.h)
  *   counters release 1000 lock_sleep 82 server_ms 4.120   the thread's counters and timers that
  *                                              changed, as in the counters file (jdrly/gw2-on-mac#99)
  *   req set_cursor 1010 21.345                 count and ms of the twelve most frequent
@@ -388,6 +396,7 @@ struct heat_req_row
     double             printed;             /* the end of the thread's last block */
     unsigned long long hc[HC_NB], ht[HT_NB];  /* its heat_row at its last block (jdrly/gw2-on-mac#99) */
     unsigned long long server;              /* its HT_SERVER at the last dump */
+    unsigned long long fex[HEAT_FEX_FIELDS];  /* its FEX counters at its last line (jdrly/gw2-on-mac#111) */
 };
 
 #define HEAT_REQ_NAME(name) [REQ_##name] = #name,
@@ -398,6 +407,7 @@ C_ASSERT( 0 HEAT_REQUESTS(HEAT_REQ_ONE) == REQ_NB_REQUESTS );
 static struct heat_req_row *heat_reqs;       /* by row, as heat_rows */
 static struct heat_req_row *heat_reqs_prev;  /* the dumper's: each row at its last block */
 static char heat_req_path[1024];
+static BOOL heat_req_fex;                    /* FEX_PROFILESTATS=1 (jdrly/gw2-on-mac#111) */
 
 void heat_server_done( const union generic_request *sent, const union generic_reply *reply,
                        unsigned int status, unsigned long long start )
@@ -475,9 +485,12 @@ static unsigned int heat_req_top( const unsigned long long *v, unsigned int nb )
     return best;
 }
 
-/* row <row>'s block into <buf>: the change since its last block; returns its length */
-static int heat_req_block( char *buf, size_t size, unsigned int row, double now )
+/* row <row>'s block into <buf>: the change since its last block, with the fex line when <fex> is
+ * FEX's stats object (<fex_size> bytes); returns its length */
+static int heat_req_block( char *buf, size_t size, unsigned int row, double now,
+                           const unsigned char *fex, size_t fex_size )
 {
+    DWORD tid = __atomic_load_n( &heat_rows[row].tid, __ATOMIC_RELAXED );
     unsigned long long n[REQ_NB_REQUESTS], t[REQ_NB_REQUESTS], s[HS_NB], m[HEAT_MSGS], hc[HC_NB], ht[HT_NB];
     struct heat_req_row *cur = &heat_reqs[row], *prev = &heat_reqs_prev[row];
     unsigned int i, k, msgs = __atomic_load_n( &cur->msgs, __ATOMIC_ACQUIRE );
@@ -490,10 +503,13 @@ static int heat_req_block( char *buf, size_t size, unsigned int row, double now 
     heat_req_delta( hc, heat_rows[row].c, prev->hc, HC_NB );  /* jdrly/gw2-on-mac#99 */
     heat_req_delta( ht, heat_rows[row].t, prev->ht, HT_NB );
 
-    len = snprintf( buf, size, "requests thread %04x from %.1f to %.1f time %lld\ncounters",
-                    __atomic_load_n( &heat_rows[row].tid, __ATOMIC_RELAXED ), prev->printed, now,
+    len = snprintf( buf, size, "requests thread %04x from %.1f to %.1f time %lld\n", tid, prev->printed, now,
                     (long long)time( NULL ) );
     prev->printed = now;
+    if (fex && len < size)
+        len += heat_fex_line( buf + len, size - len, fex, fex_size, tid, prev->fex,
+                              (double)heat_timebase.numer / heat_timebase.denom / 1e6 );
+    if (len < size) len += snprintf( buf + len, size - len, "counters" );
     for (i = 0; i < HC_NB && len < size; i++)
         if (hc[i]) len += snprintf( buf + len, size - len, " %s %llu", heat_counter_names[i], hc[i] );
     for (i = 0; i < HT_NB && len < size; i++)
@@ -529,6 +545,8 @@ static void heat_req_dump(void)
     unsigned long long server, d, most[2] = {0};
     unsigned int i, game = 0, rows = __atomic_load_n( &heat_nrows, __ATOMIC_RELAXED ), busy[2];
     double now = (heat_now() - heat_started) / 1e9;
+    const unsigned char *fex = NULL;
+    size_t fex_size = 0;
     int len, fd;
 
     if (rows > HEAT_ROWS) rows = HEAT_ROWS;
@@ -558,9 +576,12 @@ static void heat_req_dump(void)
         }
     }
 
-    len = heat_req_block( buf, sizeof(buf), game, now );
+    /* jdrly/gw2-on-mac#111: no fex line while FEX hasn't made its stats object, or makes none */
+    if (heat_req_fex) fex = heat_prof_fex_map( &fex_size );
+    len = heat_req_block( buf, sizeof(buf), game, now, fex, fex_size );
     for (i = 0; i < 2 && busy[i] < rows; i++)
-        len += heat_req_block( buf + len, sizeof(buf) - len, busy[i], now );
+        len += heat_req_block( buf + len, sizeof(buf) - len, busy[i], now, fex, fex_size );
+    if (fex) munmap( (void *)fex, fex_size );
 
     if ((fd = open( heat_req_path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644 )) == -1) return;
     write( fd, buf, len );
@@ -1254,6 +1275,8 @@ void heat_init(void)
     {
         heat_reqs_prev = heat_reqs + HEAT_ROWS;
         snprintf( heat_req_path, sizeof(heat_req_path), "%s/heat-requests-%d.log", dir && *dir ? dir : "/tmp", getpid() );
+        /* jdrly/gw2-on-mac#111: FEX's own switch, which a rule's env= sets for FEX and this file alike */
+        heat_req_fex = (p = getenv( "FEX_PROFILESTATS" )) && !strcmp( p, "1" );
     }
     if (mode & (HEAT_COUNT | HEAT_PROF))
     {
