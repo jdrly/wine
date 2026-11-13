@@ -16,7 +16,8 @@
 # Xcode 27's clang isn't the engine's, so my files can't be the engine's byte for byte. The patched
 # compare is the same either way, my base build against this commit's from one run and one
 # toolchain, and the tests on the engine are the proof that files from the other compiler work.
-# The flags stay the engine's: its unix side is built at -O0.
+# The flags stay the engine's: Mach9 builds its unix side with -g -O2, and my build's compile
+# commands are those of Mach9's release run (-O0 was the CrossOver engine's).
 #
 # build: one Wine tree configured as Mach9 configures its own (.github/gw2/wine.zsh), in the
 #   engine's paths, with Xcode $XCODE_VERSION, macOS $MACOSX_DEPLOYMENT_TARGET, llvm-mingw
