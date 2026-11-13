@@ -9,7 +9,8 @@
  *
  * The tick rate (jdrly/gw2-on-mac#156): heat_fex_ms() turns a Mach rate and two readings of both
  * clocks into milliseconds per FEX tick, for a counter at Mach's 24 MHz and one at 1 GHz. Then on
- * this machine: the research note's check (CNTFRQ_EL0, and both counters over a 1 s sleep), and a
+ * this machine: the research note's check (the chip, hw.tbfrequency, CNTFRQ_EL0, and both counters
+ * over a 1 s sleep, where FEX's has to count 1 million to 10 billion ticks a second of Mach's), and a
  * 100 ms sleep timed the way FEX times a scope, which the fex line has to print within 10% of its
  * length. No bound depends on how long the runner lets a sleep run: Mach's clock, read just inside
  * and just outside FEX's two reads, gives the lower and the upper one.
@@ -20,6 +21,7 @@
 #include <string.h>
 #include <errno.h>
 #include <time.h>
+#include <sys/sysctl.h>
 
 #include "../../../dlls/ntdll/unix/heatfex.h"
 
@@ -83,7 +85,7 @@ static const char *line( unsigned int tid, unsigned long long *prev )
 static unsigned long long cntvct( void )
 {
     unsigned long long v;
-    __asm__ volatile( "isb; mrs %0, CNTVCT_EL0" : "=r"(v) );
+    __asm__ volatile( "isb\n\tmrs %0, CNTVCT_EL0" : "=r"(v) );
     return v;
 }
 
@@ -130,9 +132,13 @@ static void this_machine( const struct heat_fex_clock *start )
     unsigned long long frq, c0, c1, m0, m1, in0, in1, prev[HEAT_FEX_FIELDS] = { 0 };
     struct heat_fex_clock now;
     mach_timebase_info_data_t tb;
-    double mach_ms, jit_ms, inner_ms, outer_ms;
-    char buf[1024];
+    double mach_ms, jit_ms, inner_ms, outer_ms, hz;
+    char buf[1024], chip[256] = "unknown";
+    size_t chip_size = sizeof(chip) - 1, tbf_size = sizeof(unsigned long long);
+    unsigned long long tbf = 0;
 
+    sysctlbyname( "machdep.cpu.brand_string", chip, &chip_size, NULL, 0 );
+    sysctlbyname( "hw.tbfrequency", &tbf, &tbf_size, NULL, 0 );
     mach_timebase_info( &tb );
     mach_ms = (double)tb.numer / tb.denom / 1e6;
     __asm__ volatile( "mrs %0, CNTFRQ_EL0" : "=r"(frq) );
@@ -141,8 +147,18 @@ static void this_machine( const struct heat_fex_clock *start )
     sleep_ms( 1000 );
     c1 = cntvct();
     m1 = mach_absolute_time();
-    printf( "gw2 test fexstats: CNTFRQ_EL0 %llu Hz, CNTVCT_EL0 %llu ticks and mach_absolute_time %llu in a 1 s sleep, "
-            "timebase %u/%u, ratio %.3f\n", frq, c1 - c0, m1 - m0, tb.numer, tb.denom, (double)(c1 - c0) / (m1 - m0) );
+    printf( "gw2 test fexstats: %s, hw.tbfrequency %llu Hz, CNTFRQ_EL0 %llu Hz, CNTVCT_EL0 %llu ticks and "
+            "mach_absolute_time %llu in a 1 s sleep, timebase %u/%u, ratio %.3f\n", chip, tbf, frq, c1 - c0, m1 - m0,
+            tb.numer, tb.denom, (double)(c1 - c0) / (m1 - m0) );
+    /* a counter that ran, at 1 MHz to 10 GHz: per second of Mach's, however long the runner let the sleep run */
+    hz = (double)(c1 - c0) / ((m1 - m0) * mach_ms / 1000);
+    if (c1 <= c0 || hz < 1e6 || hz > 1e10)
+    {
+        printf( "gw2 test fexstats: CNTVCT_EL0 counted %llu ticks in %.3f s of Mach's, want 1 million to 10 billion a "
+                "second\n", c1 - c0, (m1 - m0) * mach_ms / 1000 );
+        failed++;
+        return;
+    }
 
     /* Mach's reads around each of FEX's: the scope is at least the inner span and at most the outer */
     m0 = mach_absolute_time();

@@ -101,10 +101,11 @@ struct heat_fex_clock
     unsigned long long mach;  /* mach_absolute_time() */
 };
 
+/* one instruction a line: Apple's assembler takes ';' for the start of a comment */
 static inline void heat_fex_clock_read( struct heat_fex_clock *c )
 {
     c->mach = mach_absolute_time();
-    __asm__ volatile( "isb; mrs %0, CNTVCT_EL0" : "=r"(c->cnt) );
+    __asm__ volatile( "isb\n\tmrs %0, CNTVCT_EL0" : "=r"(c->cnt) );
 }
 
 /* Milliseconds per FEX tick, from a reading at <start> and one at <now>, <mach_ms> being
