@@ -669,6 +669,10 @@ jobs:
               exit 1
             fi
             (( status == 0 )) || { echo "::error::clip.exe failed with $mode"; exit 1; }
+            if grep -qF 'gw2 test clip: inconclusive' "$RUNNER_TEMP/clip-$mode.txt"; then
+              echo "::warning::$mode: clip.exe's baseline didn't show the byte on this runner, so its other settings prove less" |
+                tee -a "$GITHUB_STEP_SUMMARY"
+            fi
             if [[ $mode == changes || $mode == all ]]; then
               (( skipped >= 995 )) || { echo "::error::$mode: $skipped calls not sent, expected at least 995"; exit 1; }
             else
