@@ -4,11 +4,12 @@
  * to wait, then sets one of the events after a delay that sweeps 0 to about 13 us, so that some
  * sets land while W's wait is registering with the server: then msync's contention bailout runs.
  * Every round has to end with W taking that set, within 2 s: the same number of waits completes
- * and no wake is lost. That has to hold with WINE_HEAT_MSYNC_UNREG unset (the engine's ntdll.so,
- * and mine) and set.
+ * and no wake is lost. That has to hold under the engine's ntdll.so, whose bailout leaves the
+ * registration on the server, and under mine, whose bailout unregisters (jdrly/gw2-on-mac#104).
  *
  * With WINE_HEAT_COUNT=1 and WINE_HEAT_EXE=unreg.exe, W's row in heat.c's log has to show unreg
- * above 0 with WINE_HEAT_MSYNC_UNREG=1, so the run proves it reached the bailout, and 0 without.
+ * above 0, so the run proves it reached the bailout. Mine unregisters without a switch; the
+ * variable WINE_HEAT_MSYNC_UNREG, which the app may still set, changes nothing.
  *
  * Prints "gw2 test unreg: passed" and exits 0, or names what failed and exits 1. */
 #include <stdio.h>
@@ -103,7 +104,6 @@ int main(void)
     DWORD tid, code;
     LONG i;
     long long unreg;
-    BOOL on;
 
     setvbuf( stdout, NULL, _IONBF, 0 );
     for (i = 0; i < 2; i++)
@@ -129,12 +129,11 @@ int main(void)
     /* counting: WINE_HEAT_COUNT=1, and WINE_HEAT_EXE names this program */
     if (env_is( "WINE_HEAT_COUNT", "1" ) && env_is( "WINE_HEAT_EXE", "unreg.exe" ))
     {
-        on = env_is( "WINE_HEAT_MSYNC_UNREG", "1" );
         Sleep( 6000 );  /* the counters are written every 5 s */
         if ((unreg = unreg_count( tid )) < 0) FAIL( "no row with unreg for the waiting thread" );
-        printf( "gw2 test unreg: WINE_HEAT_MSYNC_UNREG %s, the waiter's unreg %lld\n", on ? "1" : "unset", unreg );
-        if (on && !unreg) FAIL( "no wait reached the bailout" );
-        if (!on && unreg) FAIL( "unreg counted with the switch unset" );
+        printf( "gw2 test unreg: WINE_HEAT_MSYNC_UNREG %s, the waiter's unreg %lld\n",
+                env_is( "WINE_HEAT_MSYNC_UNREG", "1" ) ? "1" : "unset", unreg );
+        if (!unreg) FAIL( "no wait reached the bailout" );
     }
     printf( "gw2 test unreg: passed\n" );
     return 0;

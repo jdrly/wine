@@ -521,8 +521,9 @@ static NTSTATUS msync_wait_multiple( const int *objs, void **objs_shm, const uns
     {
         if (check_shm_contention( objs_shm, alert_obj_shm, count, tid ))
         {
-            /* WINE_HEAT_MSYNC_UNREG=1: count the bailout's unregister (athei's msync makes it now) */
-            if (heat_mode & HEAT_MSYNC_UNREG) heat_count( HC_UNREG );
+            /* athei's msync unregisters here since 0.4.0, the fix my 0.1.x build had
+             * (jdrly/gw2-on-mac#44, #104); the count is mine */
+            heat_count( HC_UNREG );
             server_remove_wait( data, &wait );
             return STATUS_PENDING;
         }
@@ -1130,6 +1131,7 @@ NTSTATUS msync_wait_objs( const DWORD count, const int *objs, BOOLEAN wait_any,
     int *alert_obj_shm = NULL;
     int single_wait = 0;
     struct deadline end;
+    LONGLONG relative = 0;  /* a relative timeout whose deadline isn't computed yet (jdrly/gw2-on-mac#101) */
     int i, ret;
 
     heat_wait_begun( timeout );  /* jdrly/gw2-on-mac#99 */
@@ -1156,8 +1158,12 @@ NTSTATUS msync_wait_objs( const DWORD count, const int *objs, BOOLEAN wait_any,
         }
         else
         {
+            /* jdrly/gw2-on-mac#101: the clock is read where the wait first needs the deadline,
+             * before it spins or sleeps, so a wait that takes its object at once reads none.
+             * A zero timeout keeps end at 0, which has always passed, and computes nothing. */
             end.monotonic = TRUE;
-            end.end = deadline_now( TRUE ) - timeout->QuadPart;
+            end.end = 0;
+            relative = timeout->QuadPart;
         }
     }
 
@@ -1269,6 +1275,12 @@ NTSTATUS msync_wait_objs( const DWORD count, const int *objs, BOOLEAN wait_any,
                 return STATUS_TIMEOUT;
             }
 
+            if (relative)
+            {
+                end.end = deadline_now( TRUE ) - relative;
+                relative = 0;
+            }
+
             /* WINE_HEAT_SPIN=event and sem: once a wait, before its first sleep */
             if (!spun)
             {
@@ -1337,6 +1349,11 @@ tryagain:
 
                     while (__atomic_load_n( &mutex->tid, __ATOMIC_SEQ_CST ))
                     {
+                        if (relative)
+                        {
+                            end.end = deadline_now( TRUE ) - relative;
+                            relative = 0;
+                        }
                         status = do_single_wait( objs[i], objs_shm[i], alert_obj, alert_obj_shm, timeout ? &end : NULL, current_tid );
                         if (status != STATUS_PENDING)
                             break;
@@ -1349,6 +1366,11 @@ tryagain:
 
                     while (!__atomic_load_n( &event->signaled, __ATOMIC_SEQ_CST ))
                     {
+                        if (relative)
+                        {
+                            end.end = deadline_now( TRUE ) - relative;
+                            relative = 0;
+                        }
                         status = do_single_wait( objs[i], objs_shm[i], alert_obj, alert_obj_shm, timeout ? &end : NULL, current_tid );
                         if (status != STATUS_PENDING)
                             break;
