@@ -54,7 +54,11 @@ SOURCES = \
 	unix/env.c \
 	unix/file.c \
 	unix/heat.c \
+	unix/heatpool.c \
 	unix/heatprof.c \
+	unix/heatreq.c \
+	unix/heatspin.c \
+	unix/heatwake.c \
 	unix/loader.c \
 	unix/loadorder.c \
 	unix/msync.c \

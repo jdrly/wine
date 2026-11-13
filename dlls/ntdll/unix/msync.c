@@ -428,7 +428,7 @@ static inline NTSTATUS msync_wait_single( int obj, void *obj_shm, const unsigned
             ret = ulock_wait( UL_COMPARE_AND_WAIT64_SHARED | ULF_NO_ERRNO, obj_shm, word, ns_timeleft );
         else if ((heat_mode & HEAT_WAKE_SKIP) && ((struct semaphore *)obj_shm)->msync_type == MSYNC_SEMAPHORE)
         {
-            /* WINE_HEAT_WAKE=skip: heat.c has why the count and its barrier make no wake lost */
+            /* WINE_HEAT_WAKE=skip: heatwake.c has why the count and its barrier make no wake lost */
             heat_sleep_on( obj );
             ret = ulock_wait( UL_COMPARE_AND_WAIT_SHARED | ULF_NO_ERRNO, obj_shm, val, ns_timeleft );
             heat_woke_on( obj );
@@ -1027,13 +1027,13 @@ static NTSTATUS do_single_wait( int obj, void *obj_shm, int alert_obj, void *ale
     return status;
 }
 
-/* WINE_HEAT_SPIN=event and sem (jdrly/gw2-on-mac#45, heat.c has the rules): before a wait-any
+/* WINE_HEAT_SPIN=event and sem (jdrly/gw2-on-mac#45, heatspin.c has the rules): before a wait-any
  * first sleeps, when every object is an event, spin until one is signaled or pulsed since the
  * wait read its pulse word, or the alert object is set; before a single, non-alertable wait first
  * sleeps on a semaphore, spin until its count is above 0. Returns -1 when none of that came and
  * the wait sleeps as before, -2 when it came and the caller tries to take it, or the index of an
  * event whose pulse the spin took. A pulse is taken here, while this thread still counts on the
- * event's slot, so that the pulser can't take it back first (heat.c). */
+ * event's slot, so that the pulser can't take it back first (heatspin.c). */
 static int heat_spin_objs( const int *objs, void **objs_shm, unsigned int *pulse_seen, int count,
                            void *alert_obj_shm, const struct deadline *end )
 {
