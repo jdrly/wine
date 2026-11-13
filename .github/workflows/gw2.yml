@@ -68,6 +68,9 @@
 #   ClipCursor 1,000 times with one rectangle in each of four settings of the Mac driver's
 #   switches; calls.exe under the engine with my winemac.so makes synchronous calls to the main
 #   thread from four threads while events arrive, unset and with WINE_MACDRV_CALL=quiet.
+#   restore.exe minimizes its window and has tests/gw2/native/reopen bring it back with the reopen
+#   Apple event, as a click on the Dock icon does, under the engine with my winemac.so and under
+#   the engine's own, and checks which WM_NCACTIVATE each sends (jdrly/gw2-on-mac#160).
 #   leftover.exe leaves a process behind, and tests/gw2/run.zsh has to fail its run, name the
 #   process and end it (jdrly/gw2-on-mac#128). rundll.exe has rundll32 call the entry point of a
 #   stand-in for arcdps's d3d11.dll: it has to fail with Wine's default order and pass with the app's
@@ -807,6 +810,47 @@ jobs:
             exit 1
           fi
           echo "ok    the engine's win32u.so fails with \"$want\"" | tee -a "$GITHUB_STEP_SUMMARY"
+      # jdrly/gw2-on-mac#160: restore.exe minimizes its window, makes the desktop the foreground
+      # window and runs tests/gw2/native/reopen, which sends the process the reopen Apple event, as a
+      # click on the Dock icon does. Under the engine with my winemac.so the window has to be the
+      # foreground window, with a nonzero WM_NCACTIVATE, before SC_RESTORE. Under the engine's own,
+      # without WineHQ's ede017e2b24, it has to get 0 while it isn't: the bug, so the test sees it.
+      # Only where the Mac driver starts and the Dock runs, which AppKit needs to minimize a window.
+      # If the system refuses the Apple event, restore.exe says inconclusive and the step warns.
+      - name: The restore from the Dock
+        if: github.event_name == 'pull_request'
+        run: |
+          if ! grep -qF 'gw2 test window: the Mac driver started' "$RUNNER_TEMP/window.txt"; then
+            echo "::warning::the Mac driver doesn't start on this runner, so restore.exe needs the Mac run" |
+              tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          if ! pgrep -x Dock >/dev/null; then
+            echo "::warning::no Dock runs on this runner, so restore.exe needs the Mac run" | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          # a later SDK may deprecate CGWindowListCopyWindowInfo; that warns and doesn't fail the step
+          clang -O2 -Wall -Werror -Wno-error=deprecated-declarations -o "$RUNNER_TEMP/reopen" tests/gw2/native/reopen.c \
+            -framework CoreServices -framework CoreGraphics
+          for wine in macdrv engine; do
+            want=foreground who="my winemac.so"
+            [[ $wine == engine ]] && want=background who="the engine's winemac.so"
+            status=0
+            GW2_TEST_REOPEN=$RUNNER_TEMP/reopen GW2_TEST_RESTORE=$want GW2_TEST_SECONDS=300 \
+              tests/gw2/run.zsh "$RUNNER_TEMP/$wine/wine" "$RUNNER_TEMP/restore-$wine" "$RUNNER_TEMP/tests/restore.exe" \
+              >"$RUNNER_TEMP/restore-$wine.txt" || status=1
+            {
+              echo "### restore.exe under $who, expecting $want"
+              echo '```'
+              cat "$RUNNER_TEMP/restore-$wine.txt"
+              echo '```'
+            } | tee -a "$GITHUB_STEP_SUMMARY"
+            (( status == 0 )) || { echo "::error::restore.exe failed under $who"; exit 1; }
+            if grep -qF 'gw2 test restore: inconclusive' "$RUNNER_TEMP/restore-$wine.txt"; then
+              echo "::warning::$who: the system refused reopen's Apple event, so restore.exe needs the Mac run" |
+                tee -a "$GITHUB_STEP_SUMMARY"
+            fi
+          done
       # jdrly/gw2-on-mac#128: run.zsh's check for processes left behind. leftover.exe starts a Unix
       # process the wineserver doesn't know, without run.zsh's variable in its environment, and
       # exits. The run has to fail, name the process, and kill it. If run.zsh didn't, the step kills
