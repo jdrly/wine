@@ -16,10 +16,6 @@
  *                         every release. Events and mutexes keep that.
  *   WINE_HEAT_WAKE=skip   a release of a private semaphore with no thread of this process
  *                         asleep on it makes no wake call. "one,skip" for both.
- *   WINE_HEAT_MSYNC_UNREG=1  a multiple-object wait that finds an object signaled right after
- *                         it registered with the server unregisters there, and drops the alert
- *                         object's count, instead of dropping only the objects' counts
- *                         (dappermint/winecx 9be392b3b4, jdrly/gw2-on-mac#44). Counted as unreg.
  *   WINE_HEAT_EVPOOL=1    NtClose of an event that only this process can hold parks the handle,
  *                         and NtCreateEvent takes one that has been parked for 2 ms: neither asks
  *                         the server (jdrly/gw2-on-mac#42). "1,mask" blocks signals around the
@@ -1224,8 +1220,6 @@ void heat_init(void)
         if (n == 3 && !strncmp( p, "one", 3 )) mode |= HEAT_WAKE_ONE;
         else if (n == 4 && !strncmp( p, "skip", 4 )) mode |= HEAT_WAKE_SKIP;
     }
-    /* jdrly/gw2-on-mac#44 */
-    if ((p = getenv( "WINE_HEAT_MSYNC_UNREG" )) && !strcmp( p, "1" )) mode |= HEAT_MSYNC_UNREG;
     if (evpool && !strcmp( evpool, "1" )) mode |= HEAT_EVPOOL;
     else if (evpool && !strcmp( evpool, "1,mask" )) mode |= HEAT_EVPOOL | HEAT_EVPOOL_MASK;
     /* jdrly/gw2-on-mac#45 */

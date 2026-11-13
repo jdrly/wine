@@ -493,23 +493,12 @@ static NTSTATUS msync_wait_multiple( const int *objs, void **objs_shm, const uns
     {
         if (check_shm_contention( objs_shm, alert_obj_shm, count, tid ))
         {
-            int i;
-            /* WINE_HEAT_MSYNC_UNREG=1 (dappermint/winecx 9be392b3b4): unregister from the server
-             * too, and drop the alert object's count, as every other way out of here does */
-            if (heat_mode & HEAT_MSYNC_UNREG)
-            {
-                heat_count( HC_UNREG );
-                server_remove_wait( msgh_id, objs, objs_shm, alert_obj, alert_obj_shm, count );
-                return STATUS_PENDING;
-            }
-            for (i = 0; i < count; i++)
-            {
-                struct event *obj = (struct event *)objs_shm[i];
-
-                int refs = __atomic_sub_fetch( &obj->multiple_waiters, 1, __ATOMIC_SEQ_CST);
-                if (refs < 0)
-                    __atomic_store_n( &obj->multiple_waiters, 0, __ATOMIC_SEQ_CST);
-            }
+            /* Unregister from the server too, and drop the alert object's count, as every other
+             * way out of here does (dappermint/winecx 9be392b3b4). Dropping only the objects'
+             * counts left the registration on the server and the alert object's count raised
+             * (jdrly/gw2-on-mac#44, #104). */
+            heat_count( HC_UNREG );
+            server_remove_wait( msgh_id, objs, objs_shm, alert_obj, alert_obj_shm, count );
             return STATUS_PENDING;
         }
     }
@@ -1108,6 +1097,7 @@ NTSTATUS msync_wait_objs( const DWORD count, const int *objs, BOOLEAN wait_any,
     int *alert_obj_shm = NULL;
     int single_wait = 0;
     struct deadline end;
+    LONGLONG relative = 0;  /* a relative timeout whose deadline isn't computed yet (jdrly/gw2-on-mac#101) */
     int i, ret;
 
     heat_wait_begun( timeout );  /* jdrly/gw2-on-mac#99 */
@@ -1134,8 +1124,12 @@ NTSTATUS msync_wait_objs( const DWORD count, const int *objs, BOOLEAN wait_any,
         }
         else
         {
+            /* jdrly/gw2-on-mac#101: the clock is read where the wait first needs the deadline,
+             * before it spins or sleeps, so a wait that takes its object at once reads none.
+             * A zero timeout keeps end at 0, which has always passed, and computes nothing. */
             end.monotonic = TRUE;
-            end.end = deadline_now( TRUE ) - timeout->QuadPart;
+            end.end = 0;
+            relative = timeout->QuadPart;
         }
     }
 
@@ -1247,6 +1241,12 @@ NTSTATUS msync_wait_objs( const DWORD count, const int *objs, BOOLEAN wait_any,
                 return STATUS_TIMEOUT;
             }
 
+            if (relative)
+            {
+                end.end = deadline_now( TRUE ) - relative;
+                relative = 0;
+            }
+
             /* WINE_HEAT_SPIN=event and sem: once a wait, before its first sleep */
             if (!spun)
             {
@@ -1315,6 +1315,11 @@ tryagain:
 
                     while (__atomic_load_n( &mutex->tid, __ATOMIC_SEQ_CST ))
                     {
+                        if (relative)
+                        {
+                            end.end = deadline_now( TRUE ) - relative;
+                            relative = 0;
+                        }
                         status = do_single_wait( objs[i], objs_shm[i], alert_obj, alert_obj_shm, timeout ? &end : NULL, current_tid );
                         if (status != STATUS_PENDING)
                             break;
@@ -1327,6 +1332,11 @@ tryagain:
 
                     while (!__atomic_load_n( &event->signaled, __ATOMIC_SEQ_CST ))
                     {
+                        if (relative)
+                        {
+                            end.end = deadline_now( TRUE ) - relative;
+                            relative = 0;
+                        }
                         status = do_single_wait( objs[i], objs_shm[i], alert_obj, alert_obj_shm, timeout ? &end : NULL, current_tid );
                         if (status != STATUS_PENDING)
                             break;

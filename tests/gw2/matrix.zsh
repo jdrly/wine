@@ -14,8 +14,9 @@
 #    program. Neither of the last two may write a counters file. The engine skips the programs in
 #    $engine_bugs, which show a bug of its file.
 # 3. (jdrly/gw2-on-mac#44) mutexall three runs under the engine's ntdll.so, each of which has to
-#    fail on the bug it shows, and three under mine, which have to pass. unreg under mine with
-#    counting, WINE_HEAT_MSYNC_UNREG unset and set.
+#    fail on the bug it shows, and three under mine, which have to pass. (#104) unreg three runs
+#    under the engine's ntdll.so, three under mine with counting, and three more with the
+#    variable WINE_HEAT_MSYNC_UNREG=1 that the app still writes and my file no longer reads.
 # 4. (jdrly/gw2-on-mac#45) spin.exe under mine, as WINE_HEAT_EXE with WINE_HEAT_COUNT=1, with
 #    WINE_HEAT_SPIN unset and in three settings, three runs each, one setting at a time: the app's string
 #    (lock and event at :game), sem alone at its default scope with WINE_HEAT_WAKE=one,skip (the
@@ -31,6 +32,7 @@
 #    second. Only mine leaves the repeated cursor's requests out (GW2_TEST_SETCURSOR_SKIPS=1) or
 #    the empty peek's yield (GW2_TEST_PEEK_NO_YIELD=1), each with its own switch. Block 2 ran
 #    setcursor and peekyield under the engine's win32u.so with neither set.
+# 8. (jdrly/gw2-on-mac#101) timeout three runs under the engine's ntdll.so and three under mine.
 # Prints each run's lines and exits 1 if any failed.
 emulate -L zsh
 setopt err_exit pipe_fail no_unset extended_glob
@@ -143,19 +145,31 @@ engine_bug() {
   fi
 }
 
-# unreg <value>: unreg under mine, counting, WINE_HEAT_MSYNC_UNREG=<value> or unset if empty
+# unreg <name> <wine> [<variable>=<value>...]: three runs of unreg. Under mine it counts, and each
+# run's waiting thread has to show unreg above 0; the engine's ntdll.so has no counters.
 unreg() {
-  local v=$1 log=$work/log-unreg-${1:-unset}
-  mkdir -p "$log"
-  env -u WINE_HEAT_WAKE -u WINE_HEAT_MSYNC_UNREG WINE_HEAT_EXE=unreg.exe WINE_HEAT_COUNT=1 WINE_HEAT_LOG=$log \
-    ${v:+WINE_HEAT_MSYNC_UNREG=$v} GW2_TEST_SECONDS=300 "$run" "$mine" "$work/prefix-unreg-${1:-unset}" "$exes/unreg.exe"
+  local name=$1 wine=$2 n log
+  shift 2
+  for n in 1 2 3; do
+    print -r -- "run $n"
+    log=$work/log-unreg-$name-$n
+    mkdir -p "$log"
+    if [[ $wine == "$engine" ]]; then
+      env -u WINE_HEAT_COUNT -u WINE_HEAT_WAKE -u WINE_HEAT_EXE -u WINE_HEAT_LOG GW2_TEST_SECONDS=300 \
+        "$run" "$wine" "$work/prefix-unreg-$name" "$exes/unreg.exe"
+    else
+      env -u WINE_HEAT_WAKE -u WINE_HEAT_MSYNC_UNREG WINE_HEAT_EXE=unreg.exe WINE_HEAT_COUNT=1 WINE_HEAT_LOG=$log \
+        "$@" GW2_TEST_SECONDS=300 "$run" "$wine" "$work/prefix-unreg-$name" "$exes/unreg.exe"
+    fi
+  done
 }
 
 side mutexall-engine engine_bug mutexall "another thread took the mutex its owner held"
 side mutexall-mine env -u WINE_HEAT_COUNT -u WINE_HEAT_WAKE -u WINE_HEAT_EXE -u WINE_HEAT_LOG GW2_TEST_SECONDS=300 \
   "$run" "$mine" "$work/prefix-mutexall-mine" "$exes/mutexall.exe" "$exes/mutexall.exe" "$exes/mutexall.exe"
-side unreg-unset unreg ""
-side unreg-1 unreg 1
+side unreg-engine unreg engine "$engine"
+side unreg-mine unreg mine "$mine"
+side unreg-leftover unreg leftover "$mine" WINE_HEAT_MSYNC_UNREG=1
 collect
 
 # 4. jdrly/gw2-on-mac#45
@@ -201,7 +215,7 @@ requests() {
     print -r -- "run $n"
     log=$work/log-requests-$n
     mkdir -p "$log"
-    env -u WINE_HEAT_WAKE -u WINE_HEAT_MSYNC_UNREG -u WINE_HEAT_EVPOOL -u WINE_HEAT_SPIN -u WINE_HEAT_PROF \
+    env -u WINE_HEAT_WAKE -u WINE_HEAT_EVPOOL -u WINE_HEAT_SPIN -u WINE_HEAT_PROF \
       -u WINE_WIN32U_SETCURSOR -u WINE_WIN32U_PEEK_YIELD -u GW2_TEST_SETCURSOR_SKIPS -u GW2_TEST_PEEK_NO_YIELD \
       WINE_HEAT_EXE=requests.exe WINE_HEAT_COUNT=1 WINE_HEAT_LOG=$log \
       GW2_TEST_SECONDS=300 "$run" "$mine" "$work/prefix-requests" "$exes/requests.exe"
@@ -215,7 +229,7 @@ timers() {
     print -r -- "run $n"
     log=$work/log-timers-$n
     mkdir -p "$log"
-    env -u WINE_HEAT_WAKE -u WINE_HEAT_MSYNC_UNREG -u WINE_HEAT_EVPOOL -u WINE_HEAT_SPIN -u WINE_HEAT_PROF \
+    env -u WINE_HEAT_WAKE -u WINE_HEAT_EVPOOL -u WINE_HEAT_SPIN -u WINE_HEAT_PROF \
       -u WINE_WIN32U_SETCURSOR -u WINE_WIN32U_PEEK_YIELD -u GW2_TEST_SETCURSOR_SKIPS -u GW2_TEST_PEEK_NO_YIELD \
       WINE_HEAT_EXE=timers.exe WINE_HEAT_COUNT=1 WINE_HEAT_LOG=$log \
       GW2_TEST_SECONDS=300 "$run" "$mine" "$work/prefix-timers" "$exes/timers.exe"
@@ -235,7 +249,7 @@ win32u_run() {
   shift 2
   for exe in setcursor requests peekyield; do
     mkdir -p "$work/log-$exe-$name"
-    env -u WINE_HEAT_WAKE -u WINE_HEAT_MSYNC_UNREG -u WINE_HEAT_EVPOOL -u WINE_HEAT_SPIN -u WINE_HEAT_PROF \
+    env -u WINE_HEAT_WAKE -u WINE_HEAT_EVPOOL -u WINE_HEAT_SPIN -u WINE_HEAT_PROF \
       -u WINE_HEAT_EXE -u WINE_HEAT_COUNT -u WINE_WIN32U_SETCURSOR -u WINE_WIN32U_PEEK_YIELD \
       -u GW2_TEST_SETCURSOR_SKIPS -u GW2_TEST_PEEK_NO_YIELD "$@" \
       ${${exe:#setcursor}:+WINE_HEAT_EXE=$exe.exe} ${${exe:#setcursor}:+WINE_HEAT_COUNT=1} \
@@ -253,5 +267,14 @@ if [[ -n $win32u ]]; then
 else
   print "== win32u: no win32u.so of mine in this build, so block 7 has nothing to run"
 fi
+
+# 8. jdrly/gw2-on-mac#101: timeout three runs under the engine's ntdll.so and three under mine, with
+# no WINE_HEAT_* variable. The two side by side only: its waits have to end no earlier than 45 ms
+# into 50, and the shortest of each 20 before 150.
+side timeout-engine env -u WINE_HEAT_COUNT -u WINE_HEAT_EXE -u WINE_HEAT_LOG GW2_TEST_SECONDS=300 \
+  "$run" "$engine" "$work/prefix-timeout-engine" "$exes/timeout.exe" "$exes/timeout.exe" "$exes/timeout.exe"
+side timeout-mine env -u WINE_HEAT_COUNT -u WINE_HEAT_EXE -u WINE_HEAT_LOG GW2_TEST_SECONDS=300 \
+  "$run" "$mine" "$work/prefix-timeout-mine" "$exes/timeout.exe" "$exes/timeout.exe" "$exes/timeout.exe"
+collect
 
 (( failed == 0 ))
