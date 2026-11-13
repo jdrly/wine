@@ -7,10 +7,19 @@
  * is, a thread without a slot gets "fex has no slot of <n>", and a version or slot size the reader
  * doesn't know gets "fex stats version <v> slot <bytes>" and nothing read.
  *
+ * The tick rate (jdrly/gw2-on-mac#156): heat_fex_ms() turns a Mach rate and two readings of both
+ * clocks into milliseconds per FEX tick, for a counter at Mach's 24 MHz and one at 1 GHz. Then on
+ * this machine: the research note's check (CNTFRQ_EL0, and both counters over a 1 s sleep), and a
+ * 100 ms sleep timed the way FEX times a scope, which the fex line has to print within 10% of its
+ * length. No bound depends on how long the runner lets a sleep run: nanosleep never returns early,
+ * which gives the lower one, and Mach's clock read around the scope gives the upper one.
+ *
  * Prints "gw2 test fexstats: passed" and exits 0, or names each case that failed and exits 1. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
+#include <time.h>
 
 #include "../../../dlls/ntdll/unix/heatfex.h"
 
@@ -71,14 +80,108 @@ static const char *line( unsigned int tid, unsigned long long *prev )
     return buf;
 }
 
+static unsigned long long cntvct( void )
+{
+    unsigned long long v;
+    __asm__ volatile( "isb; mrs %0, CNTVCT_EL0" : "=r"(v) );
+    return v;
+}
+
+static void sleep_ms( long ms )
+{
+    struct timespec t = { ms / 1000, ms % 1000 * 1000000 };
+    while (nanosleep( &t, &t ) == -1 && errno == EINTR);
+}
+
+/* Mach at 24 MHz, 125/3 ns a tick: FEX's counter at the same rate, at 1 GHz, and not moved */
+static void tick_rate( void )
+{
+    static const double mach_ms = 125.0 / 3 / 1e6;
+    struct heat_fex_clock start = { 1000, 5000 }, now;
+    double got;
+
+    now.mach = start.mach + 24000000;
+    now.cnt = start.cnt + 24000000;
+    got = heat_fex_ms( &start, &now, mach_ms );
+    if (got < mach_ms * 0.999999 || got > mach_ms * 1.000001)
+    {
+        printf( "gw2 test fexstats: a 24 MHz counter: %.9g ms a tick, want %.9g\n", got, mach_ms );
+        failed++;
+    }
+    now.cnt = start.cnt + 1000000000;
+    got = heat_fex_ms( &start, &now, mach_ms );
+    if (got < 1e-6 * 0.999999 || got > 1e-6 * 1.000001)
+    {
+        printf( "gw2 test fexstats: a 1 GHz counter: %.9g ms a tick, want 1e-06\n", got );
+        failed++;
+    }
+    now.cnt = start.cnt;
+    if ((got = heat_fex_ms( &start, &now, mach_ms )))
+    {
+        printf( "gw2 test fexstats: a counter that didn't move: %.9g ms a tick, want 0\n", got );
+        failed++;
+    }
+}
+
+/* this machine's counters, and a sleep in a scope timed as FEX's AccumulationBlock times it
+ * (SHMStats.h:97), read back through the fex line with the rate measured since <start> */
+static void this_machine( const struct heat_fex_clock *start )
+{
+    unsigned long long frq, c0, c1, m0, m1, prev[HEAT_FEX_FIELDS] = { 0 };
+    struct heat_fex_clock now;
+    mach_timebase_info_data_t tb;
+    double mach_ms, jit_ms, span_ms;
+    char buf[1024];
+
+    mach_timebase_info( &tb );
+    mach_ms = (double)tb.numer / tb.denom / 1e6;
+    __asm__ volatile( "mrs %0, CNTFRQ_EL0" : "=r"(frq) );
+    c0 = cntvct();
+    m0 = mach_absolute_time();
+    sleep_ms( 1000 );
+    c1 = cntvct();
+    m1 = mach_absolute_time();
+    printf( "gw2 test fexstats: CNTFRQ_EL0 %llu Hz, CNTVCT_EL0 %llu ticks and mach_absolute_time %llu in a 1 s sleep, "
+            "timebase %u/%u, ratio %.3f\n", frq, c1 - c0, m1 - m0, tb.numer, tb.denom, (double)(c1 - c0) / (m1 - m0) );
+
+    /* Mach's reads outside FEX's, so the Mach span holds the scope */
+    m0 = mach_absolute_time();
+    c0 = cntvct();
+    sleep_ms( 100 );
+    c1 = cntvct();
+    m1 = mach_absolute_time();
+    span_ms = (m1 - m0) * mach_ms;
+    layout( 3, 144, 1 );
+    fill( 144, 0, TID, 0 );
+    set( 144, 0, HEAT_FEX_STATS_JIT_TIME, c1 - c0 );
+    heat_fex_clock_read( &now );
+    heat_fex_line( buf, sizeof(buf), obj, sizeof(obj), TID, prev, heat_fex_ms( start, &now, mach_ms ) );
+    if (sscanf( buf, "fex jit_ms %lf", &jit_ms ) != 1)
+    {
+        printf( "gw2 test fexstats: a 100 ms sleep: no jit_ms in %s", buf );
+        failed++;
+        return;
+    }
+    printf( "gw2 test fexstats: a 100 ms sleep in a timed scope: jit_ms %.3f, Mach's span around it %.3f ms\n",
+            jit_ms, span_ms );
+    if (jit_ms < 100 * 0.9 || jit_ms > span_ms * 1.1)
+    {
+        printf( "gw2 test fexstats: a 100 ms sleep: jit_ms %.3f, want 90 to %.3f\n", jit_ms, span_ms * 1.1 );
+        failed++;
+    }
+}
+
 int main( void )
 {
+    struct heat_fex_clock start;
     unsigned long long prev[HEAT_FEX_FIELDS] = { 0 }, other[HEAT_FEX_FIELDS] = { 0 };
     static const char *old[HEAT_FEX_FIELDS_OLD] = { "jit_ms", "jit", "miss", "rlock_ms", "wlock_ms", "smc",
                                                    "sigbus", "float", "signal_ms" };
     char small[24];
     unsigned int i;
     int len;
+
+    heat_fex_clock_read( &start );
 
     /* the heat log's fex thread line has the first nine, in this order */
     for (i = 0; i < HEAT_FEX_FIELDS_OLD; i++) expect( "the heat log's field", heat_fex_fields[i].name, old[i] );
@@ -226,6 +329,9 @@ int main( void )
             }
         }
     }
+
+    tick_rate();
+    this_machine( &start );
 
     if (failed) return 1;
     printf( "gw2 test fexstats: passed\n" );

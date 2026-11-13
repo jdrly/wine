@@ -53,8 +53,8 @@
 #   the engine with my winemac.so says whether the Mac driver starts on the runner;
 #   tests/gw2/native/frames.c and mouse_scale.c, built natively, test the driver's frame decision
 #   and its mouse speed factor (WINE_MACDRV_MOUSE_SCALE), and fexstats.c the reader of FEX's
-#   counters (jdrly/gw2-on-mac#111); layered.exe under the engine with my
-#   winemac.so counts the frames WINE_MACDRV_SURFACE skips, where the driver starts; and
+#   counters (jdrly/gw2-on-mac#111) and their tick rate (jdrly/gw2-on-mac#156); layered.exe under the
+#   engine with my winemac.so counts the frames WINE_MACDRV_SURFACE skips, where the driver starts; and
 #   tests/gw2/matrix.zsh runs them all under the engine from the release tarball: with its own
 #   ntdll.so, and with mine in each WINE_HEAT_WAKE mode, with no WINE_HEAT_* variable and with
 #   them set for another program, and, when the build ships my win32u.so, SetCursor and the empty
@@ -619,7 +619,9 @@ jobs:
           clang -std=gnu23 -O2 -Wall -Werror -o "$RUNNER_TEMP/mouse_scale" tests/gw2/native/mouse_scale.c
           "$RUNNER_TEMP/mouse_scale"
       # jdrly/gw2-on-mac#111: the requests log's fex line, built natively from
-      # dlls/ntdll/unix/heatfex.h and run on stats objects of FEX's versions 2 and 3
+      # dlls/ntdll/unix/heatfex.h and run on stats objects of FEX's versions 2 and 3; and
+      # jdrly/gw2-on-mac#156: the rate of FEX's counter on this runner, which it prints, and a
+      # 100 ms sleep timed as FEX times a scope, read back within 10%
       - name: FEX's counters, natively
         if: github.event_name == 'pull_request'
         run: |
