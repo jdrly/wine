@@ -58,7 +58,9 @@
 #   built natively, tests the event pipe functions of WINE_MACDRV_DRAIN and WINE_MACDRV_CALL; and
 #   clip.exe under the engine with my ntdll.so and my winemac.so, counting its requests, calls
 #   ClipCursor 1,000 times with one rectangle in each of four settings of the Mac driver's
-#   switches. A push to gw2-on-mac runs only the prefix boot and
+#   switches; calls.exe under the engine with my winemac.so makes synchronous calls to the main
+#   thread from four threads while events arrive, unset and with WINE_MACDRV_CALL=quiet. A push to
+#   gw2-on-mac runs only the prefix boot and
 #   smoke.exe, under the engine's ntdll.so and under mine: its tree is a merged pull request's head,
 #   which went through all of that in that pull request's run, and Publish names that run.
 # lint: actionlint (.github/actionlint.yaml names the xcode-27 label), and the Python script compiles.
@@ -672,6 +674,37 @@ jobs:
             else
               (( skipped == 0 )) || { echo "::error::$mode: $skipped calls not sent, expected none"; exit 1; }
             fi
+          done
+      # jdrly/gw2-on-mac#62: calls.exe under the engine with my winemac.so, unset and with
+      # WINE_MACDRV_CALL=quiet: four threads make 2,000 synchronous calls to the main thread each
+      # while focus and frame events arrive. A lost wakeup stops a thread, and the program's watchdog
+      # fails it after 10 s without a call. The driver's handled events (channel event) are counted
+      # here: none means the test didn't stress the event path. Only where the Mac driver starts.
+      - name: Calls from several threads
+        if: github.event_name == 'pull_request'
+        run: |
+          if ! grep -qF 'gw2 test window: the Mac driver started' "$RUNNER_TEMP/window.txt"; then
+            echo "::warning::the Mac driver doesn't start on this runner, so calls.exe needs the Mac run" |
+              tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          prefix=$RUNNER_TEMP/calls-prefix
+          for mode in unset quiet; do
+            unset WINE_MACDRV_CALL
+            [[ $mode == quiet ]] && export WINE_MACDRV_CALL=quiet
+            status=0
+            GW2_TEST_CALLS=1 GW2_TEST_WINEDEBUG=-all,+event GW2_TEST_SECONDS=120 \
+              tests/gw2/run.zsh "$RUNNER_TEMP/macdrv/wine" "$prefix" "$RUNNER_TEMP/tests/calls.exe" >"$RUNNER_TEMP/calls-$mode.txt" || status=1
+            events=$(tr -d '\r' <"$prefix/calls.log" | grep -c 'macdrv_handle_event [A-Z_]* for hwnd' || true)
+            {
+              echo "### calls.exe, $mode"
+              echo '```'
+              grep -v ':trace:event:' "$RUNNER_TEMP/calls-$mode.txt" | head -40
+              echo "the driver handled $events events"
+              echo '```'
+            } | tee -a "$GITHUB_STEP_SUMMARY"
+            (( status == 0 )) || { echo "::error::calls.exe failed with $mode"; exit 1; }
+            (( events > 0 )) || { echo "::error::$mode: no event arrived, so calls.exe didn't stress the event path"; exit 1; }
           done
       - name: Run them
         if: github.event_name == 'pull_request'
