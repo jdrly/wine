@@ -59,7 +59,9 @@
 #   clip.exe under the engine with my ntdll.so and my winemac.so, counting its requests, calls
 #   ClipCursor 1,000 times with one rectangle in each of four settings of the Mac driver's
 #   switches; calls.exe under the engine with my winemac.so makes synchronous calls to the main
-#   thread from four threads while events arrive, unset and with WINE_MACDRV_CALL=quiet. A push to
+#   thread from four threads while events arrive, unset and with WINE_MACDRV_CALL=quiet.
+#   leftover.exe leaves a process behind, and tests/gw2/run.zsh has to fail its run, name the
+#   process and end it (jdrly/gw2-on-mac#128). A push to
 #   gw2-on-mac runs only the prefix boot and
 #   smoke.exe, under the engine's ntdll.so and under mine: its tree is a merged pull request's head,
 #   which went through all of that in that pull request's run, and Publish names that run.
@@ -713,6 +715,32 @@ jobs:
             (( status == 0 )) || { echo "::error::calls.exe failed with $mode"; exit 1; }
             (( events > 0 )) || { echo "::error::$mode: no event arrived, so calls.exe didn't stress the event path"; exit 1; }
           done
+      # jdrly/gw2-on-mac#128: run.zsh's check for processes left behind. leftover.exe starts a Unix
+      # process the wineserver doesn't know, without run.zsh's variable in its environment, and
+      # exits. The run has to fail, name the process, and end it. kill -9 returns before the kernel
+      # has ended the process, so the step waits for it to go: until it is gone, 60 s at most,
+      # which only keeps a kill that didn't happen from holding the job.
+      - name: A process left behind
+        if: github.event_name == 'pull_request'
+        run: |
+          status=0
+          tests/gw2/run.zsh "$RUNNER_TEMP/engine/wine" "$RUNNER_TEMP/leftover-prefix" "$RUNNER_TEMP/tests/leftover.exe" \
+            >"$RUNNER_TEMP/leftover.txt" || status=$?
+          cat "$RUNNER_TEMP/leftover.txt"
+          gone=0
+          for _ in $(seq 300); do
+            pgrep -f gw2-test-leftover >/dev/null || { gone=1; break; }
+            sleep 0.2
+          done
+          if (( !gone )); then
+            pkill -9 -f gw2-test-leftover || true
+            echo "::error::the process leftover.exe left was still running after run.zsh"
+            exit 1
+          fi
+          grep -qxF 'ok    leftover' "$RUNNER_TEMP/leftover.txt" || { echo "::error::leftover.exe itself failed"; exit 1; }
+          grep -qE '^ +[0-9]+ .*perl.* -e sleep gw2-test-leftover$' "$RUNNER_TEMP/leftover.txt" ||
+            { echo "::error::run.zsh didn't name the process leftover.exe left"; exit 1; }
+          (( status == 1 )) || { echo "::error::run.zsh exited $status for a run that left a process, not 1"; exit 1; }
       - name: Run them
         if: github.event_name == 'pull_request'
         run: |

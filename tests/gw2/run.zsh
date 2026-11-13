@@ -8,10 +8,14 @@
 # <wine> is an unpacked engine (the release tarball's wine/). WINEDEBUG is -all, or
 # $GW2_TEST_WINEDEBUG when set; each program's log stays in <prefix>/<name>.log. Each program has to print
 # "gw2 test <name>: passed" and exit 0 within the time limit, $GW2_TEST_SECONDS (default 120). Afterwards the prefix's wineserver
-# is stopped, and no process this script started may be left. Wine rewrites a process's
-# arguments, so the processes are found by a variable in their environment, which every child
-# and the wineserver inherit. Prints one line per program and the log
-# of each that failed; exits 1 if any did.
+# is stopped, and no process this script started may be left (jdrly/gw2-on-mac#128): none in the
+# process groups of the commands it ran, and none with this run's variable in its environment.
+# Each command leads a group of its own, which every process it starts stays in, unless Wine
+# gives one a console or group of its own (setsid in ntdll's spawn_process, and the wineserver),
+# and the wineserver ends those. The variable alone doesn't do: Wine rewrites what ps reads, and
+# on GitHub's runner ps -E showed it for none of Wine's processes (jdrly/FEX run 43297396698).
+# The groups also keep the runs matrix.zsh starts side by side under one engine apart. Ends what
+# is left by pid. Prints one line per program and the log of each that failed; exits 1 if any did.
 emulate -L zsh
 setopt err_exit pipe_fail no_unset extended_glob
 
@@ -24,11 +28,33 @@ unset WINEARCH
 # only in the environment of what run_limited starts, so ps, grep and this script don't carry it
 mark=GW2_TEST_RUN=$$-${wine//[^A-Za-z0-9]/_}
 
-# run_limited <seconds> <log> <command>...: Mach9's, with perl's alarm since macOS has no timeout
+# the process groups run_limited started, one per command (zsh's $groups is taken)
+pgids=()
+
+# run_limited <seconds> <log> <command>...: Mach9's, with perl's alarm since macOS has no timeout,
+# and the command in a process group of its own, whose id is its pid
 run_limited() {
-  local secs=$1 log=$2
+  local secs=$1 log=$2 rc=0
   shift 2
-  perl -e 'alarm shift; exec @ARGV or die "exec: $!\n"' "$secs" env "$mark" "$@" >"$log" 2>&1
+  perl -e 'setpgrp or die "setpgrp: $!\n"; alarm shift; exec @ARGV or die "exec: $!\n"' \
+    "$secs" env "$mark" "$@" >"$log" 2>&1 &
+  pgids+=($!)
+  wait $! || rc=$?
+  return $rc
+}
+
+# the pids of this run's processes: the live ones in its groups, and the ones with the mark in
+# their environment (macOS's ps -E prints it after the command). A zombie (Z) or a process on its
+# way out (E) is ending already, often one the wineserver killed.
+ours() {
+  local line f
+  for line in ${(f)"$(ps -ax -o pid=,pgid=,stat=)"}; do
+    f=(${=line})
+    if (( ${pgids[(Ie)$f[2]]} )) && [[ $f[3] != (Z*|*E*) ]]; then
+      print -r -- $f[1]
+    fi
+  done
+  print -l -- ${${${(M)${(f)"$(ps -axEww -o pid=,command=)"}:#* $mark( *|)}## #}%% *}
 }
 
 stop() {
@@ -64,12 +90,11 @@ for exe in "$@"; do
 done
 
 stop
-# every process with the mark in its environment (macOS's ps -E prints it after the command)
-left=(${(M)${(f)"$(ps -axEww -o pid=,command=)"}:#* $mark( *|)})
+left=(${(u)${(f)"$(ours)"}})
 if (( ${#left} )); then
   print "FAIL  processes of this run left behind:"
-  print -rl -- ${left%% $mark*} | sed 's/^/      /'
-  kill -9 ${${left## #}%% *} 2>/dev/null || true
+  ps -ww -o pid=,command= -p ${(j:,:)left} | sed 's/^/      /' || true
+  kill -9 $left 2>/dev/null || true
   failed+=1
 else
   print "ok    no process of this run left"
