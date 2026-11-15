@@ -71,6 +71,9 @@
 #   restore.exe minimizes its window and has tests/gw2/native/reopen bring it back with the reopen
 #   Apple event, as a click on the Dock icon does, under the engine with my winemac.so and under
 #   the engine's own, and checks which WM_NCACTIVATE each sends (jdrly/gw2-on-mac#160).
+#   tests/gw2/attach/attach.c, built for arm64 as the engine's winedbg is, attaches to the x86_64
+#   count.exe and detaches: count.exe has to run on under the engine with my ntdll.so and die with
+#   c0000005 under the engine's own (jdrly/gw2-on-mac#174).
 #   leftover.exe leaves a process behind, and tests/gw2/run.zsh has to fail its run, name the
 #   process and end it (jdrly/gw2-on-mac#128). rundll.exe has rundll32 call the entry point of a
 #   stand-in for arcdps's d3d11.dll: it has to fail with Wine's default order and pass with the app's
@@ -609,7 +612,12 @@ jobs:
           toolchains/llvm-mingw/bin/x86_64-w64-mingw32-windres -O coff -o "$RUNNER_TEMP/addon.res" tests/gw2/addon/d3d11.rc
           toolchains/llvm-mingw/bin/x86_64-w64-mingw32-clang -O2 -Wall -Werror -shared -o "$RUNNER_TEMP/tests/addon/d3d11.dll" \
             tests/gw2/addon/d3d11.c "$RUNNER_TEMP/addon.res"
-          ls "$RUNNER_TEMP/tests" "$RUNNER_TEMP/tests/addon"
+          # the debugger for arm64 and the process it attaches to for x86_64, in a folder of their
+          # own, which matrix.zsh doesn't run (jdrly/gw2-on-mac#174)
+          mkdir "$RUNNER_TEMP/attach"
+          toolchains/llvm-mingw/bin/aarch64-w64-mingw32-clang -O2 -Wall -Werror -o "$RUNNER_TEMP/attach/attach.exe" tests/gw2/attach/attach.c
+          toolchains/llvm-mingw/bin/x86_64-w64-mingw32-clang -O2 -Wall -Werror -o "$RUNNER_TEMP/attach/count.exe" tests/gw2/attach/count.c
+          ls "$RUNNER_TEMP/tests" "$RUNNER_TEMP/tests/addon" "$RUNNER_TEMP/attach"
       # whether the Mac driver starts on this runner, with my winemac.so in the engine (matrix.zsh
       # runs window.exe under the engine's own as well)
       - name: The Mac driver on the runner
@@ -917,6 +925,32 @@ jobs:
               [[ $loaded == "native " ]] || { echo "::error::with the rule: rundll32's d3d11.dll was \"$loaded\", not the stand-in alone"; exit 1; }
             fi
           done
+      # jdrly/gw2-on-mac#174: a debugger attaches to a running x86_64 process. attach.exe, built for
+      # arm64 as the engine's winedbg is, starts count.exe, attaches with DebugActiveProcess,
+      # continues the break-in's breakpoint, detaches, and passes once count.exe has counted on and
+      # exited with 0. Under the engine with my ntdll.so it has to pass. Under the engine's own, which
+      # starts the break-in thread at the debugger's ARM64 DbgUiRemoteBreakin, count.exe has to die
+      # with c0000005.
+      - name: A debugger attached to an x86_64 process
+        if: github.event_name == 'pull_request'
+        run: |
+          mine=0 engine=0
+          tests/gw2/run.zsh "$RUNNER_TEMP/mine/wine" "$RUNNER_TEMP/attach-mine" "$RUNNER_TEMP/attach/attach.exe" \
+            >"$RUNNER_TEMP/attach-mine.txt" || mine=1
+          tests/gw2/run.zsh "$RUNNER_TEMP/engine/wine" "$RUNNER_TEMP/attach-engine" "$RUNNER_TEMP/attach/attach.exe" \
+            >"$RUNNER_TEMP/attach-engine.txt" || engine=1
+          for which in mine engine; do
+            who="my ntdll.so"
+            [[ $which == engine ]] && who="the engine's ntdll.so"
+            { echo "### attach.exe under $who"; echo '```'; cat "$RUNNER_TEMP/attach-$which.txt"; echo '```'; } |
+              tee -a "$GITHUB_STEP_SUMMARY"
+          done
+          (( mine == 0 )) || { echo "::error::attach.exe failed under my ntdll.so"; exit 1; }
+          if (( engine == 0 )) || ! grep -qF 'count.exe died with c0000005 while attached' "$RUNNER_TEMP/attach-engine.txt"; then
+            echo "::error::under the engine's ntdll.so count.exe didn't die with c0000005"
+            exit 1
+          fi
+          echo "ok    under the engine's ntdll.so count.exe dies with c0000005" | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Run them
         if: github.event_name == 'pull_request'
         run: |
