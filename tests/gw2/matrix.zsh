@@ -19,8 +19,9 @@
 #    jdrly/gw2-on-mac#159 runs it).
 # 3. (jdrly/gw2-on-mac#44) mutexall three runs under the engine's ntdll.so, each of which has to
 #    fail on the bug it shows, and three under mine, which have to pass. (#104) unreg three runs
-#    under the engine's ntdll.so, three under mine with counting, and three more with the
-#    variable WINE_HEAT_MSYNC_UNREG=1 that the app still writes and my file no longer reads.
+#    under the engine's ntdll.so and three under mine with counting. No run sets
+#    WINE_HEAT_MSYNC_UNREG, which the app may still write: .github/gw2/switches.zsh fails the
+#    build when my file holds a WINE_HEAT_* name its sources don't read.
 # 3b. (jdrly/gw2-on-mac#219) putback three runs under the engine's ntdll.so, each of which
 #    has to fail on the lost wake, and three under mine in each WINE_HEAT_WAKE mode.
 # 4. (jdrly/gw2-on-mac#45) spin.exe under mine, as WINE_HEAT_EXE with WINE_HEAT_COUNT=1, with
@@ -187,7 +188,6 @@ side mutexall-mine env -u WINE_HEAT_COUNT -u WINE_HEAT_WAKE -u WINE_HEAT_EXE -u 
   "$run" "$mine" "$work/prefix-mutexall-mine" "$exes/mutexall.exe" "$exes/mutexall.exe" "$exes/mutexall.exe"
 side unreg-engine unreg engine "$engine"
 side unreg-mine unreg mine "$mine"
-side unreg-leftover unreg leftover "$mine" WINE_HEAT_MSYNC_UNREG=1
 collect
 
 # 3b. jdrly/gw2-on-mac#219: putback three runs under the engine's ntdll.so, each of which has to
