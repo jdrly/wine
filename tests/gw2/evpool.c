@@ -331,6 +331,16 @@ static BOOL env_is( const char *name, const char *value )
     return n && n < sizeof(buf) && !_stricmp( buf, value );
 }
 
+/* until the dumper has written once more: its period (WINE_HEAT_DUMP_MS, 5 s unless set) and a
+ * second */
+static DWORD dump_wait(void)
+{
+    char buf[16];
+    DWORD n = GetEnvironmentVariableA( "WINE_HEAT_DUMP_MS", buf, sizeof(buf) );
+
+    return (n && n < sizeof(buf) && atoi( buf ) >= 100 ? atoi( buf ) : 5000) + 1000;
+}
+
 /* eligible */
 
 static BOOL pool_on(void)
@@ -487,7 +497,7 @@ static void test_counters(void)
     start( "counters" );
     if (!env_is( "WINE_HEAT_COUNT", "1" ) || !env_is( "WINE_HEAT_EXE", "evpool.exe" )) return;
     if (!GetEnvironmentVariableA( "WINE_HEAT_LOG", dir, sizeof(dir) )) FAIL( "WINE_HEAT_LOG isn't set" );
-    Sleep( 6000 );  /* the counters are written every 5 s */
+    Sleep( dump_wait() );  /* until the counters are written again */
 
     snprintf( want, sizeof(want), "thread %04lx ", hits_tid );
     snprintf( path, sizeof(path), "Z:%s/heat-*.log", dir );
