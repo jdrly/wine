@@ -547,7 +547,8 @@ jobs:
     name: Tests on the engine
     needs: build
     runs-on: *runner
-    timeout-minutes: 30
+    # A full run takes 24 to 29 minutes since block 3b (jdrly/gw2-on-mac#219). A shorter dump period for the counter tests will cut that.
+    timeout-minutes: 40
     permissions:
       contents: read
       # to find the pull request whose run tested a pushed tree
@@ -956,7 +957,7 @@ jobs:
       # exits. The run has to fail, name the process, and kill it. If run.zsh didn't, the step kills
       # it and fails at once. kill -9 returns before the kernel has ended the process, so the step
       # then waits until it is gone, with no time limit of its own: SIGKILL can't be caught, and
-      # only a process stuck in the kernel would hold the job until its 30 minutes.
+      # only a process stuck in the kernel would hold the job until its time limit.
       - name: A process left behind
         if: env.FULL == '1'
         run: |
@@ -1051,7 +1052,11 @@ jobs:
           blocks=()
           [[ $RUN_NTDLL == 1 ]] && blocks+=(ntdll win32u)
           [[ $RUN_NTDLL != 1 && $RUN_WIN32U == 1 ]] && blocks+=(win32u)
-          GW2_MATRIX_BLOCKS="${blocks[*]}" tests/gw2/matrix.zsh "$RUNNER_TEMP/engine/wine" "$RUNNER_TEMP/mine/wine" "$RUNNER_TEMP/tests" "$RUNNER_TEMP/matrix" "${win32u[@]}"
+          status=0
+          GW2_MATRIX_BLOCKS="${blocks[*]}" tests/gw2/matrix.zsh "$RUNNER_TEMP/engine/wine" "$RUNNER_TEMP/mine/wine" "$RUNNER_TEMP/tests" "$RUNNER_TEMP/matrix" "${win32u[@]}" || status=$?
+          # the disk left after the matrix's prefixes: #219's second run ran out of it
+          df -h "$RUNNER_TEMP"
+          exit $status
       # Whenever the matrix's ntdll blocks don't run, on a push or on a pull request that leaves
       # ntdll.so alone: that the engine boots a prefix and runs a program with its ntdll.so and with
       # mine, side by side.
