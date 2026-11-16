@@ -21,6 +21,8 @@
 #    fail on the bug it shows, and three under mine, which have to pass. (#104) unreg three runs
 #    under the engine's ntdll.so, three under mine with counting, and three more with the
 #    variable WINE_HEAT_MSYNC_UNREG=1 that the app still writes and my file no longer reads.
+# 3b. (jdrly/gw2-on-mac#219) putback three runs under the engine's ntdll.so, each of which
+#    has to fail on the lost wake, and three under mine in each WINE_HEAT_WAKE mode.
 # 4. (jdrly/gw2-on-mac#45) spin.exe under mine, as WINE_HEAT_EXE with WINE_HEAT_COUNT=1, with
 #    WINE_HEAT_SPIN unset and in three settings, three runs each, one setting at a time: the app's string
 #    (lock and event at :game), sem alone at its default scope with WINE_HEAT_WAKE=one,skip (the
@@ -90,7 +92,7 @@ mode() {
 }
 
 # programs that fail under the engine's ntdll.so, on a bug of its that mine fixes (block 3)
-engine_bugs=(mutexall)
+engine_bugs=(mutexall putback)
 
 # quiet <name> <wine> <log> [<variable>=<value>...]: every program, then no counters file in <log>
 quiet() {
@@ -186,6 +188,21 @@ side mutexall-mine env -u WINE_HEAT_COUNT -u WINE_HEAT_WAKE -u WINE_HEAT_EXE -u 
 side unreg-engine unreg engine "$engine"
 side unreg-mine unreg mine "$mine"
 side unreg-leftover unreg leftover "$mine" WINE_HEAT_MSYNC_UNREG=1
+collect
+
+# 3b. jdrly/gw2-on-mac#219: putback three runs under the engine's ntdll.so, each of which has to
+# fail on the wake its wait-all loses, and three under mine in each WINE_HEAT_WAKE mode, which
+# have to pass. After block 3, not beside it: each run has two busy threads.
+putback() {
+  local m=$1
+  env -u WINE_HEAT_COUNT -u WINE_HEAT_LOG WINE_HEAT_EXE=putback.exe WINE_HEAT_WAKE=$m GW2_TEST_SECONDS=300 \
+    "$run" "$mine" "$work/prefix-putback-$m" "$exes/putback.exe" "$exes/putback.exe" "$exes/putback.exe"
+}
+
+side putback-engine engine_bug putback "the waiter slept on with the token put back"
+for m in off one skip one,skip; do
+  side "putback=$m" putback $m
+done
 collect
 
 # 4. jdrly/gw2-on-mac#45
