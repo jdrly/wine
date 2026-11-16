@@ -4,7 +4,9 @@ A switch is an environment variable that turns one change of mine on. Unset, eac
 as athei's does. Each is read once: the `WINE_HEAT_*` ones in `heat_init()` at process start,
 right after compatdb, so that a compatdb rule's `env=` can set them; the Mac driver's in
 `setup_options()` when the driver loads; win32u's at the first call that needs them. A value a
-switch doesn't know counts as unset, and the Mac driver and win32u log it. The `WINE_HEAT_*`
+switch doesn't know counts as unset, and the Mac driver and win32u log it. The lists
+(`WINE_HEAT_WAKE`, `WINE_HEAT_SPIN`, `WINE_HEAT_PROF_THREADS`) skip an entry they don't know and
+keep the rest. The `WINE_HEAT_*`
 switches act only in the process `WINE_HEAT_EXE` names. The line `switches: …` of a build's
 `VERSION` names the variables each file reads (`.github/gw2/switches.zsh`), and my app greys a
 switch its file doesn't have. Issue numbers are in jdrly/gw2-on-mac.
@@ -25,7 +27,7 @@ Lint holds this table to the sources: a `getenv` of a `WINE_HEAT_*`, `WINE_MACDR
 | `WINE_HEAT_PROF` | `heat.c`, `heatprof.c` | `1` | off | Samples the game thread by x86 address under FEX, into `heat-prof-<pid>.bin` and `.txt` | #43 |
 | `WINE_HEAT_PROF_HZ` | `heatprof.c` | 10 to 10000 | 1000 | The sampler's mean rate per second | #43 |
 | `WINE_HEAT_PROF_THREADS` | `heatprof.c` | a list of `render`, `worker` | the game thread only | Also samples bgfx's render thread (`render`), or the next busiest unnamed thread the exe started after the game thread (`worker`) | #43 |
-| `WINE_HEAT_PROF_FEX` | `heatprof.c`, `heatfex.h` | `<GUID as 32 hex digits>:<age>:<SizeOfImage>` | only the engine's FEX, pinned in `heatprof.h` | Names a FEX of mine the sampler may read | #111 |
+| `WINE_HEAT_PROF_FEX` | `heatprof.c`, `heatfex.h` | `<GUID>:<age>:<SizeOfImage>`: the CodeView GUID's 16 bytes as 32 hex digits in file order (not a GUID string without its hyphens), the age in decimal, the size in hex with `0x` or decimal, as my FEX's `VERSION` line `libarm64ecfex.dll: build id …` gives them | only the engine's FEX, pinned in `heatprof.h` | Names a FEX of mine the sampler may read | #111 |
 | `WINE_MACDRV_SURFACE` | `macdrv_main.c`, `surface.c` | `copy`, `copy,skip` | off | `copy` gives Cocoa a copy of each window surface frame, so the launcher's layered window can't show a torn one. `copy,skip` also leaves out a frame equal to the last one handed over | #57 |
 | `WINE_MACDRV_MOUSE_SCALE` | `macdrv_main.c`, `cocoa_gcmouse.m` | a number above 0 and up to 100, digits and a point | `1` | A factor on a GameController mouse's counts, for the game's mouse-look | #59 |
 | `WINE_MACDRV_VIEW` | `macdrv_main.c`, `window.c` | `changes` | off | A client surface's view frame and superview go to the main thread only when they changed | #62 |

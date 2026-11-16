@@ -74,9 +74,9 @@ has changed a lot on that branch since 0.3.1. A rebase starts by checking every 
 |---|---|---|---|---|
 | `dlls/ntdll/unix/msync.c`, `msync_wait_multiple` | Unregisters from the server on the contention bailout | #44, #104 | `f6097722b99`, `41ca59151dc` | dappermint/winecx `9be392b3b4` has it. athei: no |
 | `dlls/ntdll/unix/msync.c`, `msync_wait_objs` | The wait-all's rollback releases only the mutexes this pass took | #44 | `f6097722b99` | no |
-| `dlls/ntdll/unix/msync.c`, `msync_wait_objs` | A relative timeout's deadline is computed at the first sleep | #101 | `41ca59151dc` | no |
+| `dlls/ntdll/unix/msync.c`, `msync_wait_objs` | A relative timeout's deadline is computed before the first spin or sleep, not at the wait's start | #101 | `41ca59151dc` | no |
 | `dlls/ntdll/unix/msync.c`, `msync_wait_objs` | A wait-all that puts an object back wakes its waiters | #219 | `30c65fd5a6d` | athei: no |
-| `dlls/win32u/sysparams.c`, `make_ratio` | Approximates a ratio whose terms don't fit 16 bits | #159 | `6d2623ab5f0` | athei's branch after 0.3.1 (`871b6b77801`) |
+| `dlls/win32u/sysparams.c`, `make_ratio`, `ratio_error` (new, in place of `gcd`) | Approximates a ratio whose terms don't fit 16 bits | #159 | `6d2623ab5f0` | athei's branch after 0.3.1 (`871b6b77801`) |
 | `dlls/win32u/sysparams.c`, `set_winstation_monitors` | Gives the server the raw rect the current mode is shown on | #159 | `f4c7da17451` | athei's branch after 0.3.1 (`425b47a0a77`) |
 | `dlls/ntdll/unix/server.c`, `invoke_system_apc`; `dlls/ntdll/unix/thread.c`, `NtCreateThreadEx` | The target's own `DbgUiRemoteBreakin` for a remote break-in on ARM64 | #174 | `3fed5c1791b` | athei's branch after 0.3.1 |
 | `dlls/winemac.drv/window.c`, `macdrv_window_did_unminimize` | A restored window becomes the foreground window before it is activated | #160 | `8384433b856` | WineHQ `ede017e2b24` |

@@ -64,8 +64,12 @@ hooks to carry over. Then each of these, with where its new value comes from:
   FEX the new engine has, and `LLVM_MINGW_VERSION`, `MACH9_VERSION` and `MACH9_COMMIT` (128-133).
 - My DXMT fork, `.github/workflows/gw2.yml:63-66`: `LLVM_MINGW_VERSION`, `LLVM_MINGW_SHA256`,
   `MACH9_VERSION` and `MACH9_SHA256`.
-- My app, on its `arm64` branch: `ENGINE_NAME`, `ENGINE_URL` and `ENGINE_SHA256` in
-  `src/gw2om.sh:129-135`, the `engine:` lines of `.github/workflows/checks.yml:196,215`, the
+- My app, on its `arm64` branch: the `ENGINE_*` block of `src/gw2om.sh:129-157`, which its
+  comment says to bump together. The name, title, URL, the asset's API URL (its id), size and
+  sha256 come from the release; the Wine, FEX and DXMT commits from the release page's Components
+  list; the loader's, `ntdll.so`'s, `winemac.so`'s, `win32u.so`'s, `d3d11.dll`'s, `winemetal.so`'s
+  and FEX's hashes from the unpacked tarball. An old hash makes `engine_matches` refuse the new
+  engine. `MACOS_MIN` (line 159) follows the loader's `Info.plist`. Then the `engine:` lines of `.github/workflows/checks.yml:196,215`, the
   engine's name, commits and URL in `scripts/test-sandbox.sh:283,288`, and `README.md:398-399`.
 
 ## 5. What the gates hold my files to then
