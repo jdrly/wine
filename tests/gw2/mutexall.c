@@ -8,15 +8,17 @@
  * must all succeed.
  *
  * The engine's own ntdll.so fails this (C took M after 36 to 474 wait-alls on 0.1.x's engine);
- * mine has to pass it. Runs for WAIT_ALLS wait-alls, SECONDS at most, or until the first
- * violation. Prints "gw2 test mutexall: passed" and exits 0, or names what failed and exits 1. */
+ * mine has to pass it. Runs for SECONDS, or until the first violation, or, with
+ * GW2_TEST_WAIT_ALLS set, until that many wait-alls. The two sides need different bounds. Under
+ * the engine's file the race has to be lost, which takes time: on GitHub's runner one run lost it
+ * after 742 wait-alls and two went past 20,000 without losing it (jdrly/gw2-on-mac#220). Under
+ * mine a count shows the fix holds, and matrix.zsh gives those runs 20,000, about 2 s there.
+ * Prints "gw2 test mutexall: passed" and exits 0, or names what failed and exits 1. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <windows.h>
 
 #define SECONDS 20
-/* the engine's file fails within a few hundred wait-alls; SECONDS only bounds a slow runner */
-#define WAIT_ALLS 20000
 
 static HANDLE mutex, event;
 static volatile LONG stop, ready, taken_by_c, lost_by_a, c_done;
@@ -87,10 +89,14 @@ static DWORD WINAPI poller( void *arg )
 int main(void)
 {
     HANDLE threads[3];
-    DWORD code, t0;
+    DWORD code, t0, n;
+    LONG64 max_alls = 0;
+    char buf[24];
     int i;
 
     setvbuf( stdout, NULL, _IONBF, 0 );
+    n = GetEnvironmentVariableA( "GW2_TEST_WAIT_ALLS", buf, sizeof(buf) );
+    if (n && n < sizeof(buf)) max_alls = atoll( buf );  /* n >= size: buf wasn't written */
     printf( "gw2 test mutexall: A owns M and wait-alls {M, E}, B sets and steals E, C polls M\n" );
     if (!(mutex = CreateMutexW( NULL, FALSE, NULL ))) return 3;
     if (!(event = CreateEventW( NULL, FALSE, FALSE, NULL ))) return 3;
@@ -99,7 +105,8 @@ int main(void)
     threads[2] = CreateThread( NULL, 0, poller, NULL, 0, NULL );
     for (i = 0; i < 3; i++) if (!threads[i]) return 3;
 
-    for (t0 = GetTickCount(); !stop && wait_alls < WAIT_ALLS && GetTickCount() - t0 < SECONDS * 1000;) Sleep( 10 );
+    for (t0 = GetTickCount(); !stop && (max_alls <= 0 || wait_alls < max_alls) && GetTickCount() - t0 < SECONDS * 1000;)
+        Sleep( 10 );
     stop = 1;
     for (i = 0; i < 3; i++)
     {

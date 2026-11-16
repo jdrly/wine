@@ -18,7 +18,8 @@
 #    which fails under the engine's win32u.so, which all three have (the workflow's step for
 #    jdrly/gw2-on-mac#159 runs it).
 # 3. (jdrly/gw2-on-mac#44) mutexall three runs under the engine's ntdll.so, each of which has to
-#    fail on the bug it shows, and three under mine, which have to pass. (#104) unreg three runs
+#    fail on the bug it shows, and three under mine, which have to pass 20,000 wait-alls each
+#    (GW2_TEST_WAIT_ALLS; the engine's runs keep mutexall's 20 s). (#104) unreg three runs
 #    under the engine's ntdll.so and three under mine with counting. No run sets
 #    WINE_HEAT_MSYNC_UNREG, which the app may still write: .github/gw2/switches.zsh fails the
 #    build when my file holds a WINE_HEAT_* name its sources don't read.
@@ -188,7 +189,7 @@ unreg() {
 }
 
 side mutexall-engine engine_bug mutexall "another thread took the mutex its owner held"
-side mutexall-mine env -u WINE_HEAT_COUNT -u WINE_HEAT_WAKE -u WINE_HEAT_EXE -u WINE_HEAT_LOG GW2_TEST_SECONDS=300 \
+side mutexall-mine env -u WINE_HEAT_COUNT -u WINE_HEAT_WAKE -u WINE_HEAT_EXE -u WINE_HEAT_LOG GW2_TEST_WAIT_ALLS=20000 GW2_TEST_SECONDS=300 \
   "$run" "$mine" "$work/prefix-mutexall-mine" "$exes/mutexall.exe" "$exes/mutexall.exe" "$exes/mutexall.exe"
 side unreg-engine unreg engine "$engine"
 side unreg-mine unreg mine "$mine"
