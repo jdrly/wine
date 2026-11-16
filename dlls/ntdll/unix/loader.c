@@ -86,7 +86,6 @@
 #include "winioctl.h"
 #include "winternl.h"
 #include "unix_private.h"
-#include "heat.h"
 #include "msync.h"
 #include "wine/list.h"
 #include "wine/debug.h"
