@@ -1,0 +1,82 @@
+# My lines in upstream files
+
+Every line of mine in a file that athei's Wine has is a possible conflict when I rebase onto a
+newer engine, so a rebase starts here, and so does `MOVING.md`. A change that adds or removes a
+line of mine in an upstream file changes its row in this file.
+
+My own files (`dlls/ntdll/unix/heat*`, `dlls/winemac.drv/cocoa_calls.h`, `gcmouse_scale.h`,
+`surface_frame.h`) aren't listed. Issue numbers are in jdrly/gw2-on-mac. To list the hunks:
+
+```zsh
+git diff 53def89293a HEAD -U0 -- dlls server include | grep -E '^(diff --git|@@)'
+```
+
+## Hooks
+
+Calls into my files and the state they need. The Switch column names the switch each serves,
+without its `WINE_HEAT_`, `WINE_MACDRV_` or `WINE_` prefix.
+
+| File | Function | What the hook does | Switch | Issue |
+|---|---|---|---|---|
+| `dlls/ntdll/Makefile.in` | `SOURCES` | Builds the six `heat*.c` | all `WINE_HEAT_*` | #40 |
+| `dlls/ntdll/unix/unix_private.h` | after `mutex_unlock` | Includes `heat.h` in every unix file | all `WINE_HEAT_*` | #40 |
+| `dlls/ntdll/unix/unix_private.h` | `server_async` | The pool forgets an event the server sets when the I/O ends | `EVPOOL` | #42 |
+| `dlls/ntdll/unix/loader.c` | `start_main_thread` | Calls `heat_init()` right after `load_compatdb()` | all `WINE_HEAT_*` | #40 |
+| `dlls/ntdll/unix/file.c` | `NtSetInformationObject` | A handle that may become inheritable loses its private mark, and the pool forgets it | `WAKE`, `EVPOOL` | #40, #42 |
+| `dlls/ntdll/unix/registry.c` | `NtNotifyChangeMultipleKeys` | The pool forgets the event the server sets on a change | `EVPOOL` | #42 |
+| `dlls/ntdll/unix/socket.c` | `sock_ioctl` | The pool forgets the event the server sets on a socket event | `EVPOOL` | #42 |
+| `dlls/ntdll/unix/server.c` | `server_call_unlocked` | Records each request, its reply and its time | `COUNT` | #60 |
+| `dlls/ntdll/unix/server.c` | `NtDuplicateObject` | Updates the handle's marks, and the pool answers for a parked handle | `WAKE`, `EVPOOL` | #40, #42 |
+| `dlls/ntdll/unix/server.c` | `NtClose` | Clears the handle's marks, and the pool parks an event instead of closing it | `WAKE`, `EVPOOL`, `COUNT` | #40, #42 |
+| `dlls/ntdll/unix/sync.c` | `heat_inproc_sync_idle` (new) | Says whether no thread of this process holds the handle's in-process sync | `EVPOOL` | #42 |
+| `dlls/ntdll/unix/sync.c` | `NtCreateSemaphore` | Marks an unnamed, non-inheritable semaphore private | `WAKE=skip` | #40 |
+| `dlls/ntdll/unix/sync.c` | `NtReleaseSemaphore` | Names the releasing handle for `signal_all` | `WAKE=skip` | #40 |
+| `dlls/ntdll/unix/sync.c` | `NtCreateEvent` | Takes a parked event, offers a new one to the pool, counts creations | `EVPOOL`, `COUNT` | #40, #42 |
+| `dlls/ntdll/unix/sync.c` | `NtPulseEvent` | The pool forgets an event that may keep an untaken pulse | `EVPOOL` | #42 |
+| `dlls/ntdll/unix/sync.c` | `NtYieldExecution` | Times the yield | `COUNT` | #40 |
+| `dlls/ntdll/unix/sync.c` | `NtQueryPerformanceCounter` | Counts calls | `COUNT` | #40 |
+| `dlls/ntdll/unix/sync.c` | `NtAlertThreadByThreadId` | Counts alerts and times the wake call | `COUNT` | #99 |
+| `dlls/ntdll/unix/sync.c` | `NtWaitForAlertByThreadId` | Spins before the first sleep, outside the emulator, and times the sleeps | `SPIN=lock`, `COUNT` | #45, #99 |
+| `dlls/ntdll/unix/msync.c` | `msync_wait_single` | Times the sleep, and counts the sleepers on a semaphore | `COUNT`, `WAKE=skip` | #40, #99 |
+| `dlls/ntdll/unix/msync.c` | `msync_wait_multiple` | Times the sleep. The bailout's fix is in the second table | `COUNT` | #99 |
+| `dlls/ntdll/unix/msync.c` | `signal_all` | Takes a semaphore release's count for `one` and `skip`, and times each wake call | `WAKE`, `COUNT` | #40, #99 |
+| `dlls/ntdll/unix/msync.c` | `msync_release_semaphore_obj`, `msync_set_event_obj`, `msync_release_mutex_obj` | Pass `signal_all` its count (0 for an event or a mutex), and count releases and sets | `WAKE`, `COUNT` | #40, #99 |
+| `dlls/ntdll/unix/msync.c` | `msync_pulse_event_obj` | Keeps a pulse that a spinner may take | `SPIN=event` | #45 |
+| `dlls/ntdll/unix/msync.c` | `heat_spin_objs` (new) | The spin on events and on a semaphore | `SPIN=event`, `SPIN=sem` | #45 |
+| `dlls/ntdll/unix/msync.c` | `msync_wait_objs` | Counts waits and wakeups, spins once before the first sleep, and with `one` a wait-all woken on a semaphore passes the wake on. Its three fixes are in the second table | `COUNT`, `SPIN`, `WAKE=one` | #40, #45, #99 |
+| `dlls/ntdll/unix/thread.c` | includes | Includes `heatprof.h` | `PROF` | #43 |
+| `dlls/ntdll/unix/thread.c` | `pthread_exit_wrapper`, `spawn_thread` | Keeps the sampler's list of threads | `PROF` | #43 |
+| `dlls/ntdll/unix/thread.c` | `set_native_thread_name` | Gives the counters the thread's name | `COUNT` | #99 |
+| `dlls/ntdll/unix/thread.c` | `NtSetInformationThread` | Records the base priority a thread sets for itself, for the spin's scope | `SPIN` | #45 |
+| `dlls/win32u/cursoricon.c` | `setcursor_shm`, `NtUserSetCursor` | Reads the switch, then answers an unchanged cursor from shared memory | `WIN32U_SETCURSOR` | #61 |
+| `dlls/win32u/message.c` | `peek_no_yield`, `NtUserPeekMessage` | Reads the switch, then leaves out the empty peek's yield | `WIN32U_PEEK_YIELD` | #61 |
+| `dlls/winemac.drv/macdrv_main.c` | includes, globals, `switch_is`, `setup_options` | Reads every `WINE_MACDRV_*` | all `WINE_MACDRV_*` | #57, #59, #62 |
+| `dlls/winemac.drv/macdrv.h` | `struct macdrv_client_surface` | What a surface's last update sent to its view | `VIEW` | #62 |
+| `dlls/winemac.drv/window.c` | `client_view_serial`, `client_views_changed`, `create_cocoa_window`, `destroy_cocoa_window`, `macdrv_client_surface_detach` | A serial that changes when a Cocoa window or a client view comes or goes | `VIEW` | #62 |
+| `dlls/winemac.drv/window.c` | `macdrv_client_surface_update` | Sends the view's frame and superview only when they changed | `VIEW` | #62 |
+| `dlls/winemac.drv/mouse.c` | the clip record, `macdrv_ClipCursor` | Leaves out a call for the rectangle applied last | `CLIP` | #62 |
+| `dlls/winemac.drv/cocoa_cursorclipping.m` | `clipping_changed`, `scale_rect_for_retina_mode`, both classes' `startClippingCursor` and `stopClippingCursor` | Bumps `clip_serial` on every change of the clipping | `CLIP` | #62 |
+| `dlls/winemac.drv/event.c` | `macdrv_handle_event` | A display change bumps `clip_serial` | `CLIP` | #62 |
+| `dlls/winemac.drv/event.c` | `check_fd_events` | Asks the pipe for its byte count | `DRAIN` | #62 |
+| `dlls/winemac.drv/cocoa_event.m` | `initWithEventHandler` | Adds a user event to the queue's kqueue | `CALL` | #62 |
+| `dlls/winemac.drv/cocoa_event.m` | `OnMainThread` | Wakes the caller through the kqueue, and leaves one byte in the pipe only for a waiting event | `CALL` | #62 |
+| `dlls/winemac.drv/cocoa_gcmouse.m` | `gcmouse_post_movement`, `gcmouse_moved` | Scales the counts through `gcmouse_scale.h` and carries the fractions | `MOUSE_SCALE` | #59 |
+| `dlls/winemac.drv/surface.c` | `struct macdrv_window_surface`, `macdrv_surface_flush`, `macdrv_surface_destroy` | Hands Cocoa a copy of the frame, skips an equal one, and counts flushes on the `macsurface` channel | `SURFACE` | #57 |
+
+## Fixes without a switch
+
+Changes to athei's or Wine's behaviour that are always on. The "Upstream has it" column comes from
+my survey of 2026-11-13 and my comment on jdrly/gw2-on-mac#166 of 2026-11-15, except the #219 row,
+which I checked against athei's `arm64-patched` (`501796b0ed1`) on 2026-11-16. athei's `msync.c`
+has changed a lot on that branch since 0.3.1. A rebase starts by checking every row again.
+
+| File, function | What | Issue | Commit | Upstream has it |
+|---|---|---|---|---|
+| `dlls/ntdll/unix/msync.c`, `msync_wait_multiple` | Unregisters from the server on the contention bailout | #44, #104 | `f6097722b99`, `41ca59151dc` | dappermint/winecx `9be392b3b4` has it. athei: no |
+| `dlls/ntdll/unix/msync.c`, `msync_wait_objs` | The wait-all's rollback releases only the mutexes this pass took | #44 | `f6097722b99` | no |
+| `dlls/ntdll/unix/msync.c`, `msync_wait_objs` | A relative timeout's deadline is computed at the first sleep | #101 | `41ca59151dc` | no |
+| `dlls/ntdll/unix/msync.c`, `msync_wait_objs` | A wait-all that puts an object back wakes its waiters | #219 | `30c65fd5a6d` | athei: no |
+| `dlls/win32u/sysparams.c`, `make_ratio` | Approximates a ratio whose terms don't fit 16 bits | #159 | `6d2623ab5f0` | athei's branch after 0.3.1 (`871b6b77801`) |
+| `dlls/win32u/sysparams.c`, `set_winstation_monitors` | Gives the server the raw rect the current mode is shown on | #159 | `f4c7da17451` | athei's branch after 0.3.1 (`425b47a0a77`) |
+| `dlls/ntdll/unix/server.c`, `invoke_system_apc`; `dlls/ntdll/unix/thread.c`, `NtCreateThreadEx` | The target's own `DbgUiRemoteBreakin` for a remote break-in on ARM64 | #174 | `3fed5c1791b` | athei's branch after 0.3.1 |
+| `dlls/winemac.drv/window.c`, `macdrv_window_did_unminimize` | A restored window becomes the foreground window before it is activated | #160 | `8384433b856` | WineHQ `ede017e2b24` |
