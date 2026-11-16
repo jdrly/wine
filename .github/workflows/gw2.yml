@@ -84,7 +84,8 @@
 #   build job's selection.env says which of ntdll.so, winemac.so and win32u.so the fork report or
 #   the changed paths reach, and a change to tests/gw2 or .github runs everything
 #   (jdrly/gw2-on-mac#217). A new test step names the RUN_* of the files it tests in its if:.
-# lint: actionlint (.github/actionlint.yaml names the xcode-27 label), and the Python script compiles.
+# lint: actionlint (.github/actionlint.yaml names the xcode-27 label), the Python scripts compile,
+#   and heatreq.h's request list is enum request's (.github/gw2/heatreq.py).
 # publish: after the others are green, packs ntdll-arm64-<commit>.tar.xz and
 #   macdrv-arm64-<commit>.tar.xz and prints their sha256. For a push to gw2-on-mac it adds both to
 #   the pre-release arm64-builds, the one release this workflow makes, never marked latest, keeps
@@ -1077,7 +1078,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ env.COMMIT }}
-          sparse-checkout: .github
+          sparse-checkout: |
+            .github
+            include/wine
+            dlls/ntdll/unix
           persist-credentials: false
       - name: actionlint
         env:
@@ -1090,7 +1094,10 @@ jobs:
           tar -xzf "$RUNNER_TEMP/$f" -C "$RUNNER_TEMP" actionlint
           "$RUNNER_TEMP/actionlint" -color .github/workflows/gw2.yml
       - name: Python
-        run: python3 -I -m py_compile .github/gw2/compare.py
+        run: python3 -I -m py_compile .github/gw2/compare.py .github/gw2/heatreq.py
+      # my ntdll.so's list of the server's requests is the enum's (jdrly/gw2-on-mac#218)
+      - name: heatreq.h
+        run: python3 -I .github/gw2/heatreq.py check include/wine/server_protocol.h dlls/ntdll/unix/heatreq.h
 
   publish:
     name: Publish
