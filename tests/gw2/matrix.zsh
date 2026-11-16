@@ -42,6 +42,7 @@
 #    setcursor and peekyield under the engine's win32u.so with neither set.
 # 8. (jdrly/gw2-on-mac#101) timeout three runs under the engine's ntdll.so and three under mine.
 # Prints each run's lines and exits 1 if any failed.
+# GW2_MATRIX_BLOCKS picks the blocks: "ntdll" for 1 to 6 and 8, "win32u" for 7; both by default.
 emulate -L zsh
 setopt err_exit pipe_fail no_unset extended_glob
 
@@ -50,6 +51,9 @@ engine=${1:A} mine=${2:A} exes=${3:A} work=${4:A} win32u=${5:+${5:A}}
 run=${0:A:h}/run.zsh
 mkdir -p "$work"
 integer failed=0
+# GW2_MATRIX_BLOCKS: which blocks run, "ntdll" (1 to 6 and 8) and "win32u" (7). Both by default.
+# The workflow leaves ntdll out for a pull request that doesn't change my ntdll.so.
+blocks=(${=GW2_MATRIX_BLOCKS-ntdll win32u})
 pids=() names=()
 
 # side <name> <command>...: start it in the background, its output in $work/<name>.txt
@@ -108,6 +112,8 @@ quiet() {
   print "ok    no counters file"
 }
 
+# blocks 1 to 6, my ntdll.so
+if (( ${blocks[(I)ntdll]} )); then
 for m in off one skip one,skip; do
   mkdir -p "$work"/log-$m-{1,2,3}
   side "wake=$m" mode $m
@@ -300,6 +306,8 @@ side prof-refused env -u WINE_HEAT_COUNT -u WINE_HEAT_WAKE -u WINE_HEAT_EVPOOL -
   "$run" "$other_fex" "$work/prefix-prof-refused" "$exes/prof.exe"
 collect
 
+fi
+
 # 7. jdrly/gw2-on-mac#61
 
 # win32u_run <name> <wine> [<variable>=<value>...]: setcursor once, then requests and peekyield with
@@ -318,23 +326,25 @@ win32u_run() {
   done
 }
 
-if [[ -n $win32u ]]; then
+if (( ${blocks[(I)win32u]} )) && [[ -n $win32u ]]; then
   side win32u-engine-set win32u_run engine-set "$mine" WINE_WIN32U_SETCURSOR=shm WINE_WIN32U_PEEK_YIELD=off
   side win32u-mine-unset win32u_run mine-unset "$win32u"
   side win32u-mine-shm win32u_run mine-shm "$win32u" WINE_WIN32U_SETCURSOR=shm GW2_TEST_SETCURSOR_SKIPS=1
   side win32u-mine-off win32u_run mine-off "$win32u" WINE_WIN32U_PEEK_YIELD=off GW2_TEST_PEEK_NO_YIELD=1
   collect
 else
-  print "== win32u: no win32u.so of mine in this build, so block 7 has nothing to run"
+  print "== win32u: block 7 isn't asked for, or this build has no win32u.so of mine"
 fi
 
 # 8. jdrly/gw2-on-mac#101: timeout three runs under the engine's ntdll.so and three under mine, with
 # no WINE_HEAT_* variable. The two side by side only: its waits have to end no earlier than 45 ms
 # into 50, and the shortest of each 20 before 150.
+if (( ${blocks[(I)ntdll]} )); then
 side timeout-engine env -u WINE_HEAT_COUNT -u WINE_HEAT_EXE -u WINE_HEAT_LOG GW2_TEST_SECONDS=300 \
   "$run" "$engine" "$work/prefix-timeout-engine" "$exes/timeout.exe" "$exes/timeout.exe" "$exes/timeout.exe"
 side timeout-mine env -u WINE_HEAT_COUNT -u WINE_HEAT_EXE -u WINE_HEAT_LOG GW2_TEST_SECONDS=300 \
   "$run" "$mine" "$work/prefix-timeout-mine" "$exes/timeout.exe" "$exes/timeout.exe" "$exes/timeout.exe"
 collect
+fi
 
 (( failed == 0 ))
