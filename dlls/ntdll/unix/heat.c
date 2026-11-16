@@ -8,7 +8,9 @@
  *
  *   WINE_HEAT_COUNT=1     per-thread counters (enum heat_counter), which a thread of their own
  *                         adds up and writes to $WINE_HEAT_LOG/heat-<pid>.log (default /tmp)
- *                         every 5 seconds and at exit. No clock is read while it is off.
+ *                         through heat-<pid>.log.tmp and a rename, so a reader gets a whole file,
+ *                         every 5 seconds (WINE_HEAT_DUMP_MS, 100 to 60000, for the tests) and
+ *                         at exit. No clock is read while it is off.
  *                         The server requests of the game thread and two more go to
  *                         heat-requests-<pid>.log (jdrly/gw2-on-mac#60, heatreq.c).
  *                         With FEX_PROFILESTATS=1 each of those blocks has its thread's FEX
@@ -118,8 +120,10 @@ __thread struct heat_row *heat_self;
 mach_timebase_info_data_t heat_timebase;
 struct heat_fex_clock heat_fex_started;  /* jdrly/gw2-on-mac#156 */
 static char heat_log_path[1024];
+static char heat_log_tmp[sizeof(heat_log_path) + 4];  /* heat_log_path and .tmp */
 static char heat_exe[256];
 static unsigned long long heat_started;
+static unsigned int heat_dump_ms = 5000;  /* WINE_HEAT_DUMP_MS: the dumper's period */
 
 /* a sleep that began at <start>: counted as <c>, timed in <t>, and in the bucket of its length among
  * the five from <first> (under 5 us, 20 us, 100 us, 1 ms, and longer) */
@@ -235,6 +239,7 @@ static void heat_dump(void)
     unsigned int i, j, n = __atomic_load_n( &heat_nrows, __ATOMIC_RELAXED );
     char name[sizeof(heat_rows->name)];
     int len, fd;
+    BOOL ok;
 
     if (n > HEAT_ROWS) n = HEAT_ROWS;
     for (i = 0; i < n; i++)
@@ -269,9 +274,12 @@ static void heat_dump(void)
                              (unsigned long long)__atomic_load_n( &heat_rows[i].start, __ATOMIC_RELAXED ), name );
     }
     if (len > sizeof(buf) - 1) len = sizeof(buf) - 1;
-    if ((fd = open( heat_log_path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644 )) == -1) return;
-    write( fd, buf, len );
-    close( fd );
+    /* jdrly/gw2-on-mac#222: a reader sees the last whole file or this one, never one cut short. On
+     * an error the old file stays and the counting goes on. */
+    if ((fd = open( heat_log_tmp, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644 )) == -1) return;
+    ok = write( fd, buf, len ) == len;
+    if (close( fd )) ok = FALSE;
+    if (!ok || rename( heat_log_tmp, heat_log_path )) unlink( heat_log_tmp );
 }
 
 /* the server requests' log (heatreq.c has the rules). heat_req_dump() is here since
@@ -344,7 +352,9 @@ static void *heat_dumper( void *arg )
 {
     for (;;)
     {
-        sleep( 5 );
+        struct timespec period = { heat_dump_ms / 1000, (heat_dump_ms % 1000) * 1000000 };
+
+        nanosleep( &period, NULL );
         heat_dump_locked();
     }
     return NULL;
@@ -476,6 +486,13 @@ void heat_init(void)
         unsigned long n = strtoul( p, &end, 10 );
         if (!*end && n <= 1000000) heat_spin_pause = n;
     }
+    /* for the tests, which would otherwise wait 5 s for each dump (jdrly/gw2-on-mac#222) */
+    if ((p = getenv( "WINE_HEAT_DUMP_MS" )) && *p)
+    {
+        char *end;
+        unsigned long n = strtoul( p, &end, 10 );
+        if (!*end && n >= 100 && n <= 60000) heat_dump_ms = n;
+    }
     /* jdrly/gw2-on-mac#43 */
     if ((p = getenv( "WINE_HEAT_PROF" )) && !strcmp( p, "1" )) mode |= HEAT_PROF;
     if (!mode) return;
@@ -510,6 +527,7 @@ void heat_init(void)
         heat_fex_clock_read( &heat_fex_started );
         snprintf( heat_exe, sizeof(heat_exe), "%s", exe );
         snprintf( heat_log_path, sizeof(heat_log_path), "%s/heat-%d.log", dir && *dir ? dir : "/tmp", getpid() );
+        snprintf( heat_log_tmp, sizeof(heat_log_tmp), "%s.tmp", heat_log_path );
     }
     /* jdrly/gw2-on-mac#45: a spin reads the clock whether or not it counts */
     if (mode & HEAT_SPIN_ANY)

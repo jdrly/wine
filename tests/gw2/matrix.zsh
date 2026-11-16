@@ -7,6 +7,8 @@
 # <win32u-wine> is the engine with my ntdll.so and my win32u.so, when the build ships one.
 # 1. wakes.exe under mine, as WINE_HEAT_EXE with WINE_HEAT_COUNT=1, in each mode (off, one, skip,
 #    one,skip), three runs each. The modes run side by side, each in a prefix of its own.
+#    Blocks 1, 1b, 3 and 4 set WINE_HEAT_DUMP_MS=500, so their programs wait 1.5 s for the
+#    counters, not 6.
 # 1b. evpool.exe under mine, as WINE_HEAT_EXE with WINE_HEAT_COUNT=1, with WINE_HEAT_EVPOOL off, 1
 #    and 1,mask, three runs each, side by side (jdrly/gw2-on-mac#42).
 # 2. Every program once more, side by side: under the engine's ntdll.so; under mine with no
@@ -91,7 +93,7 @@ mode() {
   local m=$1 n
   for n in 1 2 3; do
     print -r -- "run $n"
-    env WINE_HEAT_EXE=wakes.exe WINE_HEAT_COUNT=1 WINE_HEAT_WAKE=$m WINE_HEAT_LOG=$work/log-$m-$n \
+    env WINE_HEAT_EXE=wakes.exe WINE_HEAT_COUNT=1 WINE_HEAT_DUMP_MS=500 WINE_HEAT_WAKE=$m WINE_HEAT_LOG=$work/log-$m-$n \
       GW2_TEST_PRODUCER_SECONDS=$(( n == 1 ? 60 : 20 )) GW2_TEST_SECONDS=300 \
       "$run" "$mine" "$work/prefix-$m" "$exes/wakes.exe"
   done
@@ -108,7 +110,7 @@ quiet() {
   shift 3
   [[ $wine == "$engine" ]] && programs=(${programs:#*/(${(~j:|:)engine_bugs}).exe})
   mkdir -p "$log"
-  env -u WINE_HEAT_COUNT -u WINE_HEAT_WAKE -u WINE_HEAT_EVPOOL -u WINE_HEAT_SPIN -u WINE_HEAT_PROF -u WINE_HEAT_EXE -u WINE_HEAT_LOG \
+  env -u WINE_HEAT_COUNT -u WINE_HEAT_WAKE -u WINE_HEAT_EVPOOL -u WINE_HEAT_SPIN -u WINE_HEAT_PROF -u WINE_HEAT_EXE -u WINE_HEAT_LOG -u WINE_HEAT_DUMP_MS \
     -u WINE_WIN32U_SETCURSOR -u WINE_WIN32U_PEEK_YIELD -u GW2_TEST_SETCURSOR_SKIPS -u GW2_TEST_PEEK_NO_YIELD "$@" \
     GW2_TEST_PRODUCER_SECONDS=20 GW2_TEST_SECONDS=300 \
     "$run" "$wine" "$work/prefix-$name" $programs
@@ -133,7 +135,7 @@ evpool() {
   local m=$1 n
   for n in 1 2 3; do
     print -r -- "run $n"
-    env WINE_HEAT_EXE=evpool.exe WINE_HEAT_COUNT=1 WINE_HEAT_EVPOOL=$m WINE_HEAT_LOG=$work/log-evpool-$m-$n \
+    env WINE_HEAT_EXE=evpool.exe WINE_HEAT_COUNT=1 WINE_HEAT_DUMP_MS=500 WINE_HEAT_EVPOOL=$m WINE_HEAT_LOG=$work/log-evpool-$m-$n \
       GW2_TEST_SECONDS=300 "$run" "$mine" "$work/prefix-evpool-$m" "$exes/evpool.exe"
   done
 }
@@ -182,7 +184,7 @@ unreg() {
       env -u WINE_HEAT_COUNT -u WINE_HEAT_WAKE -u WINE_HEAT_EXE -u WINE_HEAT_LOG GW2_TEST_SECONDS=300 \
         "$run" "$wine" "$work/prefix-unreg-$name" "$exes/unreg.exe"
     else
-      env -u WINE_HEAT_WAKE -u WINE_HEAT_MSYNC_UNREG WINE_HEAT_EXE=unreg.exe WINE_HEAT_COUNT=1 WINE_HEAT_LOG=$log \
+      env -u WINE_HEAT_WAKE -u WINE_HEAT_MSYNC_UNREG WINE_HEAT_EXE=unreg.exe WINE_HEAT_COUNT=1 WINE_HEAT_DUMP_MS=500 WINE_HEAT_LOG=$log \
         "$@" GW2_TEST_SECONDS=300 "$run" "$wine" "$work/prefix-unreg-$name" "$exes/unreg.exe"
     fi
   done
@@ -219,7 +221,7 @@ spin() {
   for n in 1 2 3; do
     print -r -- "run $n"
     mkdir -p "$work/log-spin-$name-$n"
-    env -u WINE_HEAT_WAKE -u WINE_HEAT_SPIN WINE_HEAT_EXE=spin.exe WINE_HEAT_COUNT=1 \
+    env -u WINE_HEAT_WAKE -u WINE_HEAT_SPIN WINE_HEAT_EXE=spin.exe WINE_HEAT_COUNT=1 WINE_HEAT_DUMP_MS=500 \
       WINE_HEAT_LOG=$work/log-spin-$name-$n ${v:+WINE_HEAT_SPIN=$v} ${w:+WINE_HEAT_WAKE=$w} GW2_TEST_SECONDS=300 \
       "$run" "$mine" "$work/prefix-spin-$name" "$exes/spin.exe"
   done

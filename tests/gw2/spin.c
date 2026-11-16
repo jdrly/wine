@@ -229,12 +229,13 @@ static double load_log( const char *dir )
     } while (FindNextFileA( find, &fd ));
     FindClose( find );
     log_text[len] = 0;
-    /* heat.c writes the file in one call after truncating it; a read in between is incomplete */
+    /* heat.c renames each whole dump over the file (jdrly/gw2-on-mac#222), so a read never finds
+     * half of one. This check came before that and stays as a second guard. */
     if (!len || log_text[len - 1] != '\n') return -1;
     return (p = strstr( log_text, " seconds " )) && strstr( log_text, "\ntotal " ) ? atof( p + 9 ) : -1;
 }
 
-/* the first dump made after the cases ended: heat.c writes one every 5 s */
+/* the first dump made after the cases ended: heat.c writes one every 5 s, or WINE_HEAT_DUMP_MS */
 static void read_log(void)
 {
     char dir[MAX_PATH];
