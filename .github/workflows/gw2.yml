@@ -1052,7 +1052,11 @@ jobs:
           blocks=()
           [[ $RUN_NTDLL == 1 ]] && blocks+=(ntdll win32u)
           [[ $RUN_NTDLL != 1 && $RUN_WIN32U == 1 ]] && blocks+=(win32u)
-          GW2_MATRIX_BLOCKS="${blocks[*]}" tests/gw2/matrix.zsh "$RUNNER_TEMP/engine/wine" "$RUNNER_TEMP/mine/wine" "$RUNNER_TEMP/tests" "$RUNNER_TEMP/matrix" "${win32u[@]}"
+          status=0
+          GW2_MATRIX_BLOCKS="${blocks[*]}" tests/gw2/matrix.zsh "$RUNNER_TEMP/engine/wine" "$RUNNER_TEMP/mine/wine" "$RUNNER_TEMP/tests" "$RUNNER_TEMP/matrix" "${win32u[@]}" || status=$?
+          # the disk left after the matrix's prefixes: #219's second run ran out of it
+          df -h "$RUNNER_TEMP"
+          exit $status
       # Whenever the matrix's ntdll blocks don't run, on a push or on a pull request that leaves
       # ntdll.so alone: that the engine boots a prefix and runs a program with its ntdll.so and with
       # mine, side by side.

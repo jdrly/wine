@@ -204,6 +204,8 @@ for m in off one skip one,skip; do
   side "putback=$m" putback $m
 done
 collect
+# the five prefixes go, so that the blocks after this one have the disk they had before it
+rm -rf "$work"/prefix-bug-putback "$work"/prefix-putback-*(N)
 
 # 4. jdrly/gw2-on-mac#45
 
