@@ -77,10 +77,10 @@
 #   leftover.exe leaves a process behind, and tests/gw2/run.zsh has to fail its run, name the
 #   process and end it (jdrly/gw2-on-mac#128). rundll.exe has rundll32 call the entry point of a
 #   stand-in for arcdps's d3d11.dll: it has to fail with Wine's default order and pass with the app's
-#   compatdb rule for rundll32.exe (jdrly/gw2-on-mac#155). A push to
-#   gw2-on-mac runs only the prefix boot and
-#   smoke.exe, under the engine's ntdll.so and under mine: its tree is a merged pull request's head,
-#   which went through all of that in that pull request's run, and Publish names that run.
+#   compatdb rule for rundll32.exe (jdrly/gw2-on-mac#155). A push to gw2-on-mac runs only the
+#   prefix boot and smoke.exe, under the engine's ntdll.so and under mine, when a green pull
+#   request run tested the same tree, which Publish names. A push whose tree no such run tested
+#   runs every test.
 # lint: actionlint (.github/actionlint.yaml names the xcode-27 label), and the Python script compiles.
 # publish: after the others are green, packs ntdll-arm64-<commit>.tar.xz and
 #   macdrv-arm64-<commit>.tar.xz and prints their sha256. For a push to gw2-on-mac it adds both to
@@ -508,7 +508,40 @@ jobs:
     needs: build
     runs-on: *runner
     timeout-minutes: 30
+    permissions:
+      contents: read
+      # to find the pull request whose run tested a pushed tree
+      actions: read
+      pull-requests: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
     steps:
+      # A pull request runs every test. A push runs them too, unless a green pull request run
+      # tested the same tree: then the smoke test is enough (jdrly/gw2-on-mac#214). A lookup
+      # that fails counts as "not tested".
+      - name: Whether a green pull request tested this tree
+        run: |
+          full=1
+          if [[ $GITHUB_EVENT_NAME != pull_request ]]; then
+            tree=$(gh api "repos/$GH_REPO/commits/$COMMIT" -q .commit.tree.sha) || tree=""
+            while read -r pr head; do
+              [[ -n $pr && -n $tree ]] || continue
+              [[ $(gh api "repos/$GH_REPO/commits/$head" -q .commit.tree.sha) == "$tree" ]] || continue
+              run=$(gh api "repos/$GH_REPO/actions/workflows/gw2.yml/runs?event=pull_request&status=success&head_sha=$head" \
+                -q '.workflow_runs[0].html_url // empty') || run=""
+              if [[ -n $run ]]; then
+                full=0
+                echo "pull request #$pr's green run tested this tree: $run" | tee -a "$GITHUB_STEP_SUMMARY"
+                break
+              fi
+            done < <(gh api "repos/$GH_REPO/commits/$COMMIT/pulls" -q '.[] | select(.merged_at != null) | "\(.number) \(.head.sha)"')
+            if (( full )); then
+              echo "::warning::no green pull request run tested the tree of $COMMIT, so this push runs every test" |
+                tee -a "$GITHUB_STEP_SUMMARY"
+            fi
+          fi
+          echo "FULL=$full" >>"$GITHUB_ENV"
       # the Xcode the build used, for the native test's clang
       - name: Select Xcode
         run: |
@@ -621,7 +654,7 @@ jobs:
       # whether the Mac driver starts on this runner, with my winemac.so in the engine (matrix.zsh
       # runs window.exe under the engine's own as well)
       - name: The Mac driver on the runner
-        if: github.event_name == 'pull_request'
+        if: env.FULL == '1'
         run: |
           tests/gw2/run.zsh "$RUNNER_TEMP/macdrv/wine" "$RUNNER_TEMP/macdrv-prefix" "$RUNNER_TEMP/tests/window.exe" |
             tee "$RUNNER_TEMP/window.txt"
@@ -629,7 +662,7 @@ jobs:
       # test 11 of jdrly/gw2-on-mac#57: the driver's "is this frame the one Cocoa has", built
       # natively from dlls/winemac.drv/surface_frame.h and run without Wine
       - name: The frame decision, natively
-        if: github.event_name == 'pull_request'
+        if: env.FULL == '1'
         run: |
           clang -std=gnu23 -O2 -Wall -Werror -o "$RUNNER_TEMP/frames" tests/gw2/native/frames.c
           "$RUNNER_TEMP/frames"
@@ -637,7 +670,7 @@ jobs:
       # dlls/winemac.drv/gcmouse_scale.h. 1,000 reports of 0.3 at 1.5 post 450 counts, the sums at 1
       # are the engine's, and the parse takes only a number above 0 and up to 100
       - name: The mouse's speed factor, natively
-        if: github.event_name == 'pull_request'
+        if: env.FULL == '1'
         run: |
           clang -std=gnu23 -O2 -Wall -Werror -o "$RUNNER_TEMP/mouse_scale" tests/gw2/native/mouse_scale.c
           "$RUNNER_TEMP/mouse_scale"
@@ -646,14 +679,14 @@ jobs:
       # jdrly/gw2-on-mac#156: the rate of FEX's counter on this runner, which it prints, and a
       # 100 ms sleep timed as FEX times a scope, read back within 10%
       - name: FEX's counters, natively
-        if: github.event_name == 'pull_request'
+        if: env.FULL == '1'
         run: |
           clang -std=gnu23 -O2 -Wall -Werror -o "$RUNNER_TEMP/fexstats" tests/gw2/native/fexstats.c
           "$RUNNER_TEMP/fexstats"
       # jdrly/gw2-on-mac#159: make_ratio() and what comes before it (ratio_error(), or the engine's
       # gcd()) cut out of dlls/win32u/sysparams.c as they are, built natively and run without Wine
       - name: The DPI ratio, natively
-        if: github.event_name == 'pull_request'
+        if: env.FULL == '1'
         run: |
           mkdir "$RUNNER_TEMP/ratio-src"
           awk '/^static (UINT64 ratio_error|UINT gcd)\(/ { on = 1 } on { print } /^static struct ratio make_ratio\(/ { seen = 1 }
@@ -665,7 +698,7 @@ jobs:
       # test 9 of jdrly/gw2-on-mac#62, natively: WINE_MACDRV_DRAIN's FIONREAD against poll, and
       # WINE_MACDRV_CALL's rule for the byte a synchronous call leaves (dlls/winemac.drv/cocoa_calls.h)
       - name: The event pipe, natively
-        if: github.event_name == 'pull_request'
+        if: env.FULL == '1'
         run: |
           clang -std=gnu23 -O2 -Wall -Werror -o "$RUNNER_TEMP/pipe" tests/gw2/native/pipe.c
           "$RUNNER_TEMP/pipe"
@@ -675,7 +708,7 @@ jobs:
       # as window.exe found in the step before; otherwise it is the Mac run's (the pull request's
       # description has the command).
       - name: The launcher's frames
-        if: github.event_name == 'pull_request'
+        if: env.FULL == '1'
         run: |
           if ! grep -qF 'gw2 test window: the Mac driver started' "$RUNNER_TEMP/window.txt"; then
             echo "::warning::the Mac driver doesn't start on this runner, so test 12 needs the Mac run" |
@@ -704,7 +737,7 @@ jobs:
       # which says that this runner can't confine the cursor, not that the record is wrong. Only
       # where the Mac driver starts.
       - name: The cursor clip and the call's byte
-        if: github.event_name == 'pull_request'
+        if: env.FULL == '1'
         run: |
           if ! grep -qF 'gw2 test window: the Mac driver started' "$RUNNER_TEMP/window.txt"; then
             echo "::warning::the Mac driver doesn't start on this runner, so test 9's clip.exe needs the Mac run" |
@@ -755,7 +788,7 @@ jobs:
       # handled between the program's "workers start" and "workers done" (channel event) are counted
       # here: none means the test didn't stress the event path. Only where the Mac driver starts.
       - name: Calls from several threads
-        if: github.event_name == 'pull_request'
+        if: env.FULL == '1'
         run: |
           if ! grep -qF 'gw2 test window: the Mac driver started' "$RUNNER_TEMP/window.txt"; then
             echo "::warning::the Mac driver doesn't start on this runner, so calls.exe needs the Mac run" |
@@ -788,7 +821,7 @@ jobs:
       # size whose ratio make_ratio() can't hold (1366x768 first), or else the cleared clip of a
       # letterboxed mode. Only where the Mac driver starts.
       - name: A mode change to 1366x768
-        if: github.event_name == 'pull_request'
+        if: env.FULL == '1'
         run: |
           if ! grep -qF 'gw2 test window: the Mac driver started' "$RUNNER_TEMP/window.txt"; then
             echo "::warning::the Mac driver doesn't start on this runner, so modeset.exe needs the Mac run" |
@@ -826,7 +859,7 @@ jobs:
       # Only where the Mac driver starts and the Dock runs, which AppKit needs to minimize a window.
       # If the system refuses the Apple event, restore.exe says inconclusive and the step warns.
       - name: The restore from the Dock
-        if: github.event_name == 'pull_request'
+        if: env.FULL == '1'
         run: |
           if ! grep -qF 'gw2 test window: the Mac driver started' "$RUNNER_TEMP/window.txt"; then
             echo "::warning::the Mac driver doesn't start on this runner, so restore.exe needs the Mac run" |
@@ -866,7 +899,7 @@ jobs:
       # then waits until it is gone, with no time limit of its own: SIGKILL can't be caught, and
       # only a process stuck in the kernel would hold the job until its 30 minutes.
       - name: A process left behind
-        if: github.event_name == 'pull_request'
+        if: env.FULL == '1'
         run: |
           status=0
           tests/gw2/run.zsh "$RUNNER_TEMP/engine/wine" "$RUNNER_TEMP/leftover-prefix" "$RUNNER_TEMP/tests/leftover.exe" \
@@ -894,7 +927,7 @@ jobs:
       # pass, with rundll32's d3d11 the stand-in (native). compatdb.so reads that variable with
       # getenv, so each run sets it for all of Wine, as the app does.
       - name: rundll32 and an addon's d3d11.dll
-        if: github.event_name == 'pull_request'
+        if: env.FULL == '1'
         run: |
           prefix=$RUNNER_TEMP/rundll-prefix
           rules=$RUNNER_TEMP/rundll.rules
@@ -932,7 +965,7 @@ jobs:
       # starts the break-in thread at the debugger's ARM64 DbgUiRemoteBreakin, count.exe has to die
       # with c0000005.
       - name: A debugger attached to an x86_64 process
-        if: github.event_name == 'pull_request'
+        if: env.FULL == '1'
         run: |
           mine=0 engine=0
           tests/gw2/run.zsh "$RUNNER_TEMP/mine/wine" "$RUNNER_TEMP/attach-mine" "$RUNNER_TEMP/attach/attach.exe" \
@@ -952,16 +985,16 @@ jobs:
           fi
           echo "ok    under the engine's ntdll.so count.exe dies with c0000005" | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Run them
-        if: github.event_name == 'pull_request'
+        if: env.FULL == '1'
         run: |
           win32u=()
           [[ -d $RUNNER_TEMP/win32u ]] && win32u=("$RUNNER_TEMP/win32u/wine")
           tests/gw2/matrix.zsh "$RUNNER_TEMP/engine/wine" "$RUNNER_TEMP/mine/wine" "$RUNNER_TEMP/tests" "$RUNNER_TEMP/matrix" "${win32u[@]}"
-      # A push runs the tree of a pull request's head that was green and up to date with gw2-on-mac,
-      # so the matrix ran on this tree in that pull request's run (Publish names it). Here only that
-      # the engine boots a prefix and runs a program with its ntdll.so and with mine, side by side.
+      # The first step found a green pull request run on this tree, so the matrix ran on it there
+      # (Publish names the run). Here only that the engine boots a prefix and runs a program with its
+      # ntdll.so and with mine, side by side.
       - name: Smoke (a push)
-        if: github.event_name != 'pull_request'
+        if: env.FULL != '1'
         run: |
           tests/gw2/run.zsh "$RUNNER_TEMP/engine/wine" "$RUNNER_TEMP/smoke-engine" "$RUNNER_TEMP/tests/smoke.exe" \
             >"$RUNNER_TEMP/smoke-engine.txt" 2>&1 &
