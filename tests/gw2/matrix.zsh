@@ -18,9 +18,11 @@
 #    which fails under the engine's win32u.so, which all three have (the workflow's step for
 #    jdrly/gw2-on-mac#159 runs it).
 # 3. (jdrly/gw2-on-mac#44) mutexall three runs under the engine's ntdll.so, each of which has to
-#    fail on the bug it shows, and three under mine, which have to pass. (#104) unreg three runs
-#    under the engine's ntdll.so, three under mine with counting, and three more with the
-#    variable WINE_HEAT_MSYNC_UNREG=1 that the app still writes and my file no longer reads.
+#    fail on the bug it shows, and three under mine, which have to pass 20,000 wait-alls each
+#    (GW2_TEST_WAIT_ALLS; the engine's runs keep mutexall's 20 s). (#104) unreg three runs
+#    under the engine's ntdll.so and three under mine with counting. No run sets
+#    WINE_HEAT_MSYNC_UNREG, which the app may still write: .github/gw2/switches.zsh fails the
+#    build when my file holds a WINE_HEAT_* name its sources don't read.
 # 3b. (jdrly/gw2-on-mac#219) putback three runs under the engine's ntdll.so, each of which
 #    has to fail on the lost wake, and three under mine in each WINE_HEAT_WAKE mode.
 # 4. (jdrly/gw2-on-mac#45) spin.exe under mine, as WINE_HEAT_EXE with WINE_HEAT_COUNT=1, with
@@ -66,7 +68,10 @@ side() {
   pids+=($!) names+=("$name")
 }
 
-# collect: wait for everything side started, print what each printed
+# collect: wait for everything side started, print what each printed, and remove the prefixes they
+# made. Each block's runs have prefixes of their own, which no later block reads, and keeping them
+# all ran a runner out of disk (jdrly/gw2-on-mac#219). run.zsh has printed the log of each program
+# that failed by then.
 collect() {
   local i rc
   for i in {1..${#pids}}; do
@@ -77,6 +82,7 @@ collect() {
     (( rc == 0 )) || failed+=1
   done
   pids=() names=()
+  rm -rf "$work"/prefix-*(N)
 }
 
 # mode <mode>: three runs of wakes.exe with counting and WINE_HEAT_WAKE=<mode>. The first keeps test
@@ -183,11 +189,10 @@ unreg() {
 }
 
 side mutexall-engine engine_bug mutexall "another thread took the mutex its owner held"
-side mutexall-mine env -u WINE_HEAT_COUNT -u WINE_HEAT_WAKE -u WINE_HEAT_EXE -u WINE_HEAT_LOG GW2_TEST_SECONDS=300 \
+side mutexall-mine env -u WINE_HEAT_COUNT -u WINE_HEAT_WAKE -u WINE_HEAT_EXE -u WINE_HEAT_LOG GW2_TEST_WAIT_ALLS=20000 GW2_TEST_SECONDS=300 \
   "$run" "$mine" "$work/prefix-mutexall-mine" "$exes/mutexall.exe" "$exes/mutexall.exe" "$exes/mutexall.exe"
 side unreg-engine unreg engine "$engine"
 side unreg-mine unreg mine "$mine"
-side unreg-leftover unreg leftover "$mine" WINE_HEAT_MSYNC_UNREG=1
 collect
 
 # 3b. jdrly/gw2-on-mac#219: putback three runs under the engine's ntdll.so, each of which has to
@@ -204,8 +209,6 @@ for m in off one skip one,skip; do
   side "putback=$m" putback $m
 done
 collect
-# the five prefixes go, so that the blocks after this one have the disk they had before it
-rm -rf "$work"/prefix-bug-putback "$work"/prefix-putback-*(N)
 
 # 4. jdrly/gw2-on-mac#45
 
@@ -324,6 +327,8 @@ side prof-refused env -u WINE_HEAT_COUNT -u WINE_HEAT_WAKE -u WINE_HEAT_EVPOOL -
   WINE_HEAT_EXE=prof.exe WINE_HEAT_PROF=1 GW2_TEST_PROF_REFUSED=1 WINE_HEAT_LOG=$work/log-prof-refused GW2_TEST_SECONDS=300 \
   "$run" "$other_fex" "$work/prefix-prof-refused" "$exes/prof.exe"
 collect
+# no block after this one runs under the clone of block 5
+rm -rf "$work/fexid"
 
 fi
 
