@@ -71,7 +71,6 @@
 #include "wine/server.h"
 #include "wine/debug.h"
 #include "unix_private.h"
-#include "heat.h"
 #include "msync.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(sync);
