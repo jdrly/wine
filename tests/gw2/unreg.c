@@ -70,6 +70,16 @@ static BOOL env_is( const char *name, const char *value )
     return n && n < sizeof(buf) && !_stricmp( buf, value );
 }
 
+/* until the dumper has written once more: its period (WINE_HEAT_DUMP_MS, 5 s unless set) and a
+ * second */
+static DWORD dump_wait(void)
+{
+    char buf[16];
+    DWORD n = GetEnvironmentVariableA( "WINE_HEAT_DUMP_MS", buf, sizeof(buf) );
+
+    return (n && n < sizeof(buf) && atoi( buf ) >= 100 ? atoi( buf ) : 5000) + 1000;
+}
+
 /* the counter unreg in W's row of this process's heat log, -1 if there is none */
 static long long unreg_count( DWORD tid )
 {
@@ -129,7 +139,7 @@ int main(void)
     /* counting: WINE_HEAT_COUNT=1, and WINE_HEAT_EXE names this program */
     if (env_is( "WINE_HEAT_COUNT", "1" ) && env_is( "WINE_HEAT_EXE", "unreg.exe" ))
     {
-        Sleep( 6000 );  /* the counters are written every 5 s */
+        Sleep( dump_wait() );  /* until the counters are written again */
         if ((unreg = unreg_count( tid )) < 0) FAIL( "no row with unreg for the waiting thread" );
         printf( "gw2 test unreg: WINE_HEAT_MSYNC_UNREG %s, the waiter's unreg %lld\n",
                 env_is( "WINE_HEAT_MSYNC_UNREG", "1" ) ? "1" : "unset", unreg );

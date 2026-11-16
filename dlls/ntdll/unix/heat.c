@@ -8,7 +8,8 @@
  *
  *   WINE_HEAT_COUNT=1     per-thread counters (enum heat_counter), which a thread of their own
  *                         adds up and writes to $WINE_HEAT_LOG/heat-<pid>.log (default /tmp)
- *                         every 5 seconds and at exit. No clock is read while it is off.
+ *                         every 5 seconds (WINE_HEAT_DUMP_MS, 100 to 60000, for the tests) and
+ *                         at exit. No clock is read while it is off.
  *                         The server requests of the game thread and two more go to
  *                         heat-requests-<pid>.log (jdrly/gw2-on-mac#60, heatreq.c).
  *                         With FEX_PROFILESTATS=1 each of those blocks has its thread's FEX
@@ -120,6 +121,7 @@ struct heat_fex_clock heat_fex_started;  /* jdrly/gw2-on-mac#156 */
 static char heat_log_path[1024];
 static char heat_exe[256];
 static unsigned long long heat_started;
+static unsigned int heat_dump_ms = 5000;  /* WINE_HEAT_DUMP_MS: the dumper's period */
 
 /* a sleep that began at <start>: counted as <c>, timed in <t>, and in the bucket of its length among
  * the five from <first> (under 5 us, 20 us, 100 us, 1 ms, and longer) */
@@ -344,7 +346,9 @@ static void *heat_dumper( void *arg )
 {
     for (;;)
     {
-        sleep( 5 );
+        struct timespec period = { heat_dump_ms / 1000, (heat_dump_ms % 1000) * 1000000 };
+
+        nanosleep( &period, NULL );
         heat_dump_locked();
     }
     return NULL;
@@ -475,6 +479,13 @@ void heat_init(void)
         char *end;
         unsigned long n = strtoul( p, &end, 10 );
         if (!*end && n <= 1000000) heat_spin_pause = n;
+    }
+    /* for the tests, which would otherwise wait 5 s for each dump (jdrly/gw2-on-mac#222) */
+    if ((p = getenv( "WINE_HEAT_DUMP_MS" )) && *p)
+    {
+        char *end;
+        unsigned long n = strtoul( p, &end, 10 );
+        if (!*end && n >= 100 && n <= 60000) heat_dump_ms = n;
     }
     /* jdrly/gw2-on-mac#43 */
     if ((p = getenv( "WINE_HEAT_PROF" )) && !strcmp( p, "1" )) mode |= HEAT_PROF;
