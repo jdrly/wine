@@ -67,7 +67,10 @@ side() {
   pids+=($!) names+=("$name")
 }
 
-# collect: wait for everything side started, print what each printed
+# collect: wait for everything side started, print what each printed, and remove the prefixes they
+# made. Each block's runs have prefixes of their own, which no later block reads, and keeping them
+# all ran a runner out of disk (jdrly/gw2-on-mac#219). run.zsh has printed the log of each program
+# that failed by then.
 collect() {
   local i rc
   for i in {1..${#pids}}; do
@@ -78,6 +81,7 @@ collect() {
     (( rc == 0 )) || failed+=1
   done
   pids=() names=()
+  rm -rf "$work"/prefix-*(N)
 }
 
 # mode <mode>: three runs of wakes.exe with counting and WINE_HEAT_WAKE=<mode>. The first keeps test
@@ -204,8 +208,6 @@ for m in off one skip one,skip; do
   side "putback=$m" putback $m
 done
 collect
-# the five prefixes go, so that the blocks after this one have the disk they had before it
-rm -rf "$work"/prefix-bug-putback "$work"/prefix-putback-*(N)
 
 # 4. jdrly/gw2-on-mac#45
 
@@ -324,6 +326,8 @@ side prof-refused env -u WINE_HEAT_COUNT -u WINE_HEAT_WAKE -u WINE_HEAT_EVPOOL -
   WINE_HEAT_EXE=prof.exe WINE_HEAT_PROF=1 GW2_TEST_PROF_REFUSED=1 WINE_HEAT_LOG=$work/log-prof-refused GW2_TEST_SECONDS=300 \
   "$run" "$other_fex" "$work/prefix-prof-refused" "$exes/prof.exe"
 collect
+# no block after this one runs under the clone of block 5
+rm -rf "$work/fexid"
 
 fi
 
