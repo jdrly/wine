@@ -64,25 +64,9 @@ struct heat_row
     char               name[64];  /* the name it last gave itself, empty for none */
 };
 
-static const char * const heat_counter_names[HC_NB] =
-{
-    "release", "wake_skipped", "wake_one", "wake_none", "woken", "spurious", "event_create",
-    "event_close", "close", "server", "lock_sleep", "qpc", "yield", "yield_5us", "yield_20us", "yield_100us",
-    "yield_1ms", "yield_long",
-    "unreg",  /* jdrly/gw2-on-mac#44 */
-    "evpool_hit", "evpool_put", "evpool_evicted", "evpool_forgotten", "evpool_busy", "evpool_double_close",
-    /* jdrly/gw2-on-mac#45 */
-    "lspin_hit", "lspin_miss", "espin_hit", "espin_miss", "sspin_hit", "sspin_miss", "spin_off", "spin_scoped",
-    /* jdrly/gw2-on-mac#99 */
-    "wait_sleep", "alert", "alert_wake", "lock_5us", "lock_20us", "lock_100us", "lock_1ms", "lock_long",
-    "wait_5us", "wait_20us", "wait_100us", "wait_1ms", "wait_long", "event_set", "event_wake", "event_wake_none",
-    "wait", "wait_timed", "wait_poll",
-};
-static const char * const heat_timer_names[HT_NB] =
-{
-    "server_ms", "yield_ms", "spin_ms",
-    "lock_ms", "wait_ms", "wake_ms", "alert_ms",  /* jdrly/gw2-on-mac#99 */
-};
+#define HEAT_NAME(id, name) #name,
+static const char * const heat_counter_names[HC_NB] = { HEAT_COUNTERS(HEAT_NAME) };
+static const char * const heat_timer_names[HT_NB] = { HEAT_TIMERS(HEAT_NAME) };
 
 extern struct heat_row *heat_rows HEAT_HIDDEN;
 extern unsigned int heat_nrows HEAT_HIDDEN;
