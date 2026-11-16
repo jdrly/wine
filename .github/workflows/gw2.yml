@@ -80,7 +80,10 @@
 #   compatdb rule for rundll32.exe (jdrly/gw2-on-mac#155). A push to gw2-on-mac runs only the
 #   prefix boot and smoke.exe, under the engine's ntdll.so and under mine, when a green pull
 #   request run tested the same tree, which Publish names. A push whose tree no such run tested
-#   runs every test.
+#   runs every test. A pull request runs only the tests of the files it can have changed: the
+#   build job's selection.env says which of ntdll.so, winemac.so and win32u.so the fork report or
+#   the changed paths reach, and a change to tests/gw2 or .github runs everything
+#   (jdrly/gw2-on-mac#217). A new test step names the RUN_* of the files it tests in its if:.
 # lint: actionlint (.github/actionlint.yaml names the xcode-27 label), and the Python script compiles.
 # publish: after the others are green, packs ntdll-arm64-<commit>.tar.xz and
 #   macdrv-arm64-<commit>.tar.xz and prints their sha256. For a push to gw2-on-mac it adds both to
@@ -425,6 +428,36 @@ jobs:
               tee -a "$GITHUB_STEP_SUMMARY" <"$RUNNER_TEMP/fork-$lib.md"
             fi
           done
+          # Which of my three files this pull request can have changed, for the tests job: a file
+          # counts as changed when the fork report lists a function, or when the change touches a
+          # path that can reach it (a data-only change has no changed function). TESTS says the
+          # tests or the CI changed, and then everything runs. A push gets all four set: its tests
+          # job decides by FULL alone.
+          mkdir -p "$RUNNER_TEMP/selection"
+          {
+            for lib in ntdll winemac win32u; do
+              flag=1
+              if [[ -n ${FORK:-} ]]; then
+                flag=0
+                grep -qx "result: $lib.so moved=0 changed=0 new=0 gone=0" "$RUNNER_TEMP/fork-$lib.md" || flag=1
+                case $lib in
+                  ntdll) paths=(dlls/ntdll include server tools) ;;
+                  winemac) paths=(dlls/winemac.drv include) ;;
+                  win32u) paths=(dlls/win32u include) ;;
+                esac
+                git -C "$SRC" diff --quiet "$FORK" "$COMMIT" -- "${paths[@]}" || flag=1
+              fi
+              echo "$(echo "$lib" | tr '[:lower:]' '[:upper:]')=$flag"
+            done
+            flag=1
+            if [[ -n ${FORK:-} ]]; then
+              flag=0
+              git -C "$SRC" diff --quiet "$FORK" "$COMMIT" -- tests/gw2 .github || flag=1
+            fi
+            echo "TESTS=$flag"
+          } >"$RUNNER_TEMP/selection/selection.env"
+          { echo "### What this run's tests cover"; echo '```'; cat "$RUNNER_TEMP/selection/selection.env"; echo '```'; } |
+            tee -a "$GITHUB_STEP_SUMMARY"
           exit "$status"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: failure() && steps.compare.outcome == 'failure'
@@ -501,6 +534,12 @@ jobs:
           name: macdrv-arm64-${{ env.COMMIT }}
           path: dist/macdrv
           retention-days: 7
+          if-no-files-found: error
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: selection-${{ env.COMMIT }}
+          path: ${{ runner.temp }}/selection
+          retention-days: 1
           if-no-files-found: error
 
   tests:
@@ -607,6 +646,25 @@ jobs:
         with:
           name: macdrv-arm64-${{ env.COMMIT }}
           path: ${{ runner.temp }}/macdrv-dist
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: selection-${{ env.COMMIT }}
+          path: ${{ runner.temp }}/selection
+      # RUN_<file> says whether this run owes that file's tests: every one when FULL is 1 and the
+      # file, the tests or the CI changed (jdrly/gw2-on-mac#217)
+      - name: Which tests this run owes
+        run: |
+          f=$RUNNER_TEMP/selection/selection.env
+          [[ $(grep -cE '^(NTDLL|WINEMAC|WIN32U|TESTS)=[01]$' "$f") == 4 && $(wc -l <"$f" | tr -d ' ') == 4 ]] ||
+            { echo "::error::selection.env isn't the four lines the build job writes"; cat "$f"; exit 1; }
+          # shellcheck disable=SC1090 # four checked lines of NAME=0 or NAME=1
+          . "$f"
+          for name in NTDLL WINEMAC WIN32U; do
+            run=0
+            if [[ $FULL == 1 && ( ${!name} == 1 || $TESTS == 1 ) ]]; then run=1; fi
+            echo "RUN_$name=$run" >>"$GITHUB_ENV"
+            echo "RUN_$name=$run"
+          done | tee -a "$GITHUB_STEP_SUMMARY"
 
       # Four copies of the engine: its own, one with my ntdll.so, one with my winemac.so, one with
       # both (jdrly/gw2-on-mac#62's clip.exe, for the request counts); a fifth with my ntdll.so (for
@@ -654,7 +712,7 @@ jobs:
       # whether the Mac driver starts on this runner, with my winemac.so in the engine (matrix.zsh
       # runs window.exe under the engine's own as well)
       - name: The Mac driver on the runner
-        if: env.FULL == '1'
+        if: env.RUN_WINEMAC == '1' || env.RUN_NTDLL == '1' || env.RUN_WIN32U == '1'
         run: |
           tests/gw2/run.zsh "$RUNNER_TEMP/macdrv/wine" "$RUNNER_TEMP/macdrv-prefix" "$RUNNER_TEMP/tests/window.exe" |
             tee "$RUNNER_TEMP/window.txt"
@@ -662,7 +720,7 @@ jobs:
       # test 11 of jdrly/gw2-on-mac#57: the driver's "is this frame the one Cocoa has", built
       # natively from dlls/winemac.drv/surface_frame.h and run without Wine
       - name: The frame decision, natively
-        if: env.FULL == '1'
+        if: env.RUN_WINEMAC == '1'
         run: |
           clang -std=gnu23 -O2 -Wall -Werror -o "$RUNNER_TEMP/frames" tests/gw2/native/frames.c
           "$RUNNER_TEMP/frames"
@@ -670,7 +728,7 @@ jobs:
       # dlls/winemac.drv/gcmouse_scale.h. 1,000 reports of 0.3 at 1.5 post 450 counts, the sums at 1
       # are the engine's, and the parse takes only a number above 0 and up to 100
       - name: The mouse's speed factor, natively
-        if: env.FULL == '1'
+        if: env.RUN_WINEMAC == '1'
         run: |
           clang -std=gnu23 -O2 -Wall -Werror -o "$RUNNER_TEMP/mouse_scale" tests/gw2/native/mouse_scale.c
           "$RUNNER_TEMP/mouse_scale"
@@ -679,14 +737,14 @@ jobs:
       # jdrly/gw2-on-mac#156: the rate of FEX's counter on this runner, which it prints, and a
       # 100 ms sleep timed as FEX times a scope, read back within 10%
       - name: FEX's counters, natively
-        if: env.FULL == '1'
+        if: env.RUN_NTDLL == '1'
         run: |
           clang -std=gnu23 -O2 -Wall -Werror -o "$RUNNER_TEMP/fexstats" tests/gw2/native/fexstats.c
           "$RUNNER_TEMP/fexstats"
       # jdrly/gw2-on-mac#159: make_ratio() and what comes before it (ratio_error(), or the engine's
       # gcd()) cut out of dlls/win32u/sysparams.c as they are, built natively and run without Wine
       - name: The DPI ratio, natively
-        if: env.FULL == '1'
+        if: env.RUN_WIN32U == '1'
         run: |
           mkdir "$RUNNER_TEMP/ratio-src"
           awk '/^static (UINT64 ratio_error|UINT gcd)\(/ { on = 1 } on { print } /^static struct ratio make_ratio\(/ { seen = 1 }
@@ -698,7 +756,7 @@ jobs:
       # test 9 of jdrly/gw2-on-mac#62, natively: WINE_MACDRV_DRAIN's FIONREAD against poll, and
       # WINE_MACDRV_CALL's rule for the byte a synchronous call leaves (dlls/winemac.drv/cocoa_calls.h)
       - name: The event pipe, natively
-        if: env.FULL == '1'
+        if: env.RUN_WINEMAC == '1'
         run: |
           clang -std=gnu23 -O2 -Wall -Werror -o "$RUNNER_TEMP/pipe" tests/gw2/native/pipe.c
           "$RUNNER_TEMP/pipe"
@@ -708,7 +766,7 @@ jobs:
       # as window.exe found in the step before; otherwise it is the Mac run's (the pull request's
       # description has the command).
       - name: The launcher's frames
-        if: env.FULL == '1'
+        if: env.RUN_WINEMAC == '1'
         run: |
           if ! grep -qF 'gw2 test window: the Mac driver started' "$RUNNER_TEMP/window.txt"; then
             echo "::warning::the Mac driver doesn't start on this runner, so test 12 needs the Mac run" |
@@ -737,7 +795,7 @@ jobs:
       # which says that this runner can't confine the cursor, not that the record is wrong. Only
       # where the Mac driver starts.
       - name: The cursor clip and the call's byte
-        if: env.FULL == '1'
+        if: env.RUN_WINEMAC == '1' || env.RUN_NTDLL == '1'
         run: |
           if ! grep -qF 'gw2 test window: the Mac driver started' "$RUNNER_TEMP/window.txt"; then
             echo "::warning::the Mac driver doesn't start on this runner, so test 9's clip.exe needs the Mac run" |
@@ -788,7 +846,7 @@ jobs:
       # handled between the program's "workers start" and "workers done" (channel event) are counted
       # here: none means the test didn't stress the event path. Only where the Mac driver starts.
       - name: Calls from several threads
-        if: env.FULL == '1'
+        if: env.RUN_WINEMAC == '1'
         run: |
           if ! grep -qF 'gw2 test window: the Mac driver started' "$RUNNER_TEMP/window.txt"; then
             echo "::warning::the Mac driver doesn't start on this runner, so calls.exe needs the Mac run" |
@@ -821,7 +879,7 @@ jobs:
       # size whose ratio make_ratio() can't hold (1366x768 first), or else the cleared clip of a
       # letterboxed mode. Only where the Mac driver starts.
       - name: A mode change to 1366x768
-        if: env.FULL == '1'
+        if: env.RUN_WIN32U == '1' || env.RUN_NTDLL == '1'
         run: |
           if ! grep -qF 'gw2 test window: the Mac driver started' "$RUNNER_TEMP/window.txt"; then
             echo "::warning::the Mac driver doesn't start on this runner, so modeset.exe needs the Mac run" |
@@ -859,7 +917,7 @@ jobs:
       # Only where the Mac driver starts and the Dock runs, which AppKit needs to minimize a window.
       # If the system refuses the Apple event, restore.exe says inconclusive and the step warns.
       - name: The restore from the Dock
-        if: env.FULL == '1'
+        if: env.RUN_WINEMAC == '1'
         run: |
           if ! grep -qF 'gw2 test window: the Mac driver started' "$RUNNER_TEMP/window.txt"; then
             echo "::warning::the Mac driver doesn't start on this runner, so restore.exe needs the Mac run" |
@@ -965,7 +1023,7 @@ jobs:
       # starts the break-in thread at the debugger's ARM64 DbgUiRemoteBreakin, count.exe has to die
       # with c0000005.
       - name: A debugger attached to an x86_64 process
-        if: env.FULL == '1'
+        if: env.RUN_NTDLL == '1'
         run: |
           mine=0 engine=0
           tests/gw2/run.zsh "$RUNNER_TEMP/mine/wine" "$RUNNER_TEMP/attach-mine" "$RUNNER_TEMP/attach/attach.exe" \
@@ -985,16 +1043,19 @@ jobs:
           fi
           echo "ok    under the engine's ntdll.so count.exe dies with c0000005" | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Run them
-        if: env.FULL == '1'
+        if: env.RUN_NTDLL == '1' || env.RUN_WIN32U == '1'
         run: |
           win32u=()
           [[ -d $RUNNER_TEMP/win32u ]] && win32u=("$RUNNER_TEMP/win32u/wine")
-          tests/gw2/matrix.zsh "$RUNNER_TEMP/engine/wine" "$RUNNER_TEMP/mine/wine" "$RUNNER_TEMP/tests" "$RUNNER_TEMP/matrix" "${win32u[@]}"
-      # The first step found a green pull request run on this tree, so the matrix ran on it there
-      # (Publish names the run). Here only that the engine boots a prefix and runs a program with its
-      # ntdll.so and with mine, side by side.
-      - name: Smoke (a push)
-        if: env.FULL != '1'
+          blocks=()
+          [[ $RUN_NTDLL == 1 ]] && blocks+=(ntdll win32u)
+          [[ $RUN_NTDLL != 1 && $RUN_WIN32U == 1 ]] && blocks+=(win32u)
+          GW2_MATRIX_BLOCKS="${blocks[*]}" tests/gw2/matrix.zsh "$RUNNER_TEMP/engine/wine" "$RUNNER_TEMP/mine/wine" "$RUNNER_TEMP/tests" "$RUNNER_TEMP/matrix" "${win32u[@]}"
+      # Whenever the matrix's ntdll blocks don't run, on a push or on a pull request that leaves
+      # ntdll.so alone: that the engine boots a prefix and runs a program with its ntdll.so and with
+      # mine, side by side.
+      - name: Smoke
+        if: env.RUN_NTDLL != '1'
         run: |
           tests/gw2/run.zsh "$RUNNER_TEMP/engine/wine" "$RUNNER_TEMP/smoke-engine" "$RUNNER_TEMP/tests/smoke.exe" \
             >"$RUNNER_TEMP/smoke-engine.txt" 2>&1 &
