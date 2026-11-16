@@ -1329,6 +1329,7 @@ tryagain:
                 {
                     /* this works for semaphores too */
                     struct event *event = (struct event *)objs_shm[i];
+                    BOOL slept = FALSE;  /* this pass was woken out of a sleep on this object */
 
                     while (!__atomic_load_n( &event->signaled, __ATOMIC_SEQ_CST ))
                     {
@@ -1338,13 +1339,14 @@ tryagain:
                             relative = 0;
                         }
                         status = do_single_wait( objs[i], objs_shm[i], alert_obj, alert_obj_shm, timeout ? &end : NULL, current_tid );
+                        if (status == STATUS_SUCCESS) slept = TRUE;
                         if (status != STATUS_PENDING)
                             break;
                     }
                     /* WINE_HEAT_WAKE=one: a release wakes only as many threads as its count, and
                      * this one was woken without taking the count: pass the wake on, so a single
                      * waiter on the same semaphore doesn't miss it. */
-                    if (status == STATUS_SUCCESS && (heat_mode & HEAT_WAKE_ONE) && event->msync_type == MSYNC_SEMAPHORE)
+                    if (slept && (heat_mode & HEAT_WAKE_ONE) && event->msync_type == MSYNC_SEMAPHORE)
                     {
                         unsigned long long start = heat_start();  /* jdrly/gw2-on-mac#99 */
 
@@ -1457,13 +1459,18 @@ tooslow:
                      * it's worth. */
                     /* Only a mutex this pass took: one the caller already owned keeps its owner. */
                     if (grabbed & (1ull << i))
+                    {
                         __atomic_store_n( &mutex->tid, 0, __ATOMIC_SEQ_CST );
+                        /* jdrly/gw2-on-mac#219: a thread that looked while this pass had it sleeps on it */
+                        signal_all( mutex, objs[i], 0 );
+                    }
                     break;
                 }
                 case MSYNC_SEMAPHORE:
                 {
                     struct semaphore *semaphore = (struct semaphore *)objs_shm[i];
                     __sync_fetch_and_add( &semaphore->count, 1 );
+                    signal_all( semaphore, objs[i], 1 );  /* jdrly/gw2-on-mac#219, as above */
                     break;
                 }
                 case MSYNC_AUTO_EVENT:
@@ -1471,6 +1478,7 @@ tooslow:
                 {
                     struct event *event = (struct event *)objs_shm[i];
                     __atomic_store_n( &event->signaled, 1, __ATOMIC_SEQ_CST );
+                    signal_all( event, objs[i], 0 );  /* jdrly/gw2-on-mac#219, as above */
                     break;
                 }
                 default:
