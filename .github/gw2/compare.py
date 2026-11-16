@@ -1866,6 +1866,8 @@ def fork(lib, fork_dir, build_dir, commit):
         print(f"- {title}: {len(items)}")
         for item in items:
             print(f"  - `{item}`" + (f" ({CHANGED_HOW[item]})" if item in CHANGED_HOW else ""))
+    # the workflow reads this line to decide which tests a pull request owes (gw2.yml, "Compare")
+    print(f"\nresult: {lib} moved={len(moved)} changed={len(changed)} new={len(new)} gone={len(gone)}")
     return 0
 
 
