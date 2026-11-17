@@ -29,8 +29,8 @@ the "Upstream has it" column for the rest.
 
 ## 3. Rebase, then every value tied to the engine
 
-Rebase `gw2-on-mac` onto the new commit, with the first table of `UPSTREAM.md` as the list of
-hooks to carry over. Then each of these, with where its new value comes from:
+Rebase my commits onto the new commit (which ones, since the move to 0.4.0: section 3b), with the
+first table of `UPSTREAM.md` as the list of hooks to carry over. Then each of these, with where its new value comes from:
 
 - `BASE_COMMIT` in `.github/workflows/gw2.yml`'s `env:`: the commit of step 1, and its comment's
   `wine-<version>-<n>-g<sha>`.
@@ -80,6 +80,17 @@ head's tree, and the commits of the old base stay reachable, so the commit ids i
 the ADRs still resolve. The pull request lands as a merge commit or a fast-forward, never squashed:
 a squash would leave athei's new commits out of the branch's history, and `BASE_COMMIT`, which
 every build checks out, would then hang on the pull request's branch alone.
+
+Because the old line stays reachable, a plain `git rebase` of `gw2-on-mac` at the next move would
+replay it too: athei's old commits and mine on them. The next move takes only my commits since this
+one, oldest first, and cherry-picks them onto the new commit:
+
+```zsh
+git rev-list --reverse --no-merges 501796b0ed1..gw2-on-mac ^4e55fb228c0
+```
+
+`501796b0ed1` is the base of 0.4.0 and `4e55fb228c0` the tip of the 0.3.1 line. A later move of
+this kind adds its own old tip to the `^` list.
 
 ## 4. Outside this repository
 
