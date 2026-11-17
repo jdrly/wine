@@ -293,18 +293,25 @@ jobs:
       # Homebrew's packages, llvm-mingw, the deployment target, the engine's commit and wine.zsh.
       # A pull request's configure starts from them and skips its compile checks. A push never
       # does: its configure asks everything again, its answers have to be the kept ones, and a
-      # push is what fills the cache, since a pull request can read only the branch's.
+      # push is what fills the cache: a pull request can read the branch's entries, and never
+      # another pull request's.
       - name: The key of configure's answers
         run: |
-          key=$({
-            echo "$ImageOS $ImageVersion $(sw_vers -buildVersion)"
+          # each input on its own line at the top level, so a probe that fails stops the step
+          # instead of leaving its line out of the key
+          inputs=$RUNNER_TEMP/configure-key.txt
+          macos=$(sw_vers -buildVersion)
+          {
+            echo "$ImageOS $ImageVersion $macos"
             xcodebuild -version
             xcrun -sdk macosx --show-sdk-version
             clang --version
             brew list --versions bison freetype gnutls sdl2-compat pkgconf
             echo "$LLVM_MINGW_VERSION $MACOSX_DEPLOYMENT_TARGET $BASE_COMMIT"
             shasum -a 256 <"$GW2/wine.zsh"
-          } | shasum -a 256 | cut -d' ' -f1)
+          } >"$inputs"
+          cat "$inputs"
+          key=$(shasum -a 256 <"$inputs" | cut -d' ' -f1)
           echo "CONFIG_KEY=wine-configure-answers-$key" >>"$GITHUB_ENV"
       - name: Restore configure's answers
         id: answers

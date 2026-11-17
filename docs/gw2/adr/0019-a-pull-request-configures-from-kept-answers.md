@@ -33,8 +33,12 @@ wrong answer from a stale file would still be worse than a slow configure, so tw
   the tests (ADR 0013). The push builds from fresh answers, and its `diff` fails, so it goes red
   rather than publishing.
 - After such a red push, every later push with the same key fails the same way, because a cache
-  entry can't be overwritten. The way out is to delete the entry under Actions, Caches, or to put
-  the missed input into the key, which changes it.
+  entry can't be overwritten. The better way out is a pull request that puts the missed input into
+  the key: its key is new, so it's tested on fresh answers. Deleting the entry under Actions,
+  Caches isn't enough alone. A re-run of the red push would then pass, and ADR 0013 would still
+  let it skip the tests on the strength of the pull request run that read the stale answers. So
+  after a delete I re-run that pull request's run first, which now configures from nothing, and
+  re-run the push after it's green.
 - Anything new that configure's answers depend on goes into the key: a new Homebrew package in the
   install step, a new variable that `wine.zsh` passes to configure from the environment. Arguments
   inside `wine.zsh` are covered by its hash.
