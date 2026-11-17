@@ -88,6 +88,7 @@
 #   owes, and build the test programs once for all of them. A new test step names its lane in its
 #   if: as well, and a new matrix block goes into one lane's list in "Run them".
 # lint: actionlint (.github/actionlint.yaml names the xcode-27 label), the Python scripts compile,
+#   compare.py's self-test on the engine's files (every address-bearing instruction changed in turn),
 #   .github/gw2/SWITCHES.md names exactly the switches the sources read, and heatreq.h's request
 #   list is enum request's (.github/gw2/heatreq.py).
 # publish: after the others are green, packs ntdll-arm64-<commit>.tar.xz and
@@ -254,9 +255,6 @@ jobs:
           echo "$MACH9_SHA256  toolchains/mach9.tar.xz" | shasum -a 256 -c
           mkdir -p toolchains/engine
           tar -xf toolchains/mach9.tar.xz -C toolchains/engine --strip-components 1 wine/lib/wine/aarch64-unix
-      # every address-bearing instruction of the engine's file changed in turn has to show
-      - name: The compare's self-test
-        run: python3 -I "$GW2/compare.py" selftest toolchains/engine/lib/wine/aarch64-unix
 
       - name: Restore llvm-mingw
         id: mingw
@@ -1173,6 +1171,28 @@ jobs:
           # shellcheck disable=SC2016 # the backticks are the table's, not a command
           diff <(grep -ohE 'getenv\( *"WINE_(HEAT|MACDRV|WIN32U)_[A-Z0-9_]+" *\)' dlls/ntdll/unix/*.[ch] dlls/winemac.drv/*.[chm] dlls/win32u/*.[ch] dlls/win32u/dibdrv/*.[ch] | grep -oE 'WINE_[A-Z0-9_]+' | sort -u) \
                <(grep -oE '^\| `WINE_[A-Z0-9_]+`' .github/gw2/SWITCHES.md | grep -oE 'WINE_[A-Z0-9_]+' | sort -u)
+      # compare.py's self-test: every address-bearing instruction of the engine's file changed in
+      # turn has to show. Here and not in the build job (jdrly/gw2-on-mac#234): compare.py reads
+      # files and runs nothing, so it needs no Mac, and the build job's 31 s of it held up the
+      # tests. The engine's tarball is the cache's, or Mach9's release.
+      - name: Restore Mach9
+        id: mach9
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          key: mach9-tarball-${{ env.MACH9_VERSION }}
+          path: toolchains/mach9.tar.xz
+      - name: Download Mach9
+        if: steps.mach9.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p toolchains
+          curl -fsSL --retry 3 -o toolchains/mach9.tar.xz \
+            "https://github.com/athei/mach9/releases/download/$MACH9_VERSION/wine-$MACH9_VERSION-macos-arm64.tar.xz"
+      - name: The compare's self-test
+        run: |
+          echo "$MACH9_SHA256  toolchains/mach9.tar.xz" | sha256sum -c
+          mkdir -p toolchains/engine
+          tar -xf toolchains/mach9.tar.xz -C toolchains/engine --strip-components 1 wine/lib/wine/aarch64-unix
+          python3 -I .github/gw2/compare.py selftest toolchains/engine/lib/wine/aarch64-unix
       # my ntdll.so's list of the server's requests is the enum's (jdrly/gw2-on-mac#218)
       - name: heatreq.h
         run: python3 -I .github/gw2/heatreq.py check include/wine/server_protocol.h dlls/ntdll/unix/heatreq.h
