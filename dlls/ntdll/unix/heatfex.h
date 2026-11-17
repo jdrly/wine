@@ -43,7 +43,7 @@
 #define HEAT_FEX_STATS_VERSION   2
 #define HEAT_FEX_STATS_VERSION_3 3
 #define HEAT_FEX_STATS_HEADER    64   /* sizeof(ThreadStatsHeader) */
-#define HEAT_FEX_STATS_SLOT      112  /* sizeof(ThreadStats) at 9d4fa4b46b1, also ThreadStatsHeader::ThreadStatsSize */
+#define HEAT_FEX_STATS_SLOT      112  /* sizeof(ThreadStats) at 9d4fa4b46b1 and 597e7ccbedd, also ThreadStatsHeader::ThreadStatsSize */
 #define HEAT_FEX_STATS_H_VERSION 0    /* uint8_t Version */
 #define HEAT_FEX_STATS_H_SLOT    2    /* uint16_t ThreadStatsSize */
 #define HEAT_FEX_STATS_H_SIZE    56   /* uint32_t Size: the bytes in use */

@@ -383,6 +383,7 @@ typedef struct macdrv_event {
         struct {
             unsigned long   serial;
             void           *tried_windows;
+            bool            requested;
         }                                           window_got_focus;
         struct {
             bool    keep_frame;
@@ -446,8 +447,6 @@ extern macdrv_query* macdrv_create_query(void);
 extern macdrv_query* macdrv_retain_query(macdrv_query *query);
 extern void macdrv_release_query(macdrv_query *query);
 extern void macdrv_set_query_done(macdrv_query *query);
-extern void macdrv_begin_query_deferral(void);
-extern void macdrv_end_query_deferral(void);
 extern int macdrv_register_hot_key(WineEventQueue *queue, unsigned int vkey, unsigned int mod_flags,
                                    unsigned int keycode, unsigned int modifiers);
 extern void macdrv_unregister_hot_key(WineEventQueue *queue, unsigned int vkey, unsigned int mod_flags);
@@ -524,6 +523,7 @@ extern CAMetalLayer *macdrv_swapchain_get_layer(WineMetalSwapChain_id swapchain)
 extern void macdrv_destroy_swapchain(WineMetalSwapChain_id swapchain);
 extern void macdrv_window_create_ca_layer_host_view(WineWindow *window, unsigned int context_id);
 extern void macdrv_window_release_ca_layer_host_view(WineWindow *window, unsigned int context_id);
+extern void macdrv_view_create_ca_layer_host(WineContentView *view, unsigned int context_id);
 extern void macdrv_create_remote_layer(void* hwnd, unsigned int context_id);
 extern void macdrv_release_remote_layer(void* hwnd, unsigned int context_id);
 extern bool macdrv_get_view_backing_size(WineContentView *view, int backing_size[2]);

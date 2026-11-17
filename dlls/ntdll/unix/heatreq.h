@@ -85,17 +85,18 @@
     R(allocate_locally_unique_id) R(create_device_manager) R(create_device) R(delete_device) \
     R(get_next_device_request) R(get_kernel_object_ptr) R(set_kernel_object_ptr) \
     R(grab_kernel_object) R(release_kernel_object) R(get_kernel_object_handle) \
-    R(make_process_system) R(grant_process_admin_token) R(get_token_info) R(create_linked_token) \
-    R(create_completion) R(open_completion) R(add_completion) R(remove_completion) \
-    R(get_thread_completion) R(query_completion) R(set_completion_info) R(add_fd_completion) \
-    R(set_fd_completion_mode) R(set_fd_disp_info) R(set_fd_name_info) R(set_fd_eof_info) \
-    R(get_window_layered_info) R(set_window_layered_info) R(alloc_user_handle) R(free_user_handle) \
-    R(set_cursor) R(get_cursor_history) R(get_rawinput_buffer) R(update_rawinput_devices) \
-    R(create_job) R(open_job) R(assign_job) R(process_in_job) R(set_job_limits) \
-    R(set_job_completion_port) R(get_job_info) R(terminate_job) R(suspend_process) R(resume_process) \
-    R(get_next_process) R(get_next_thread) R(set_keyboard_repeat) R(get_inproc_sync_fd) \
-    R(get_inproc_alert_fd) R(d3dkmt_object_create) R(d3dkmt_object_update) R(d3dkmt_object_query) \
-    R(d3dkmt_object_open) R(d3dkmt_share_objects) R(d3dkmt_object_open_name) R(d3dkmt_mutex_acquire) \
+    R(make_process_system) R(grant_process_admin_token) R(set_cross_process_work_section) \
+    R(get_cross_process_work_section) R(get_token_info) R(create_linked_token) R(create_completion) \
+    R(open_completion) R(add_completion) R(remove_completion) R(get_thread_completion) \
+    R(query_completion) R(set_completion_info) R(add_fd_completion) R(set_fd_completion_mode) \
+    R(set_fd_disp_info) R(set_fd_name_info) R(set_fd_eof_info) R(get_window_layered_info) \
+    R(set_window_layered_info) R(alloc_user_handle) R(free_user_handle) R(set_cursor) \
+    R(get_cursor_history) R(get_rawinput_buffer) R(update_rawinput_devices) R(create_job) \
+    R(open_job) R(assign_job) R(process_in_job) R(set_job_limits) R(set_job_completion_port) \
+    R(get_job_info) R(terminate_job) R(suspend_process) R(resume_process) R(get_next_process) \
+    R(get_next_thread) R(set_keyboard_repeat) R(get_inproc_sync_fd) R(get_inproc_alert_fd) \
+    R(d3dkmt_object_create) R(d3dkmt_object_update) R(d3dkmt_object_query) R(d3dkmt_object_open) \
+    R(d3dkmt_share_objects) R(d3dkmt_object_open_name) R(d3dkmt_mutex_acquire) \
     R(d3dkmt_mutex_release) R(d3dkmt_sync_wait) R(d3dkmt_sync_signal) R(alpc_create_port)
 
 #endif /* __NTDLL_UNIX_HEATREQ_H */

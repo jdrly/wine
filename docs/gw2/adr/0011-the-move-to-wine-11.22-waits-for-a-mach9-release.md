@@ -19,6 +19,12 @@ explicit go.
   one, and neither is athei's branch moving without a release.
 - If his next release is still on 11.21, jdrly/gw2-on-mac #166 takes it as an ordinary engine move.
   My commits rebased onto his 11.21 tip without a conflict in two trials.
+  Taken on 2026-11-17 with Mach9 0.4.0: athei/wine `501796b0ed1` (`wine-11.21-54`), still Wine
+  11.21 but server protocol 973, not 972. His FEX commit gained two requests,
+  `set_cross_process_work_section` and `get_cross_process_work_section`, so my files from the old
+  base can't run on 0.4.0's wineserver, and the app moves the engine and my files in one step. The
+  rebase had one conflict, twice: his msync now unregisters on the contention bailout itself, the
+  fix of #44 and #104, so his code stays and only my count is left there.
 - I don't take his Mac driver changes ahead of the engine. He rewrote that commit twice in four
   days, and I know no GW2 symptom they fix.
 - On the first 11.22 engine I try upstream's IOSurface window surfaces before porting my frame copy

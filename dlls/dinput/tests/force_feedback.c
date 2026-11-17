@@ -37,6 +37,7 @@
 #include "wine/hid.h"
 
 #include "dinput_test.h"
+#include "effect_file.h"
 
 #define WIDL_using_Windows_Foundation
 #define WIDL_using_Windows_Foundation_Collections
@@ -635,7 +636,16 @@ static void test_periodic_effect( IDirectInputDevice8W *device, HANDLE file, DWO
         .lpvTypeSpecificParams = (void *)&expect_periodic_0,
     };
     struct check_created_effect_params check_params = {0};
-    IDirectInputEffect *effect;
+    IDirectInputEffect *effect, *offsets_effect;
+    DWORD offsets_axes[3] = {DIJOFS_Z, DIJOFS_X, DIJOFS_Y};
+    DIEFFECT offsets_desc =
+    {
+        .dwSize = sizeof(DIEFFECT_DX5),
+        .dwFlags = DIEFF_OBJECTOFFSETS,
+        .dwTriggerButton = DIJOFS_BUTTON( 0 ),
+        .cAxes = 3,
+        .rgdwAxes = offsets_axes,
+    };
     DIPERIODIC periodic = {0};
     DIENVELOPE envelope = {0};
     LONG directions[4] = {0};
@@ -990,6 +1000,24 @@ static void test_periodic_effect( IDirectInputDevice8W *device, HANDLE file, DWO
     ok( desc.rgdwAxes[0] == 8, "got %#lx expected %#x\n", desc.rgdwAxes[0], 8 );
     ok( desc.rgdwAxes[1] == 0, "got %#lx expected %#x\n", desc.rgdwAxes[1], 0 );
     ok( desc.rgdwAxes[2] == 4, "got %#lx expected %#x\n", desc.rgdwAxes[2], 4 );
+
+    /* axes and trigger button set by their offsets in the data format */
+    hr = IDirectInputDevice8_CreateEffect( device, &GUID_Sine, NULL, &offsets_effect, NULL );
+    ok( hr == DI_OK, "CreateEffect returned %#lx\n", hr );
+    hr = IDirectInputEffect_SetParameters( offsets_effect, &offsets_desc, DIEP_AXES | DIEP_TRIGGERBUTTON | DIEP_NODOWNLOAD );
+    ok( hr == DI_DOWNLOADSKIPPED, "SetParameters returned %#lx\n", hr );
+    offsets_desc.dwFlags = DIEFF_OBJECTIDS;
+    offsets_desc.dwTriggerButton = 0;
+    memset( offsets_axes, 0, sizeof(offsets_axes) );
+    hr = IDirectInputEffect_GetParameters( offsets_effect, &offsets_desc, DIEP_AXES | DIEP_TRIGGERBUTTON );
+    ok( hr == DI_OK, "GetParameters returned %#lx\n", hr );
+    check_member( offsets_desc, expect_desc, "%#lx", dwTriggerButton );
+    check_member( offsets_desc, expect_desc, "%lu", cAxes );
+    check_member( offsets_desc, expect_desc, "%#lx", rgdwAxes[0] );
+    check_member( offsets_desc, expect_desc, "%#lx", rgdwAxes[1] );
+    check_member( offsets_desc, expect_desc, "%#lx", rgdwAxes[2] );
+    ref = IDirectInputEffect_Release( offsets_effect );
+    ok( ref == 0, "Release returned %ld\n", ref );
 
     hr = IDirectInputEffect_Download( effect );
     ok( hr == DIERR_INCOMPLETEEFFECT, "Download returned %#lx\n", hr );
@@ -2155,6 +2183,176 @@ static void test_constantforce_effect( IDirectInputDevice8W *device, HANDLE file
     set_hid_expect( file, NULL, 0 );
 }
 
+struct create_file_effects_params
+{
+    IDirectInputDevice8W *device;
+    HANDLE file;
+    UINT index;
+};
+
+static BOOL CALLBACK create_file_effects( const DIFILEEFFECT *file_effect, void *args )
+{
+    struct hid_expect expect_spring[] =
+    {
+        /* set condition */
+        {
+            .code = IOCTL_HID_WRITE_REPORT,
+            .report_id = 7,
+            .report_len = 8,
+            .report_buf = {0x07,0x00,0xf9,0x19,0xd9,0xff,0xff,0x99},
+        },
+        /* set condition */
+        {
+            .code = IOCTL_HID_WRITE_REPORT,
+            .report_id = 7,
+            .report_len = 8,
+            .report_buf = {0x07,0x00,0x4c,0x3f,0xcc,0x4c,0x33,0x19},
+        },
+        /* update effect */
+        {
+            .code = IOCTL_HID_WRITE_REPORT,
+            .report_id = 3,
+            .report_len = 11,
+            .report_buf = {0x03,0x01,0x03,0x08,0x01,0x00,0x06,0x00,0x01,0x55,0x00},
+        },
+    };
+    struct hid_expect expect_constant[] =
+    {
+        /* set constant force, magnitude -5000 */
+        {
+            .code = IOCTL_HID_WRITE_REPORT,
+            .report_id = 9,
+            .report_len = 3,
+            .report_buf = {0x09,0x78,0xec},
+        },
+        /* update effect, infinite duration and no trigger button */
+        {
+            .code = IOCTL_HID_WRITE_REPORT,
+            .report_id = 3,
+            .report_len = 11,
+            .report_buf = {0x03,0x01,0x04,0x08,0xff,0xff,0x00,0x00,0xff,0x3f,0x00},
+        },
+    };
+    struct hid_expect expect_sine[] =
+    {
+        /* set periodic */
+        {
+            .code = IOCTL_HID_WRITE_REPORT,
+            .report_id = 5,
+            .report_len = 2,
+            .report_buf = {0x05,0x19},
+        },
+        /* set envelope */
+        {
+            .code = IOCTL_HID_WRITE_REPORT,
+            .report_id = 6,
+            .report_len = 7,
+            .report_buf = {0x06,0x19,0x4c,0x02,0x00,0x04,0x00},
+        },
+        /* update effect */
+        {
+            .code = IOCTL_HID_WRITE_REPORT,
+            .report_id = 3,
+            .report_len = 11,
+            .report_buf = {0x03,0x01,0x02,0x08,0x01,0x00,0x06,0x00,0x01,0x55,0x00},
+        },
+    };
+    struct hid_expect expect_start =
+    {
+        .code = IOCTL_HID_WRITE_REPORT,
+        .report_id = 2,
+        .report_len = 4,
+        .report_buf = {0x02,0x01,0x01,0x01},
+    };
+    struct hid_expect expect_stop =
+    {
+        .code = IOCTL_HID_WRITE_REPORT,
+        .report_id = 2,
+        .report_len = 4,
+        .report_buf = {0x02,0x01,0x03,0x00},
+    };
+    struct
+    {
+        const GUID *guid;
+        struct hid_expect *expect;
+        UINT expect_size;
+    } expect_effects[] =
+    {
+        {&GUID_Spring, expect_spring, sizeof(expect_spring)},
+        {&GUID_ConstantForce, expect_constant, sizeof(expect_constant)},
+        {&GUID_Sine, expect_sine, sizeof(expect_sine)},
+    };
+    struct create_file_effects_params *params = args;
+    IDirectInputEffect *effect;
+    HRESULT hr;
+    ULONG ref;
+
+    winetest_push_context( "effect[%u]", params->index );
+
+    ok( params->index < ARRAY_SIZE(expect_effects), "unexpected extra effect\n" );
+    if (params->index >= ARRAY_SIZE(expect_effects))
+    {
+        winetest_pop_context();
+        return DIENUM_STOP;
+    }
+    ok( IsEqualGUID( &file_effect->GuidEffect, expect_effects[params->index].guid ), "got GuidEffect %s\n",
+        debugstr_guid( &file_effect->GuidEffect ) );
+
+    set_hid_expect( params->file, expect_effects[params->index].expect, expect_effects[params->index].expect_size );
+    hr = IDirectInputDevice8_CreateEffect( params->device, &file_effect->GuidEffect, file_effect->lpDiEffect,
+                                           &effect, NULL );
+    ok( hr == DI_OK, "CreateEffect returned %#lx\n", hr );
+    set_hid_expect( params->file, NULL, 0 );
+
+    if (hr == DI_OK)
+    {
+        set_hid_expect( params->file, &expect_start, sizeof(expect_start) );
+        hr = IDirectInputEffect_Start( effect, 1, 0 );
+        ok( hr == DI_OK, "Start returned %#lx\n", hr );
+        set_hid_expect( params->file, NULL, 0 );
+
+        set_hid_expect( params->file, &expect_stop, sizeof(expect_stop) );
+        ref = IDirectInputEffect_Release( effect );
+        ok( ref == 0, "Release returned %ld\n", ref );
+        set_hid_expect( params->file, NULL, 0 );
+    }
+
+    winetest_pop_context();
+    params->index++;
+    return DIENUM_CONTINUE;
+}
+
+/* Creates and starts the effects of an effect file, as games do with what
+ * EnumEffectsInFile gives them. */
+static void test_effects_in_file( IDirectInputDevice8W *device, HANDLE file )
+{
+    struct create_file_effects_params params = {.device = device, .file = file};
+    WCHAR temp[MAX_PATH], path[MAX_PATH];
+    HANDLE ffe;
+    DWORD written;
+    HRESULT hr;
+    UINT len;
+    BOOL ret;
+
+    len = GetTempPathW( ARRAY_SIZE(temp), temp );
+    ok( len, "GetTempPathW failed, error %lu\n", GetLastError() );
+    len = GetTempFileNameW( temp, L"ffe", 0, path );
+    ok( len, "GetTempFileNameW failed, error %lu\n", GetLastError() );
+    if (!len) return;
+
+    ffe = CreateFileW( path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL );
+    ok( ffe != INVALID_HANDLE_VALUE, "CreateFileW failed, error %lu\n", GetLastError() );
+    ret = WriteFile( ffe, &ffe_file, sizeof(ffe_file), &written, NULL );
+    ok( ret, "WriteFile failed, error %lu\n", GetLastError() );
+    CloseHandle( ffe );
+
+    hr = IDirectInputDevice8_EnumEffectsInFile( device, path, create_file_effects, &params, 0 );
+    ok( hr == DI_OK, "EnumEffectsInFile returned %#lx\n", hr );
+    ok( params.index == 3, "got %u effects\n", params.index );
+
+    ret = DeleteFileW( path );
+    ok( ret, "DeleteFileW failed, error %lu\n", GetLastError() );
+}
 
 static BOOL test_force_feedback_joystick( DWORD version )
 {
@@ -3637,6 +3835,7 @@ static BOOL test_force_feedback_joystick( DWORD version )
     test_constantforce_effect( device, file, version );
     test_periodic_effect( device, file, version );
     test_condition_effect( device, file, version );
+    if (version >= 0x800) test_effects_in_file( device, file );
 
     set_hid_expect( file, expect_reset, sizeof(expect_reset) );
     hr = IDirectInputDevice8_Unacquire( device );

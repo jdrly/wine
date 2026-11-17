@@ -392,12 +392,20 @@ static NSString* WineLocalizedString(unsigned int stringID)
 
     - (void) windowGotFocus:(WineWindow*)window
     {
+        [self windowGotFocus:window requested:NO];
+    }
+
+    /* requested: Wine made the window key itself, for a window that Windows
+       had made the foreground window. */
+    - (void) windowGotFocus:(WineWindow*)window requested:(BOOL)requested
+    {
         macdrv_event* event;
 
         [self invalidateGotFocusEvents];
 
         event = macdrv_create_event(WINDOW_GOT_FOCUS, window);
         event->window_got_focus.serial = windowFocusSerial;
+        event->window_got_focus.requested = requested;
         if (triedWindows)
             event->window_got_focus.tried_windows = [triedWindows retain];
         else
@@ -751,6 +759,18 @@ static NSString* WineLocalizedString(unsigned int stringID)
         /* AppKit owns the options of a window in native fullscreen. */
         if (current & NSApplicationPresentationFullScreen) return;
 
+        /* -miniaturize: only starts a minimize: the window stays visible and
+           not miniaturized until the window manager has answered and AppKit
+           has asked the Dock.  A Dock that is hidden by then holds the request
+           back, and AppKit waits 8 s for it on the main thread.  So the Dock
+           stays as -prepareToMiniaturize left it until windowDidMiniaturize:
+           comes here again. */
+        for (window in [NSApp windows])
+        {
+            if ([window isKindOfClass:[WineWindow class]] && window.miniaturizing && ![window isMiniaturized])
+                return;
+        }
+
         if (![self areDisplaysCaptured])
         {
             for (window in [NSApp windows])
@@ -774,8 +794,8 @@ static NSString* WineLocalizedString(unsigned int stringID)
     /* AppKit silently ignores -miniaturize: while the Dock is hidden through
        the presentation options, which would leave a window Windows considers
        minimized on the screen with nothing to restore it from.  Show the Dock
-       and menu bar first; the next level pass hides them again if a window
-       still covers the screen. */
+       and menu bar first; -updateFullscreenPresentation: hides them again
+       after the minimize if a window still covers the screen. */
     - (void) prepareToMiniaturize
     {
         NSApplicationPresentationOptions hidden = NSApplicationPresentationHideDock | NSApplicationPresentationHideMenuBar;
@@ -2839,7 +2859,11 @@ int macdrv_set_display_mode(CGDirectDisplayID displayID, CGDisplayModeRef displa
 {
     __block int ret = 0;
 
-    OnMainThread(^{
+    /* win32u holds its display lock across this call.  While the main
+       thread switches the mode, AppKit can start a live resize of a window
+       of this thread, whose query handler reaches the display lock through
+       GetSystemMetrics() and would block this thread on itself. */
+    OnMainThreadWithoutQueries(^{
         ret = [[WineApplicationController sharedController] setMode:display_mode forDisplay:displayID];
     });
 

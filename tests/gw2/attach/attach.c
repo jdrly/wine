@@ -3,7 +3,7 @@
  *
  * It starts count.exe from its own folder, an x86_64 program, and waits until count.exe says it
  * runs. DebugActiveProcess then has DbgUiIssueRemoteBreakin start a thread in count.exe at a
- * DbgUiRemoteBreakin. Under the engine's ntdll.so that is this program's own, in the ARM64 half of
+ * DbgUiRemoteBreakin. Under Mach9 0.3.1's ntdll.so that was this program's own, in the ARM64 half of
  * ntdll, which FEX runs as x86 code in count.exe: count.exe dies with c0000005. Under mine it is
  * count.exe's own, which raises a breakpoint.
  *

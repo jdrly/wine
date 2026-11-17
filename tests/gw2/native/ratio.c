@@ -1,7 +1,7 @@
 /* gw2 (jdrly/gw2-on-mac#159): win32u's make_ratio(), built natively and run without Wine. The
  * workflow cuts the function, and ratio_error() or the gcd() before it, out of
  * dlls/win32u/sysparams.c into make_ratio.c, which this file includes, so what runs is the file's
- * own code. Under the engine's code (gcd() and two asserts) the first case aborts.
+ * own code. Under Mach9 0.3.1's code (gcd() and two asserts) the first case aborted.
  *
  * - 214464/365, the height term of a 1168x730 mode on a 3456x2234 display at 192 DPI, gives
  *   64633/110, and no fraction with both terms below 65536 is closer. 365/214464 gives 110/64633.

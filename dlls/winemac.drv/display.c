@@ -782,11 +782,6 @@ LONG macdrv_ChangeDisplaySettings(LPDEVMODEW displays, LPCWSTR primary_name, HWN
 
     desc = create_original_display_mode_descriptor(CGMainDisplayID());
 
-    /* win32u holds its display lock across this call.  While the main
-       thread switches the mode, AppKit can start a live resize of a window
-       of this thread, whose query handler reaches the display lock through
-       GetSystemMetrics() and would block this thread on itself. */
-    macdrv_begin_query_deferral();
     for (mode = displays; mode->dmSize && !ret; mode = NEXT_DEVMODEW(mode))
     {
         if (wcsicmp(primary_name, mode->dmDeviceName))
@@ -821,7 +816,6 @@ LONG macdrv_ChangeDisplaySettings(LPDEVMODEW displays, LPCWSTR primary_name, HWN
             ret = DISP_CHANGE_FAILED;
         }
     }
-    macdrv_end_query_deferral();
 
     free_display_mode_descriptor(desc);
     CFRelease(display_modes);

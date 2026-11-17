@@ -127,7 +127,9 @@ enum {
     - (void) computeEventTimeAdjustmentFromTicks:(unsigned long long)tickcount uptime:(uint64_t)uptime_ns;
     - (double) ticksForEventTime:(NSTimeInterval)eventTime;
 
+    - (void) invalidateGotFocusEvents;
     - (void) windowGotFocus:(WineWindow*)window;
+    - (void) windowGotFocus:(WineWindow*)window requested:(BOOL)requested;
 
     - (BOOL) waitUntilQueryDone:(bool*)done timeout:(NSDate*)timeout processEvents:(BOOL)processEvents;
 

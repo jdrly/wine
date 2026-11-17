@@ -1,7 +1,7 @@
 #!/bin/zsh
 # gw2 (jdrly/gw2-on-mac#40, #57, #61): build dlls/ntdll/ntdll.so, dlls/winemac.drv/winemac.so and
-# dlls/win32u/win32u.so the way Mach9 0.3.1's CI built the engine's (athei/mach9 at v0.3.1: bin/build-wine.sh,
-# bin/lib/profile.sh, .github/workflows/release.yml).
+# dlls/win32u/win32u.so the way Mach9 0.4.0's CI built the engine's (athei/mach9 at v0.4.0: bin/build-wine.sh,
+# bin/lib/profile.sh, .github/workflows/release.yml; Wine's configure there is v0.3.1's).
 #
 #   wine.zsh prepare <commit>    check $SRC out at <commit> and give it the wine-11.21 tag
 #   wine.zsh checkout <commit>   move $SRC to another commit
@@ -16,7 +16,7 @@
 # Vulkan are on without their libraries: of what they set, win32u.so needs only the names it loads
 # EGL and Vulkan by (SONAME_LIBEGL, SONAME_LIBVULKAN), and FreeType's (SONAME_LIBFREETYPE). Mach9
 # found the three in its Mesa build and Homebrew and then rewrote them in config.h to the bundle's
-# paths (athei/mach9 at v0.3.1, bin/build-wine.sh: patch_sonames). Here configure's cache variables
+# paths (athei/mach9 at v0.4.0, bin/build-wine.sh: patch_sonames). Here configure's cache variables
 # give it those paths, so it never links against the libraries, and configure below checks
 # config.h for them. FreeType's headers are Homebrew's, as Mach9's were (2.15.0 in its release
 # run). The baseline compare in .github/workflows/gw2.yml decides whether that holds.
@@ -39,7 +39,7 @@ prepare() {
   version=$(sed -n 's/^Wine version //p' "$SRC/VERSION")
   git -C "$SRC" fetch --quiet --no-tags https://github.com/wine-mirror/wine \
     "refs/tags/wine-${version}:refs/tags/wine-${version}"
-  # The engine's string has 10 digits of the commit (wine-11.21-37-g53def89293). git picks the
+  # The engine's string has 10 digits of the commit (wine-11.21-54-g501796b0ed). git picks the
   # length from the repository's object count, which isn't the same in my fork as in athei's.
   git -C "$SRC" config core.abbrev 10
   git -C "$SRC" describe HEAD

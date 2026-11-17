@@ -51,8 +51,8 @@
 #   and its mouse speed factor (WINE_MACDRV_MOUSE_SCALE), and fexstats.c the reader of FEX's
 #   counters (jdrly/gw2-on-mac#111) and their tick rate (jdrly/gw2-on-mac#156), and ratio.c win32u's
 #   make_ratio(), cut out of dlls/win32u/sysparams.c (jdrly/gw2-on-mac#159); modeset.exe changes the
-#   display mode with EmulateModeset Y at 192 DPI under the engine with my ntdll.so and my win32u.so,
-#   and has to fail on the engine's bug under the engine's win32u.so; layered.exe under the engine
+#   display mode with EmulateModeset Y at 192 DPI under the engine with my ntdll.so and my win32u.so;
+#   layered.exe under the engine
 #   with my winemac.so counts the frames WINE_MACDRV_SURFACE skips, where the driver starts; and
 #   tests/gw2/matrix.zsh runs them all under the engine from the release tarball: with its own
 #   ntdll.so, and with mine in each WINE_HEAT_WAKE mode, with no WINE_HEAT_* variable and with
@@ -68,8 +68,8 @@
 #   Apple event, as a click on the Dock icon does, under the engine with my winemac.so and under
 #   the engine's own, and checks which WM_NCACTIVATE each sends (jdrly/gw2-on-mac#160).
 #   tests/gw2/attach/attach.c, built for arm64 as the engine's winedbg is, attaches to the x86_64
-#   count.exe and detaches: count.exe has to run on under the engine with my ntdll.so and die with
-#   c0000005 under the engine's own (jdrly/gw2-on-mac#174).
+#   count.exe and detaches: count.exe has to run on under the engine with my ntdll.so
+#   (jdrly/gw2-on-mac#174).
 #   leftover.exe leaves a process behind, and tests/gw2/run.zsh has to fail its run, name the
 #   process and end it (jdrly/gw2-on-mac#128). rundll.exe has rundll32 call the entry point of a
 #   stand-in for arcdps's d3d11.dll: it has to fail with Wine's default order and pass with the app's
@@ -121,8 +121,8 @@ env:
   # GitHub's merge commit (github.sha), so the workflow and the scripts it calls always agree,
   # whether or not the PR's head is behind gw2-on-mac. The source under test stays $COMMIT.
   GW2: ${{ github.workspace }}/gw2-ci/.github/gw2
-  # athei/wine's commit Mach9 0.3.1 was built from (wine-11.21-37-g53def89293), where gw2-on-mac starts
-  BASE_COMMIT: 53def89293adfe1a62c43ef46abe80a536e9ca49
+  # athei/wine's commit Mach9 0.4.0 was built from (wine-11.21-54-g501796b0ed), where gw2-on-mac starts
+  BASE_COMMIT: 501796b0ed15759127c2a5f415d31570cdee34f3
   # The runner and Xcode my build and tests use; their runs-on read the anchor, since runs-on can't
   # read env. With the engine's two below, my build of the engine's commit gets the strict gate; with
   # any other, the structural one. xcode-27 has Xcode 27.0 and 27.1 (macOS SDK 27.0) and 27.2 (SDK
@@ -130,15 +130,15 @@ env:
   # my DXMT fork build with.
   RUNNER: &runner xcode-27
   XCODE_VERSION: "27.2"
-  # What Mach9's release run of v0.3.1 used (athei/mach9 run 42769825957): Xcode 26.6 (SDK 26.5,
+  # What Mach9's release run of v0.4.0 used (athei/mach9 run 44031759609): Xcode 26.6 (SDK 26.5,
   # clang-2100.1.1.101) on the macos-26 image (macos-26-arm64 20261102.0473.1), and its
-  # pins/redist.env and bin/lib/profile.sh
+  # pins/redist.env and bin/lib/profile.sh. v0.3.1's run 42769825957 had the same.
   ENGINE_RUNNER: macos-26
   ENGINE_XCODE_VERSION: "26.6"
   LLVM_MINGW_VERSION: "20261104"
   LLVM_MINGW_SHA256: 66cbd5178c4a71b0d473e68ede172f8eb7d15d023e67f39201d0a69e21f6bf3c
-  MACH9_VERSION: v0.3.1
-  MACH9_SHA256: 90aff9a897ed0ff9aac44d0e06f0aecd3ee985afb38037f3f915451e51fa974e
+  MACH9_VERSION: v0.4.0
+  MACH9_SHA256: 3b81aac9b93d5652872673b400769ec525f3bc2f1f7e2ec82c9f851d0a0db05d
 
 defaults:
   run:
@@ -283,7 +283,7 @@ jobs:
       - name: Install Homebrew's bison, freetype, gnutls and SDL
         run: |
           brew install bison freetype gnutls sdl2-compat pkgconf
-          # win32u.so's freetype.c is compiled against these headers; Mach9's release run had 2.15.0
+          # win32u.so's freetype.c is compiled against these headers; Mach9's v0.4.0 release run had 2.15.0
           FREETYPE_VERSION=$(brew list --versions freetype | cut -d' ' -f2)
           echo "FREETYPE_VERSION=$FREETYPE_VERSION" >>"$GITHUB_ENV"
           echo "Homebrew's FreeType: $FREETYPE_VERSION" | tee -a "$GITHUB_STEP_SUMMARY"
@@ -1012,10 +1012,10 @@ jobs:
             (( events > 0 )) || { echo "::error::$mode: no event arrived, so calls.exe didn't stress the event path"; exit 1; }
           done
       # jdrly/gw2-on-mac#159: modeset.exe with EmulateModeset Y at 192 DPI, under the engine with my
-      # ntdll.so and my win32u.so, where it has to pass, then with my ntdll.so and the engine's
-      # win32u.so, where it has to fail on the engine's bug: the abort, when this display offers a
-      # size whose ratio make_ratio() can't hold (1366x768 first), or else the cleared clip of a
-      # letterboxed mode. Only where the Mac driver starts.
+      # ntdll.so and my win32u.so, where it has to pass a size whose ratio make_ratio() couldn't hold
+      # before (1366x768 first) or else a letterboxed mode. Up to Mach9 0.3.1 it also had to fail
+      # under the engine's win32u.so. Since 0.4.0 athei's commit has both fixes, so the engine's file
+      # passes as mine does, and that run is gone. Only where the Mac driver starts.
       - name: A mode change to 1366x768
         if: matrix.lane == 'window' && (env.RUN_WIN32U == '1' || env.RUN_NTDLL == '1')
         run: |
@@ -1025,28 +1025,16 @@ jobs:
             exit 0
           fi
           [[ -d $RUNNER_TEMP/win32u ]] || { echo "::error::the build shipped no win32u.so of mine"; exit 1; }
-          mine=0 engine=0
+          mine=0
           tests/gw2/run.zsh "$RUNNER_TEMP/win32u/wine" "$RUNNER_TEMP/modeset-mine" "$RUNNER_TEMP/tests/modeset.exe" \
             >"$RUNNER_TEMP/modeset-mine.txt" || mine=1
-          tests/gw2/run.zsh "$RUNNER_TEMP/mine/wine" "$RUNNER_TEMP/modeset-engine" "$RUNNER_TEMP/tests/modeset.exe" \
-            >"$RUNNER_TEMP/modeset-engine.txt" || engine=1
-          for which in mine engine; do
-            { echo "### modeset.exe, $which win32u.so"; echo '```'; cat "$RUNNER_TEMP/modeset-$which.txt"; echo '```'; } |
-              tee -a "$GITHUB_STEP_SUMMARY"
-          done
+          { echo "### modeset.exe, my win32u.so"; echo '```'; cat "$RUNNER_TEMP/modeset-mine.txt"; echo '```'; } |
+            tee -a "$GITHUB_STEP_SUMMARY"
           (( mine == 0 )) || { echo "::error::modeset.exe failed under my win32u.so"; exit 1; }
-          if grep -qF 'gw2 test modeset: changing to ' "$RUNNER_TEMP/modeset-mine.txt"; then
-            want="the mode change ended the process"
-          else
-            echo "::warning::this runner's display offers no size whose DPI ratio make_ratio() can't hold, so only ratio.c shows the abort" |
+          if ! grep -qF 'gw2 test modeset: changing to ' "$RUNNER_TEMP/modeset-mine.txt"; then
+            echo "::warning::this runner's display offers no size whose DPI ratio make_ratio() couldn't hold before, so only ratio.c tests one" |
               tee -a "$GITHUB_STEP_SUMMARY"
-            want="not the mode's 0,0-"
           fi
-          if (( engine == 0 )) || ! grep -qF "$want" "$RUNNER_TEMP/modeset-engine.txt"; then
-            echo "::error::under the engine's win32u.so modeset.exe didn't fail with \"$want\""
-            exit 1
-          fi
-          echo "ok    the engine's win32u.so fails with \"$want\"" | tee -a "$GITHUB_STEP_SUMMARY"
       # jdrly/gw2-on-mac#160: restore.exe minimizes its window, makes the desktop the foreground
       # window and runs tests/gw2/native/reopen, which sends the process the reopen Apple event, as a
       # click on the Dock icon does. Under the engine with my winemac.so the window has to be the
@@ -1157,29 +1145,18 @@ jobs:
       # jdrly/gw2-on-mac#174: a debugger attaches to a running x86_64 process. attach.exe, built for
       # arm64 as the engine's winedbg is, starts count.exe, attaches with DebugActiveProcess,
       # continues the break-in's breakpoint, detaches, and passes once count.exe has counted on and
-      # exited with 0. Under the engine with my ntdll.so it has to pass. Under the engine's own, which
-      # starts the break-in thread at the debugger's ARM64 DbgUiRemoteBreakin, count.exe has to die
-      # with c0000005.
+      # exited with 0. Under the engine with my ntdll.so it has to pass. Up to Mach9 0.3.1 count.exe
+      # also had to die with c0000005 under the engine's own. Since 0.4.0 athei's commit has the fix,
+      # so the engine's file passes as mine does, and that run is gone.
       - name: A debugger attached to an x86_64 process
         if: matrix.lane == 'window' && env.RUN_NTDLL == '1'
         run: |
-          mine=0 engine=0
+          mine=0
           tests/gw2/run.zsh "$RUNNER_TEMP/mine/wine" "$RUNNER_TEMP/attach-mine" "$RUNNER_TEMP/attach/attach.exe" \
             >"$RUNNER_TEMP/attach-mine.txt" || mine=1
-          tests/gw2/run.zsh "$RUNNER_TEMP/engine/wine" "$RUNNER_TEMP/attach-engine" "$RUNNER_TEMP/attach/attach.exe" \
-            >"$RUNNER_TEMP/attach-engine.txt" || engine=1
-          for which in mine engine; do
-            who="my ntdll.so"
-            [[ $which == engine ]] && who="the engine's ntdll.so"
-            { echo "### attach.exe under $who"; echo '```'; cat "$RUNNER_TEMP/attach-$which.txt"; echo '```'; } |
-              tee -a "$GITHUB_STEP_SUMMARY"
-          done
+          { echo "### attach.exe under my ntdll.so"; echo '```'; cat "$RUNNER_TEMP/attach-mine.txt"; echo '```'; } |
+            tee -a "$GITHUB_STEP_SUMMARY"
           (( mine == 0 )) || { echo "::error::attach.exe failed under my ntdll.so"; exit 1; }
-          if (( engine == 0 )) || ! grep -qF 'count.exe died with c0000005 while attached' "$RUNNER_TEMP/attach-engine.txt"; then
-            echo "::error::under the engine's ntdll.so count.exe didn't die with c0000005"
-            exit 1
-          fi
-          echo "ok    under the engine's ntdll.so count.exe dies with c0000005" | tee -a "$GITHUB_STEP_SUMMARY"
       # The lanes' blocks, cut so that the three lanes take about the same time (docs/gw2/adr/0016):
       # block 7 (win32u) goes after the window steps, so a pull request that changes only my
       # win32u.so needs one lane, and matrix-a and matrix-b, which only a change that reaches my

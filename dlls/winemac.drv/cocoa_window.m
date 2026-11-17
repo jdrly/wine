@@ -1135,8 +1135,11 @@ static inline BOOL stage_manager_enabled(void)
 @implementation WineWindow
 
     static WineWindow* causing_becomeKeyWindow;
+    /* Lost the key status at the end of a minimize that Windows has undone
+       already; only compared, never dereferenced. */
+    static WineWindow* keyLostToUndoneMinimize;
 
-    @synthesize disabled, noForeground, preventsAppActivation, floating, fullscreen, fakingClose, closing, latentParentWindow, hwnd, queue;
+    @synthesize disabled, noForeground, preventsAppActivation, floating, fullscreen, fakingClose, miniaturizing, closing, latentParentWindow, hwnd, queue;
     @synthesize drawnSinceShown;
     @synthesize shapeChangedSinceLastDraw;
     @synthesize usePerPixelAlpha;
@@ -1227,6 +1230,8 @@ static inline BOOL stage_manager_enabled(void)
 
     - (void) dealloc
     {
+        if (keyLostToUndoneMinimize == self)
+            keyLostToUndoneMinimize = nil;
         [[[NSWorkspace sharedWorkspace] notificationCenter] removeObserver:self];
         [[NSNotificationCenter defaultCenter] removeObserver:self];
         [queue release];
@@ -1492,9 +1497,22 @@ static inline BOOL stage_manager_enabled(void)
             }
             else if (!state->minimized && [self isMiniaturized])
             {
+                /* A key window AppKit picked when the minimize ended may still
+                   have its WINDOW_GOT_FOCUS queued. Windows sets the
+                   foreground for this restore itself: it activates this
+                   window, except for SW_SHOWNOACTIVATE, which leaves the
+                   foreground where it is. Either way that event is stale. */
+                [[WineApplicationController sharedController] invalidateGotFocusEvents];
                 ignore_windowDeminiaturize = TRUE;
                 [self deminiaturize:nil];
                 discard |= event_mask_for_type(WINDOW_LOST_FOCUS);
+            }
+            else if (!state->minimized && miniaturizing)
+            {
+                /* Not miniaturized yet, so nothing to deminiaturize, but
+                   AppKit would finish the minimize and leave the window in
+                   the Dock while Windows has it restored. */
+                restoreWhenMiniaturized = TRUE;
             }
 
             if (discard)
@@ -1990,6 +2008,13 @@ static inline BOOL stage_manager_enabled(void)
         }
 
         pendingOrderOut = FALSE;
+        miniaturizing = FALSE;
+        restoreWhenMiniaturized = FALSE;
+        if (keyLostToUndoneMinimize == self)
+            keyLostToUndoneMinimize = nil;
+        /* Forget a restore that has not reported its end; it would make the
+           next deminiaturize count as one Windows asked for. */
+        ignore_windowDeminiaturize = FALSE;
 
         if ([self isMiniaturized])
             pendingMinimize = TRUE;
@@ -2076,30 +2101,35 @@ static inline BOOL stage_manager_enabled(void)
         }
     }
 
+    /* Cocoa rounds a frame to whole points, which are two Windows pixels in
+       retina mode, and may also move or resize it, below the menu bar for
+       example.  Remember the content rect Wine set and what Cocoa made of
+       it, for -wine_fractionalFrame.  They are content rects because
+       -setStyleMask: changes the frame and leaves the content rect where it
+       is, unless AppKit constrains the new frame.  A left edge, top edge,
+       width or height that Cocoa changed by a point or more was not just
+       rounded, and is not remembered as the rounding of what Wine set.  A
+       change of less than a point cannot be told from rounding. */
     - (void) setFrameAndWineFrame:(NSRect)frame
     {
+        NSRect rounded;
+        CGFloat top;
+
         [self setFrame:frame display:YES];
 
-        wineFrame = frame;
-        roundedWineFrame = self.frame;
-        CGFloat junk;
-#if CGFLOAT_IS_DOUBLE
-        if ((!modf(wineFrame.origin.x, &junk) && !modf(wineFrame.origin.y, &junk) &&
-             !modf(wineFrame.size.width, &junk) && !modf(wineFrame.size.height, &junk)) ||
-            fabs(wineFrame.origin.x - roundedWineFrame.origin.x) >= 1 ||
-            fabs(wineFrame.origin.y - roundedWineFrame.origin.y) >= 1 ||
-            fabs(wineFrame.size.width - roundedWineFrame.size.width) >= 1 ||
-            fabs(wineFrame.size.height - roundedWineFrame.size.height) >= 1)
-            roundedWineFrame = wineFrame;
-#else
-        if ((!modff(wineFrame.origin.x, &junk) && !modff(wineFrame.origin.y, &junk) &&
-             !modff(wineFrame.size.width, &junk) && !modff(wineFrame.size.height, &junk)) ||
-            fabsf(wineFrame.origin.x - roundedWineFrame.origin.x) >= 1 ||
-            fabsf(wineFrame.origin.y - roundedWineFrame.origin.y) >= 1 ||
-            fabsf(wineFrame.size.width - roundedWineFrame.size.width) >= 1 ||
-            fabsf(wineFrame.size.height - roundedWineFrame.size.height) >= 1)
-            roundedWineFrame = wineFrame;
-#endif
+        wineContentRect = [self contentRectForFrameRect:frame];
+        rounded = [self contentRectForFrameRect:self.frame];
+        top = NSMaxY(rounded);
+        if (fabs(NSMinX(rounded) - NSMinX(wineContentRect)) >= 1)
+            rounded.origin.x = wineContentRect.origin.x;
+        if (fabs(top - NSMaxY(wineContentRect)) >= 1)
+            top = NSMaxY(wineContentRect);
+        if (fabs(NSWidth(rounded) - NSWidth(wineContentRect)) >= 1)
+            rounded.size.width = wineContentRect.size.width;
+        if (fabs(NSHeight(rounded) - NSHeight(wineContentRect)) >= 1)
+            rounded.size.height = wineContentRect.size.height;
+        rounded.origin.y = top - rounded.size.height;
+        roundedWineContentRect = rounded;
     }
 
     - (void) setFrameFromWine:(NSRect)contentRect
@@ -2178,11 +2208,35 @@ static inline BOOL stage_manager_enabled(void)
         }
     }
 
+    /* The window's frame as Windows has it: Cocoa's frame, in which each of
+       the left edge, the top edge, the width and the height that is still
+       Cocoa's rounding of what Wine set has the value Wine set.  A window
+       that Cocoa or the user moved keeps the size Wine set, and one resized
+       at its right or bottom edge keeps its left and top edge.  The top
+       edge is compared and not the origin, since Windows has the top edge
+       and Cocoa rounds the origin down and the height up.  In native full
+       screen the frame is AppKit's, and an edge of it that happens to be
+       where the window's was is not the rounding of anything. */
     - (NSRect) wine_fractionalFrame
     {
         NSRect frame = self.frame;
-        if (NSEqualRects(frame, roundedWineFrame))
-            frame = wineFrame;
+        NSRect content;
+        CGFloat top;
+
+        if ([self styleMask] & NSWindowStyleMaskFullScreen)
+            return frame;
+
+        content = [self contentRectForFrameRect:frame];
+        top = NSMaxY(frame);
+        if (NSMinX(content) == NSMinX(roundedWineContentRect))
+            frame.origin.x += NSMinX(wineContentRect) - NSMinX(roundedWineContentRect);
+        if (NSMaxY(content) == NSMaxY(roundedWineContentRect))
+            top += NSMaxY(wineContentRect) - NSMaxY(roundedWineContentRect);
+        if (NSWidth(content) == NSWidth(roundedWineContentRect))
+            frame.size.width += NSWidth(wineContentRect) - NSWidth(roundedWineContentRect);
+        if (NSHeight(content) == NSHeight(roundedWineContentRect))
+            frame.size.height += NSHeight(wineContentRect) - NSHeight(roundedWineContentRect);
+        frame.origin.y = top - frame.size.height;
         return frame;
     }
 
@@ -2271,10 +2325,17 @@ static inline BOOL stage_manager_enabled(void)
         [self makeKeyWindow];
         causing_becomeKeyWindow = nil;
 
-        /* Keep WINDOW_GOT_FOCUS, so Windows follows the key window even
-           when its foreground window changed while this was in flight. */
-        [queue discardEventsMatchingMask:event_mask_for_type(WINDOW_LOST_FOCUS)
+        [queue discardEventsMatchingMask:event_mask_for_type(WINDOW_GOT_FOCUS) |
+                                         event_mask_for_type(WINDOW_LOST_FOCUS)
                                forWindow:self];
+
+        /* Windows may have lost its foreground window while this was in
+           flight, when the application was deactivated and reactivated for
+           example.  Report the key window as one Wine asked for, so Windows
+           takes it back only then and not from a window that got the
+           foreground since. */
+        if ([self isKeyWindow])
+            [[WineApplicationController sharedController] windowGotFocus:self requested:YES];
     }
 
     - (void) postKey:(uint16_t)keyCode
@@ -2544,26 +2605,11 @@ static inline BOOL stage_manager_enabled(void)
 
     - (NSRect) constrainFrameRect:(NSRect)frameRect toScreen:(NSScreen *)screen
     {
-        NSArray* screens;
-        NSRect contentRect;
-
-        // Windows does not keep windows clear of the menu bar, and a window
-        // that AppKit moves below it a moment after Wine placed it, such as
-        // a titled window at the top of the screen, or a window that turns
-        // titled there when a program leaves full screen, would get Windows
-        // coordinates the program did not set.  So AppKit only constrains
-        // the frames of a live resize: one by the user, or the one in which
-        // macOS 27 adjusts windows to a display change, after which
-        // -_displayChanged has Wine put the window back where Windows has
-        // it.  Every other frame is Wine's or follows from it.
-        if (![self inLiveResize])
-            return frameRect;
-
         // If a window is sized to completely cover a screen, then it's in
         // full-screen mode.  In that case, we don't allow NSWindow to constrain
         // it.
-        screens = [NSScreen screens];
-        contentRect = [self contentRectForFrameRect:frameRect];
+        NSArray* screens = [NSScreen screens];
+        NSRect contentRect = [self contentRectForFrameRect:frameRect];
         if (!screen_covered_by_rect(contentRect, screens) &&
             frame_intersects_screens(frameRect, screens))
             frameRect = [super constrainFrameRect:frameRect toScreen:screen];
@@ -2747,6 +2793,15 @@ static inline BOOL stage_manager_enabled(void)
     {
         [[WineApplicationController sharedController] prepareToMiniaturize];
         [self setStyleMask:([self styleMask] | NSWindowStyleMaskMiniaturizable)];
+        /* AppKit drops the minimize of a window in or on its way into or out
+           of native full screen, and with Stage Manager the window only moves
+           to the background; none of them reaches the Dock. */
+        miniaturizing = [self isVisible] && ![self isMiniaturized] &&
+                        !([self styleMask] & NSWindowStyleMaskFullScreen) &&
+                        !enteringFullScreen && !exitingFullScreen && !stage_manager_enabled();
+        restoreWhenMiniaturized = FALSE;
+        if (keyLostToUndoneMinimize == self)
+            keyLostToUndoneMinimize = nil;
         [super miniaturize:nil];
     }
 
@@ -3053,16 +3108,38 @@ static inline BOOL stage_manager_enabled(void)
         if (event)
             [self flagsChanged:event];
 
+        /* AppKit makes the next window key right after the window it takes
+           the key status from (see windowDidResignKey:). */
+        if (keyLostToUndoneMinimize)
+        {
+            BOOL handedOn = (keyLostToUndoneMinimize != self);
+
+            keyLostToUndoneMinimize = nil;
+            if (handedOn) return;
+        }
+
+        if (causing_becomeKeyWindow == self) return;
+        /* AppKit makes a window key when it ends a restore that Windows asked
+           for; windowDidDeminiaturize: reports that one. */
+        if (ignore_windowDeminiaturize) return;
+
         [controller windowGotFocus:self];
     }
 
     - (void)windowDidDeminiaturize:(NSNotification *)notification
     {
         WineApplicationController* controller = [WineApplicationController sharedController];
+        BOOL requested = ignore_windowDeminiaturize;
 
         if (!ignore_windowDeminiaturize)
             [self postDidUnminimizeEvent];
         ignore_windowDeminiaturize = FALSE;
+        /* AppKit posts no windowDidMiniaturize: for a minimize the Dock did
+           not answer in time. */
+        miniaturizing = FALSE;
+        restoreWhenMiniaturized = FALSE;
+        if (keyLostToUndoneMinimize == self)
+            keyLostToUndoneMinimize = nil;
 
         [self becameEligibleParentOrChild];
 
@@ -3078,7 +3155,9 @@ static inline BOOL stage_manager_enabled(void)
             causing_becomeKeyWindow = self;
             [self makeKeyWindow];
             causing_becomeKeyWindow = nil;
-            [controller windowGotFocus:self];
+            /* After a restore Windows asked for, the program may have given
+               the foreground to another window during the animation. */
+            [controller windowGotFocus:self requested:requested];
         }
 
         [self windowDidResize:notification];
@@ -3137,10 +3216,24 @@ static inline BOOL stage_manager_enabled(void)
 
     - (void)windowDidMiniaturize:(NSNotification *)notification
     {
+        WineApplicationController* controller = [WineApplicationController sharedController];
         macdrv_event* event;
 
         if (fullscreen && [self isOnActiveSpace])
-            [[WineApplicationController sharedController] updateFullscreenWindows];
+            [controller updateFullscreenWindows];
+
+        if (miniaturizing)
+        {
+            miniaturizing = FALSE;
+            if (restoreWhenMiniaturized)
+            {
+                restoreWhenMiniaturized = FALSE;
+                ignore_windowDeminiaturize = TRUE;
+                [self deminiaturize:nil];
+                return;
+            }
+            [controller updateFullscreenPresentation:[NSApp isActive]];
+        }
 
         event = macdrv_create_event(WINDOW_DID_MINIMIZE, self);
         [queue postEvent:event];
@@ -3158,6 +3251,16 @@ static inline BOOL stage_manager_enabled(void)
 
         if (causing_becomeKeyWindow) return;
         if ([[WineApplicationController sharedController] temporarilyIgnoreResignEventsForDialog]) return;
+        /* AppKit finishes a minimize that Windows has undone already: the
+           window is miniaturized when it loses the key status.  The window
+           keeps the foreground, and windowDidMiniaturize: restores it, which
+           makes it key again; the window AppKit makes key until then reports
+           nothing either. */
+        if (restoreWhenMiniaturized && [self isMiniaturized])
+        {
+            keyLostToUndoneMinimize = self;
+            return;
+        }
 
         event = macdrv_create_event(WINDOW_LOST_FOCUS, self);
         [queue postEvent:event];
@@ -3171,9 +3274,13 @@ static inline BOOL stage_manager_enabled(void)
 
         if (resizing)
         {
-            if (NSMinX(frame) != NSMinX(frameAtResizeStart))
+            /* frameAtResizeStart is Cocoa's frame, and an edge that did not
+               move has the value Wine set in the frame above. */
+            NSRect cocoaFrame = self.frame;
+
+            if (NSMinX(cocoaFrame) != NSMinX(frameAtResizeStart))
                 resizingFromLeft = TRUE;
-            if (NSMaxY(frame) != NSMaxY(frameAtResizeStart))
+            if (NSMaxY(cocoaFrame) != NSMaxY(frameAtResizeStart))
                 resizingFromTop = TRUE;
         }
 
@@ -3280,16 +3387,27 @@ static inline BOOL stage_manager_enabled(void)
             if (maximized)
                 return self.wine_fractionalFrame.size;
 
-            NSRect rect;
+            NSRect rect, proposed;
+            NSSize cocoaSize = [self frame].size;
             macdrv_query* query;
 
-            rect = [self frame];
-            if (resizingFromLeft)
-                rect.origin.x = NSMaxX(rect) - frameSize.width;
-            if (!resizingFromTop)
-                rect.origin.y = NSMaxY(rect) - frameSize.height;
-            rect.size = frameSize;
-            rect = [self contentRectForFrameRect:rect];
+            /* Windows gets the frame it has, changed where the proposed
+               size differs from Cocoa's: an edge the user does not drag is
+               where Windows has it, not where Cocoa rounded it to. */
+            proposed = self.wine_fractionalFrame;
+            if (frameSize.width != cocoaSize.width)
+            {
+                if (resizingFromLeft)
+                    proposed.origin.x = NSMaxX(proposed) - frameSize.width;
+                proposed.size.width = frameSize.width;
+            }
+            if (frameSize.height != cocoaSize.height)
+            {
+                if (!resizingFromTop)
+                    proposed.origin.y = NSMaxY(proposed) - frameSize.height;
+                proposed.size.height = frameSize.height;
+            }
+            rect = [self contentRectForFrameRect:proposed];
             [[WineApplicationController sharedController] flipRect:&rect];
 
             query = macdrv_create_query();
@@ -3303,7 +3421,11 @@ static inline BOOL stage_manager_enabled(void)
             {
                 rect = NSRectFromCGRect(cgrect_mac_from_win(query->resize_size.rect));
                 rect = [self frameRectForContentRect:rect];
-                frameSize = rect.size;
+                /* A size Windows left alone stays as AppKit proposed it. */
+                if (NSWidth(rect) != NSWidth(proposed))
+                    frameSize.width = NSWidth(rect);
+                if (NSHeight(rect) != NSHeight(proposed))
+                    frameSize.height = NSHeight(rect);
             }
 
             macdrv_release_query(query);
@@ -4300,6 +4422,18 @@ void macdrv_window_release_ca_layer_host_view(WineWindow *window, unsigned int c
 
         if ([content_view isKindOfClass:[WineContentView class]])
             [(WineContentView*)content_view removeCALayerHostView:context_id];
+    });
+}
+}
+
+/* Host the layer of another process in a view of macdrv_create_view, over
+ * its whole frame. macdrv_dispose_view releases the host with the view. */
+void macdrv_view_create_ca_layer_host(WineContentView *view, unsigned int context_id)
+{
+@autoreleasepool
+{
+    OnMainThread(^{
+        [view addCALayerHostViewWithContextId:context_id];
     });
 }
 }

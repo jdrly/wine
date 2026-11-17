@@ -35,6 +35,8 @@
     BOOL maximized;
     BOOL fullscreen;
     BOOL pendingMinimize;
+    BOOL miniaturizing;
+    BOOL restoreWhenMiniaturized;
     BOOL pendingOrderOut;
     BOOL savedVisibleState;
     BOOL drawnSinceShown;
@@ -45,8 +47,8 @@
     void* hwnd;
     WineEventQueue* queue;
 
-    NSRect wineFrame;
-    NSRect roundedWineFrame;
+    NSRect wineContentRect;
+    NSRect roundedWineContentRect;
 
     BOOL shapeChangedSinceLastDraw;
 
@@ -102,6 +104,8 @@
 @property (readonly, nonatomic) BOOL floating;
 @property (readonly, getter=isFullscreen, nonatomic) BOOL fullscreen;
 @property (readonly, getter=isFakingClose, nonatomic) BOOL fakingClose;
+/* A minimize that Windows asked for has not reached the Dock yet. */
+@property (readonly, nonatomic) BOOL miniaturizing;
 /* Set on the main thread when the window is being destroyed. From then on
    the references that events and queries hold may be the last ones. */
 @property (readonly, nonatomic) BOOL closing;

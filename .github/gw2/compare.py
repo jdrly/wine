@@ -1815,16 +1815,22 @@ def selftest(engine_dir):
     failures, line, strict, out = structural(swap_sections)
     if failures or "sections in another order inside their segment: __DATA_CONST" not in out:
         failed.append(f"structural gate: two sections of a segment in another order, {failures} failed, not in the report")
+    # the index and number of the one function <stem>.<n>: the copy helper is .468 in 0.3.1's
+    # winemac.so and .469 in 0.4.0's, so the fixtures read it from the file
+    def numbered(m, stem):
+        hits = [(i, int(n[len(stem) + 1:])) for i, (n, t, _, _, _) in enumerate(m.syms)
+                if t == N_FUN and n.startswith(stem + ".") and n[len(stem) + 1:].isdigit()]
+        if len(hits) != 1:
+            raise SystemExit(f"selftest: winemac.so has {len(hits)} functions {stem}.<n>, not one")
+        return hits[0]
     def renumbered(m):  # clang's numbers of winemac.so's block helpers one lower, as Xcode 27's clang has them
-        for old, new in (("___Block_byref_object_copy_.468", "___Block_byref_object_copy_.467"),
-                         ("___Block_byref_object_dispose_.469", "___Block_byref_object_dispose_.468")):
-            i = next(i for i, (n, t, _, _, _) in enumerate(m.syms) if n == old and t == N_FUN)
-            sym_set(m, i, n=new)
+        for stem in ("___Block_byref_object_copy_", "___Block_byref_object_dispose_"):
+            i, n = numbered(m, stem)
+            sym_set(m, i, n=f"{stem}.{n - 1}")
     failures, line, _, out = structural(renumbered, "winemac.so")
     if failures:
         failed.append(f"structural gate: winemac.so's block helpers numbered one lower, {failures} failed")
-    if not structural(lambda m: sym_set(m, next(i for i, (n, t, _, _, _) in enumerate(m.syms)
-                                                if n == "___Block_byref_object_copy_.468" and t == N_FUN),
+    if not structural(lambda m: sym_set(m, numbered(m, "___Block_byref_object_copy_")[0],
                                         n="___Block_byref_object_copy"), "winemac.so")[0]:
         failed.append("structural gate: a block helper renamed beyond its number passed")
     if not structural(lambda m: sym_set(m, next(i for i, (n, t, _, _, _) in enumerate(m.syms)
@@ -2083,7 +2089,7 @@ def unnumbered(funcs):
     """the debug map's functions keyed without clang's numbers: a C or Objective-C name has no dot,
     so a trailing .<n> is clang's own, which it gives the helpers it makes (blocks' byref copy and
     dispose helpers, a block's invoke) in the order it makes them, and another clang counts
-    otherwise (__Block_byref_object_copy_.468 in the engine's winemac.so, .467 in Xcode 27's). Only
+    otherwise (__Block_byref_object_copy_.468 in 0.3.1's winemac.so, .467 in Xcode 27's). Only
     the helpers' names lose it: they start with clang's two underscores after the symbol's own one,
     a function of the source with one. Within a source, the helpers of one name pair in the order of
     their numbers, an unnumbered one first. That order is clang's, and if another clang made one

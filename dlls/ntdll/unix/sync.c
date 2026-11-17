@@ -580,7 +580,7 @@ static NTSTATUS linux_wait_objs( int device, DWORD count, const int *objs, WAIT_
  *
  * It's possible for an object currently in use (by a waiter) to be closed and
  * the same handle immediately reallocated to a different object. This should be
- * a very rare situation, and in that case we simply don't cache the handle.
+ * a very rare situation, and in that case we cache the handle in a spare entry.
  */
 struct inproc_sync
 {
@@ -597,6 +597,19 @@ struct inproc_sync
 static struct inproc_sync *inproc_sync_cache[INPROC_SYNC_CACHE_ENTRIES];
 static struct inproc_sync inproc_sync_cache_initial_block[INPROC_SYNC_CACHE_BLOCK_SIZE];
 
+/* Spare entries, for a handle whose value is that of a closed handle whose
+ * entry is still referenced. A thread killed while it holds a reference
+ * never drops it, so that entry may stay referenced for good. The entry of
+ * the closed handle names its spare in the bits of "closed" above the
+ * lowest, 0 for none. A spare is filled again only as the spare of the same
+ * entry, so a thread that read its number before it was replaced finds an
+ * object of the same handle value there, or a closed one. Allocated under
+ * fd_cache_mutex, never freed. */
+#define INPROC_SYNC_SPARES  0x7fff  /* the most that those bits can number */
+
+static struct inproc_sync *inproc_sync_spares;
+static unsigned int inproc_sync_spare_count;
+
 static inline unsigned int inproc_sync_handle_to_index( HANDLE handle, unsigned int *entry )
 {
     unsigned int idx = (wine_server_obj_handle(handle) >> 2) - 1;
@@ -607,6 +620,33 @@ static inline unsigned int inproc_sync_handle_to_index( HANDLE handle, unsigned 
 static BOOL is_pseudo_handle( HANDLE handle )
 {
     return ((ULONG)(ULONG_PTR)handle >= 0xfffffffa);
+}
+
+/* returns the spare to cache a handle in whose entry is that of a closed
+ * handle and still referenced; caller must hold fd_cache_mutex */
+static struct inproc_sync *get_free_spare_inproc_sync( struct inproc_sync *cache )
+{
+    unsigned int spare = cache->closed >> 1;
+
+    if (!cache->closed) return NULL;
+    if (spare && !InterlockedCompareExchange( &inproc_sync_spares[spare - 1].refcount, 0, 0 ))
+        return &inproc_sync_spares[spare - 1];
+
+    if (!inproc_sync_spares)
+    {
+        /* one entry more, for whole pages */
+        void *ptr = anon_mmap_alloc( (INPROC_SYNC_SPARES + 1) * sizeof(struct inproc_sync), PROT_READ | PROT_WRITE );
+        if (ptr == MAP_FAILED) return NULL;
+        __atomic_store_n( &inproc_sync_spares, ptr, __ATOMIC_RELAXED );
+    }
+    if (inproc_sync_spare_count == INPROC_SYNC_SPARES) return NULL;
+    /* A number is never given to another entry, even once its spare is free
+     * again: get_spare_inproc_sync() reads it without the mutex, and would
+     * then take a reference to another handle's object. */
+    spare = ++inproc_sync_spare_count;
+    /* a spare in use stays where it is, for those who hold a reference */
+    __atomic_store_n( &cache->closed, 1 | (spare << 1), __ATOMIC_RELEASE );
+    return &inproc_sync_spares[spare - 1];
 }
 
 static struct inproc_sync *cache_inproc_sync( HANDLE handle, struct inproc_sync *sync )
@@ -643,8 +683,8 @@ static struct inproc_sync *cache_inproc_sync( HANDLE handle, struct inproc_sync 
         /* The handle is currently being used for another object (i.e. it was
          * closed and then reused, but some thread is waiting on the old handle
          * or otherwise simultaneously using the old object). We can't cache
-         * this object until the old one is completely destroyed. */
-        return sync;
+         * this object there until the old one is completely destroyed. */
+        if (!(cache = get_free_spare_inproc_sync( cache ))) return sync;
     }
 
     cache->fd = sync->fd;
@@ -690,6 +730,27 @@ static void release_inproc_sync( struct inproc_sync *sync )
     }
 }
 
+/* get_cached_inproc_sync() for a handle whose entry is that of a closed
+ * handle: returns the spare referenced if it caches the handle. Out of line,
+ * so that the code of get_cached_inproc_sync() stays as it is. */
+static DECLSPEC_NOINLINE struct inproc_sync *get_spare_inproc_sync( HANDLE handle )
+{
+    unsigned int spare, entry, idx = inproc_sync_handle_to_index( handle, &entry );
+    struct inproc_sync *sync;
+
+    if (entry >= INPROC_SYNC_CACHE_ENTRIES || !inproc_sync_cache[entry]) return NULL;
+    spare = __atomic_load_n( &inproc_sync_cache[entry][idx].closed, __ATOMIC_ACQUIRE ) >> 1;
+    if (!spare) return NULL;
+    sync = &inproc_sync_spares[spare - 1];
+    if (!interlocked_inc_if_nonzero( &sync->refcount )) return NULL;
+    if (sync->closed)
+    {
+        release_inproc_sync( sync );
+        return NULL;
+    }
+    return sync;
+}
+
 static struct inproc_sync *get_cached_inproc_sync( HANDLE handle )
 {
     unsigned int entry, idx = inproc_sync_handle_to_index( handle, &entry );
@@ -708,7 +769,7 @@ static struct inproc_sync *get_cached_inproc_sync( HANDLE handle )
         /* The object is still being used, but "handle" has been closed. The
          * handle value might have been reused for another object in the
          * meantime, in which case we have to report that valid object, so
-         * force the caller to check the server. */
+         * force the caller to look at the spare or to check the server. */
         release_inproc_sync( cache );
         return NULL;
     }
@@ -755,6 +816,9 @@ static NTSTATUS get_inproc_sync( HANDLE handle, enum inproc_sync_type desired_ty
 
     /* try to find it in the cache already */
     if ((sync = get_cached_inproc_sync( handle ))) ret = STATUS_SUCCESS;
+    else if (__atomic_load_n( &inproc_sync_spares, __ATOMIC_RELAXED ) &&
+             (sync = get_spare_inproc_sync( handle )))
+        ret = STATUS_SUCCESS;
     else
     {
         /* We need to use fd_cache_mutex here to protect against races with
@@ -767,7 +831,8 @@ static NTSTATUS get_inproc_sync( HANDLE handle, enum inproc_sync_type desired_ty
          * The mutex also protects cache_inproc_sync(). Accessing the cache is
          * done without a lock, but populating it currently is not. */
         server_enter_uninterrupted_section( &fd_cache_mutex, &sigset );
-        if (!(sync = get_cached_inproc_sync( handle )))
+        if (!(sync = get_cached_inproc_sync( handle )) &&
+            !(inproc_sync_spares && (sync = get_spare_inproc_sync( handle ))))
         {
             if ((ret = get_server_inproc_sync( handle, stack )))
             {
@@ -819,10 +884,16 @@ extern NTSTATUS check_signal_access( struct inproc_sync *sync )
  * wait or a set; it may not be cached at all */
 BOOL heat_inproc_sync_idle( HANDLE handle )
 {
-    unsigned int entry, idx = inproc_sync_handle_to_index( handle, &entry );
+    unsigned int spare, entry, idx = inproc_sync_handle_to_index( handle, &entry );
+    struct inproc_sync *cache;
 
     if (entry >= INPROC_SYNC_CACHE_ENTRIES || !inproc_sync_cache[entry]) return TRUE;
-    return InterlockedCompareExchange( &inproc_sync_cache[entry][idx].refcount, 0, 0 ) <= 1;
+    cache = &inproc_sync_cache[entry][idx];
+    /* an entry that still holds a closed object caches the handle in the spare it names, for the
+     * handle's whole life (since Mach9 0.4.0) */
+    spare = __atomic_load_n( &cache->closed, __ATOMIC_ACQUIRE ) >> 1;
+    if (spare) cache = &inproc_sync_spares[spare - 1];
+    return InterlockedCompareExchange( &cache->refcount, 0, 0 ) <= 1;
 }
 
 /* caller must hold fd_cache_mutex */
@@ -831,7 +902,8 @@ void close_inproc_sync( HANDLE handle )
     struct inproc_sync *cache;
 
     if (inproc_device_fd < 0) return;
-    if ((cache = get_cached_inproc_sync( handle )))
+    if ((cache = get_cached_inproc_sync( handle )) ||
+        (inproc_sync_spares && (cache = get_spare_inproc_sync( handle ))))
     {
         cache->closed = 1;
         /* once for the reference we just grabbed, and once for the handle */

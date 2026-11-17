@@ -261,16 +261,31 @@ static int *shm_tid_map;
 
 static const mach_msg_bits_t msgh_bits_send = MACH_MSGH_BITS_REMOTE(MACH_MSG_TYPE_COPY_SEND);
 
-static inline mach_msg_return_t server_register_wait( unsigned int msgh_id, const int *objs,
-                                void **objs_shm, int alert_obj, void *alert_obj_shm, int count )
+/* A wait of msync_wait_multiple() as server_register_wait() registered it,
+ * named in the thread data while it is registered: a thread that is killed
+ * in the wait never gets to server_remove_wait(), so msync_abort_thread()
+ * calls it. abort_thread() runs on the same thread, in a signal handler, so
+ * a compiler barrier orders the thread data against the wait. */
+struct msync_wait
 {
-    int i, is_mutex;
-    mach_msg_return_t mr;
-    __thread static mach_register_message_t message;
+    unsigned int msgh_id;
+    const int   *objs;
+    void       **objs_shm;
+    int          alert_obj;
+    void        *alert_obj_shm;
+    int          count;
+};
 
-    message.header.msgh_remote_port = server_port;
-    message.header.msgh_bits = msgh_bits_send;
-    message.header.msgh_id = msgh_id;
+static inline mach_msg_return_t server_register_wait( struct thread_data *data, const struct msync_wait *wait )
+{
+    const int *objs = wait->objs;
+    void **objs_shm = wait->objs_shm, *alert_obj_shm = wait->alert_obj_shm;
+    int i, is_mutex, alert_obj = wait->alert_obj, count = wait->count;
+    mach_msg_return_t mr;
+    mach_register_message_t message;
+
+    message.header = (mach_msg_header_t){ .msgh_bits = msgh_bits_send, .msgh_remote_port = server_port,
+                                          .msgh_id = wait->msgh_id };
 
     for (i = 0; i < count; i++)
     {
@@ -289,6 +304,13 @@ static inline mach_msg_return_t server_register_wait( unsigned int msgh_id, cons
         __atomic_add_fetch( &obj->multiple_waiters, 1, __ATOMIC_SEQ_CST);
     }
 
+    /* Named once the counts are raised, whether or not the server gets the
+     * registration: a removal of one it never got lowers the counts all the
+     * same, and the server's remove_tid() finds nothing to remove. */
+    __atomic_signal_fence( __ATOMIC_SEQ_CST );
+    data->msync_wait = wait;
+    __atomic_signal_fence( __ATOMIC_SEQ_CST );
+
     message.header.msgh_size = sizeof(mach_msg_header_t) +
                                count * sizeof(unsigned int);
 
@@ -296,21 +318,27 @@ static inline mach_msg_return_t server_register_wait( unsigned int msgh_id, cons
                      0, MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, 0 );
 
     if (mr != MACH_MSG_SUCCESS)
+    {
         ERR("Failed to send server register wait: %#x\n", mr);
+        data->msync_wait = NULL;
+    }
 
     return mr;
 }
 
-static inline void server_remove_wait( unsigned int msgh_id, const int *objs, void **objs_shm,
-                                       int alert_obj, void *alert_obj_shm, int count )
+static inline void server_remove_wait( struct thread_data *data, const struct msync_wait *wait )
 {
-    int i;
+    const int *objs = wait->objs;
+    void **objs_shm = wait->objs_shm, *alert_obj_shm = wait->alert_obj_shm;
+    int i, alert_obj = wait->alert_obj, count = wait->count;
     mach_msg_return_t mr;
-    __thread static mach_register_message_t message;
+    mach_register_message_t message;
 
-    message.header.msgh_remote_port = server_port;
-    message.header.msgh_bits = msgh_bits_send;
-    message.header.msgh_id = msgh_id;
+    message.header = (mach_msg_header_t){ .msgh_bits = msgh_bits_send, .msgh_remote_port = server_port,
+                                          .msgh_id = wait->msgh_id };
+
+    data->msync_wait = NULL;
+    __atomic_signal_fence( __ATOMIC_SEQ_CST );
 
     for (i = 0; i < count; i++)
     {
@@ -478,12 +506,12 @@ static NTSTATUS msync_wait_multiple( const int *objs, void **objs_shm, const uns
     ULONGLONG ns_timeleft = 0;
     unsigned long long start;  /* jdrly/gw2-on-mac#99 */
     mach_msg_return_t mr;
-    unsigned int msgh_id;
-    int total_count = count + (alert_obj ? 1 : 0);
+    struct thread_data *data = get_thread_data();
+    struct msync_wait wait = { (tid << 8) | (count + (alert_obj ? 1 : 0)), objs, objs_shm,
+                               alert_obj, alert_obj_shm, count };
 
     __atomic_store_n( addr, 2, __ATOMIC_RELEASE );
-    msgh_id = (tid << 8) | total_count;
-    mr = server_register_wait( msgh_id, objs, objs_shm, alert_obj, alert_obj_shm, count );
+    mr = server_register_wait( data, &wait );
 
     if (mr != MACH_MSG_SUCCESS)
         return STATUS_PENDING;
@@ -492,12 +520,10 @@ static NTSTATUS msync_wait_multiple( const int *objs, void **objs_shm, const uns
     {
         if (check_shm_contention( objs_shm, alert_obj_shm, count, tid ))
         {
-            /* Unregister from the server too, and drop the alert object's count, as every other
-             * way out of here does (dappermint/winecx 9be392b3b4). Dropping only the objects'
-             * counts left the registration on the server and the alert object's count raised
-             * (jdrly/gw2-on-mac#44, #104). */
+            /* athei's msync unregisters here since 0.4.0, the fix my 0.1.x build had
+             * (jdrly/gw2-on-mac#44, #104); the count is mine */
             heat_count( HC_UNREG );
-            server_remove_wait( msgh_id, objs, objs_shm, alert_obj, alert_obj_shm, count );
+            server_remove_wait( data, &wait );
             return STATUS_PENDING;
         }
     }
@@ -507,7 +533,7 @@ static NTSTATUS msync_wait_multiple( const int *objs, void **objs_shm, const uns
      * later pulse does ask. */
     if (pulse_pending( objs_shm, pulse_seen, count ))
     {
-        server_remove_wait( msgh_id, objs, objs_shm, alert_obj, alert_obj_shm, count );
+        server_remove_wait( data, &wait );
         return STATUS_PENDING;
     }
 
@@ -518,7 +544,7 @@ static NTSTATUS msync_wait_multiple( const int *objs, void **objs_shm, const uns
             ns_timeleft = update_timeout( end ) * 100;
             if (!ns_timeleft)
             {
-                server_remove_wait( msgh_id, objs, objs_shm, alert_obj, alert_obj_shm, count );
+                server_remove_wait( data, &wait );
                 return STATUS_TIMEOUT;
             }
         }
@@ -530,11 +556,17 @@ static NTSTATUS msync_wait_multiple( const int *objs, void **objs_shm, const uns
             break;
     } while (ret == -EINTR || ret == -EFAULT);
 
-    server_remove_wait( msgh_id, objs, objs_shm, alert_obj, alert_obj_shm, count );
+    server_remove_wait( data, &wait );
 
     if (ret == -ETIMEDOUT) return STATUS_TIMEOUT;
 
     return STATUS_SUCCESS;
+}
+
+/* called by abort_thread() for a thread that is killed */
+void msync_abort_thread( struct thread_data *data )
+{
+    if (data->msync_wait) server_remove_wait( data, data->msync_wait );
 }
 
 /* The server decides: it reads WINEMSYNC (see do_msync() in server/msync.c)
@@ -568,8 +600,8 @@ typedef struct
 
 static void *request_shm_from_server( int entry, int tid )
 {
-    static __thread mach_map_message_t send_message;
-    static __thread mach_map_message_reply_t receive_message;
+    mach_map_message_t send_message;
+    mach_map_message_reply_t receive_message;
     mach_msg_return_t mr;
     kern_return_t kr;
     mach_port_t reply_port;
@@ -599,6 +631,7 @@ static void *request_shm_from_server( int entry, int tid )
     send_message.header.msgh_size = sizeof(send_message);
     send_message.header.msgh_remote_port = server_port;
     send_message.header.msgh_local_port = reply_port;
+    send_message.header.msgh_voucher_port = MACH_PORT_NULL;
     send_message.entry = entry;
 
     mr = mach_msg_overwrite( &send_message.header, MACH_SEND_MSG | MACH_RCV_MSG,
@@ -644,6 +677,7 @@ static void *get_shm_slow( unsigned int idx )
 {
     int entry  = (idx * 16) / pagesize;
     int offset = (idx * 16) % pagesize;
+    sigset_t sigset;
     void *ret;
 
     if (idx >= MSYNC_MAX_SLOTS || entry >= shm_addrs_size)
@@ -652,6 +686,9 @@ static void *get_shm_slow( unsigned int idx )
         abort();
     }
 
+    /* A thread killed with the lock held would leave it held for good, and
+     * the next thread that maps a page would abort. */
+    pthread_sigmask( SIG_BLOCK, &server_block_set, &sigset );
     os_unfair_lock_lock( &shm_addrs_lock );
 
     if (!shm_addrs[entry])
@@ -673,6 +710,7 @@ static void *get_shm_slow( unsigned int idx )
     ret = (void *)((unsigned long)shm_addrs[entry] + offset);
 
     os_unfair_lock_unlock( &shm_addrs_lock );
+    pthread_sigmask( SIG_SETMASK, &sigset, NULL );
 
     return ret;
 }
@@ -697,15 +735,13 @@ typedef struct
 /* drop the reference the server gave this process with get_inproc_sync_fd */
 void msync_close( int obj )
 {
-    static __thread mach_op_message_t message;
+    mach_op_message_t message;
     mach_msg_return_t mr;
 
     TRACE( "obj=%d.\n", obj );
 
-    message.header.msgh_bits = msgh_bits_send;
-    message.header.msgh_id = MSYNC_OP_RELEASE << 8;
-    message.header.msgh_size = sizeof(message);
-    message.header.msgh_remote_port = server_port;
+    message.header = (mach_msg_header_t){ .msgh_bits = msgh_bits_send, .msgh_size = sizeof(message),
+                                          .msgh_remote_port = server_port, .msgh_id = MSYNC_OP_RELEASE << 8 };
     message.args[0] = GetCurrentProcessId();
     message.args[1] = obj;
 
@@ -818,7 +854,7 @@ void msync_init(void)
  * (jdrly/gw2-on-mac#249), which wakes every waiter. */
 static inline BOOL signal_all( void *shm, unsigned int shm_idx, ULONG release )
 {
-    __thread static mach_msg_header_t send_header;
+    mach_msg_header_t send_header;
     struct event *event_obj = (struct event *)shm;
     unsigned long long start;  /* jdrly/gw2-on-mac#99: each wake call timed while counting */
     int ret;
@@ -847,10 +883,8 @@ static inline BOOL signal_all( void *shm, unsigned int shm_idx, ULONG release )
     if (!__atomic_load_n( &event_obj->multiple_waiters, __ATOMIC_SEQ_CST ))
         return ret != -ENOENT;
 
-    send_header.msgh_bits = msgh_bits_send;
-    send_header.msgh_id = shm_idx;
-    send_header.msgh_size = sizeof(send_header);
-    send_header.msgh_remote_port = server_port;
+    send_header = (mach_msg_header_t){ .msgh_bits = msgh_bits_send, .msgh_size = sizeof(send_header),
+                                       .msgh_remote_port = server_port, .msgh_id = shm_idx };
 
     mach_msg2( &send_header, MACH_SEND_MSG, send_header.msgh_size, 0,
                MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, 0 );
@@ -1092,8 +1126,8 @@ NTSTATUS msync_wait_objs( const DWORD count, const int *objs, BOOLEAN wait_any,
     static const LARGE_INTEGER zero = {0};
 
     int current_tid = 0;
-    static __thread void *objs_shm[MAXIMUM_WAIT_OBJECTS];
-    static __thread unsigned int pulse_seen[MAXIMUM_WAIT_OBJECTS];  /* the events' pulse words */
+    void *objs_shm[MAXIMUM_WAIT_OBJECTS];
+    unsigned int pulse_seen[MAXIMUM_WAIT_OBJECTS];  /* the events' pulse words */
     int *alert_obj_shm = NULL;
     int single_wait = 0;
     struct deadline end;
@@ -1518,6 +1552,10 @@ void msync_init(void)
 }
 
 void msync_close( int obj )
+{
+}
+
+void msync_abort_thread( struct thread_data *data )
 {
 }
 

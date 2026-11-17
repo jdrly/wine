@@ -39,10 +39,10 @@ static CFMutableDictionaryRef win_datas;
 
 static unsigned int activate_on_focus_time;
 
-/* GW2 on Mac (WINE_MACDRV_VIEW=changes): changes whenever a Cocoa window or a client view comes or
-   goes, so that a client surface's record of what it sent to its view (struct
-   macdrv_client_surface) never matches a new object at an old one's address. Guarded by the window
-   data lock, never 0. */
+/* GW2 on Mac (WINE_MACDRV_VIEW=changes): changes whenever a Cocoa window, a client view or a remote
+   layer (since Mach9 0.4.0) comes or goes, so that a client surface's record of what it sent to its
+   view (struct macdrv_client_surface) never matches a new object at an old one's address. Guarded
+   by the window data lock, never 0. */
 static unsigned int client_view_serial = 1;
 
 /* The window data lock must be held. */
@@ -1104,6 +1104,8 @@ static void macdrv_client_surface_destroy(struct client_surface *client)
     if (surface->metal_swapchain) macdrv_destroy_swapchain(surface->metal_swapchain);
 }
 
+static void update_remote_layers(HWND hwnd);
+
 static void macdrv_client_surface_detach(struct client_surface *client)
 {
     struct macdrv_client_surface *surface = impl_from_client_surface(client);
@@ -1113,11 +1115,15 @@ static void macdrv_client_surface_detach(struct client_surface *client)
     if (surface->cocoa_view)
     {
         struct macdrv_win_data *data;
+        bool toplevel_view = false;
 
         if ((data = get_win_data(client->hwnd)))
         {
             if (data->client_view == surface->cocoa_view)
+            {
                 data->client_view = NULL;
+                toplevel_view = !!data->cocoa_window;
+            }
             release_win_data(data);
         }
 
@@ -1130,7 +1136,31 @@ static void macdrv_client_surface_detach(struct client_surface *client)
         /* the surface is going away; WineMetalLayer and mtld3d read it from the view */
         macdrv_set_view_d3dmetal_client_surface(surface->cocoa_view, NULL);
         macdrv_dispose_view(surface->cocoa_view);
+
+        /* the views of the remote layers of the toplevel's child windows were in it */
+        if (toplevel_view) update_remote_layers(client->hwnd);
     }
+}
+
+/* A layer that another process renders into a child window of this process
+ * (macdrv_create_offscreen_swapchain), hosted in a view of the toplevel's
+ * Cocoa window, since a child window has none. */
+struct remote_layer
+{
+    unsigned int     context_id;
+    WineContentView *view;
+};
+
+/* windows with remote layers, guarded by the window data lock */
+static unsigned int remote_layer_window_count;
+
+/* The lowest view of a child window among the client views of its
+ * toplevel: the view of its first remote layer, which goes below the others
+ * and below its client view (place_remote_layers), or its client view. The
+ * caller holds the window data. */
+static WineContentView *get_lowest_client_view(const struct macdrv_win_data *data)
+{
+    return data->remote_layer_count ? data->remote_layers[0].view : data->client_view;
 }
 
 struct client_view_list
@@ -1148,11 +1178,12 @@ static void collect_client_view(const void *key, const void *value, void *contex
 {
     const struct macdrv_win_data *data = value;
     struct client_view_list *list = context;
+    WineContentView *view = get_lowest_client_view(data);
 
     /* skip toplevels, the only windows with a Cocoa window */
-    if (!data->client_view || data->cocoa_window || data->hwnd == list->hwnd) return;
+    if (!view || data->cocoa_window || data->hwnd == list->hwnd) return;
     list->entries[list->count].hwnd = data->hwnd;
-    list->entries[list->count].view = data->client_view;
+    list->entries[list->count].view = view;
     list->count++;
 }
 
@@ -1179,33 +1210,65 @@ static BOOL is_chain_visible(const HWND *chain, unsigned int count)
     return TRUE;
 }
 
-/* Whether hwnd is above its sibling, from one list of hwnd and the siblings below it. */
-static BOOL is_sibling_above(HWND hwnd, HWND sibling)
+/* The descendants of a toplevel in z-order, each window followed by its own
+ * descendants, so siblings keep their order. One list serves all the
+ * comparisons of an update. Not lists of a window and the siblings below
+ * it: the server never finishes listing the siblings of a child that
+ * destroy_window has unlinked, and win32u updates the toplevel's window
+ * state, which compares windows, after unlinking a child it destroys. An
+ * unlinked window is in no list, so it is above no sibling. */
+struct window_order
 {
-    HWND buffer[64], *list = buffer;
-    ULONG i, count = ARRAY_SIZE(buffer);
-    NTSTATUS status;
-    BOOL ret = FALSE;
+    HWND  buffer[64];
+    HWND *list;
+    ULONG count;
+};
 
-    while ((status = NtUserBuildHwndList(0, hwnd, FALSE, FALSE, 0, count, list, &count)) == STATUS_BUFFER_TOO_SMALL)
+static void get_window_order(HWND toplevel, struct window_order *order)
+{
+    ULONG size = ARRAY_SIZE(order->buffer);
+    NTSTATUS status;
+
+    order->list = order->buffer;
+    order->count = 0;
+    while ((status = NtUserBuildHwndList(0, toplevel, TRUE, FALSE, 0, size, order->list, &size)) ==
+           STATUS_BUFFER_TOO_SMALL)
     {
-        if (list != buffer) free(list);
-        if (!(list = malloc(count * sizeof(*list)))) return FALSE;
+        if (order->list != order->buffer) free(order->list);
+        if (!(order->list = malloc(size * sizeof(*order->list))))
+        {
+            order->list = order->buffer;
+            return;
+        }
     }
-    for (i = 0; !status && list[i] != HWND_BOTTOM; i++)
+    if (!status) order->count = size - 1; /* without the HWND_BOTTOM at the end */
+    TRACE("%p: %u windows\n", toplevel, (unsigned int)order->count);
+}
+
+static void free_window_order(struct window_order *order)
+{
+    if (order->list != order->buffer) free(order->list);
+}
+
+/* Whether hwnd is above its sibling. */
+static BOOL is_sibling_above(const struct window_order *order, HWND hwnd, HWND sibling)
+{
+    BOOL found = FALSE;
+    ULONG i;
+
+    for (i = 0; i < order->count; i++)
     {
-        if (list[i] != sibling) continue;
-        ret = TRUE;
-        break;
+        if (order->list[i] == hwnd) found = TRUE;
+        else if (order->list[i] == sibling) return found;
     }
-    if (list != buffer) free(list);
-    return ret;
+    return FALSE;
 }
 
 /* Whether a window is above another of the same toplevel, given the ancestor
  * chains of both: a child is above its ancestors, and windows with different
  * parents are ordered as their ancestors are where the chains diverge. */
-static BOOL is_window_above(const HWND *chain, unsigned int count, const HWND *other, unsigned int other_count)
+static BOOL is_window_above(const struct window_order *order, const HWND *chain, unsigned int count,
+                            const HWND *other, unsigned int other_count)
 {
     while (count > 1 && other_count > 1 && chain[count - 2] == other[other_count - 2])
     {
@@ -1214,7 +1277,7 @@ static BOOL is_window_above(const HWND *chain, unsigned int count, const HWND *o
     }
     if (count == 1) return FALSE;
     if (other_count == 1) return TRUE;
-    return is_sibling_above(chain[count - 2], other[other_count - 2]);
+    return is_sibling_above(order, chain[count - 2], other[other_count - 2]);
 }
 
 /* Get the window data of hwnd, if d3dmetal is not set or surface is still
@@ -1403,12 +1466,14 @@ static void reattach_d3dmetal_client_views(HWND hwnd, bool descendants)
  *              find_client_view_above
  *
  * Find the view that the client view of a child window goes directly
- * below: the current client view of the lowest visible window of the same
- * toplevel that is above the window. The window data lock must not be held.
+ * below: the lowest view (get_lowest_client_view) of the lowest visible
+ * window of the same toplevel that is above the window. The window data
+ * lock must not be held.
  */
 static WineContentView *find_client_view_above(HWND hwnd, HWND toplevel, HWND *above_hwnd)
 {
     struct client_view_list list = {.hwnd = hwnd};
+    struct window_order order;
     HWND chain[32], other[32], best[32];
     unsigned int i, count, other_count, best_count = 0;
     WineContentView *ret = NULL;
@@ -1421,20 +1486,22 @@ static WineContentView *find_client_view_above(HWND hwnd, HWND toplevel, HWND *a
     if (list.count && (count = get_window_ancestors(hwnd, chain, ARRAY_SIZE(chain))) &&
         chain[count - 1] == toplevel)
     {
+        get_window_order(toplevel, &order);
         for (i = 0; i < list.count; i++)
         {
             if (!(other_count = get_window_ancestors(list.entries[i].hwnd, other, ARRAY_SIZE(other)))) continue;
             if (other[other_count - 1] != toplevel) continue;
             /* WM_SETREDRAW clears the toplevel's WS_VISIBLE without hiding its Cocoa window */
             if (!is_chain_visible(other, other_count - 1)) continue;
-            if (is_window_above(chain, count, other, other_count)) continue;
-            if (ret && is_window_above(other, other_count, best, best_count)) continue;
+            if (is_window_above(&order, chain, count, other, other_count)) continue;
+            if (ret && is_window_above(&order, other, other_count, best, best_count)) continue;
 
             memcpy(best, other, other_count * sizeof(*other));
             best_count = other_count;
             *above_hwnd = list.entries[i].hwnd;
             ret = list.entries[i].view;
         }
+        free_window_order(&order);
     }
 
     free(list.entries);
@@ -1592,6 +1659,15 @@ static void set_client_overlay(struct macdrv_win_data *data, const CGRect *rects
     show_client_overlay(data);
 }
 
+/* The window order of the toplevel, listed on its first use: a toplevel with
+ * one client view of DXMT or mtld3d and no other child windows compares no
+ * windows on its moves and makes no server call for them. */
+static const struct window_order *use_window_order(struct window_order *order, HWND toplevel)
+{
+    if (!order->list) get_window_order(toplevel, order);
+    return order;
+}
+
 /***********************************************************************
  *              update_client_overlay
  *
@@ -1610,6 +1686,7 @@ static void set_client_overlay(struct macdrv_win_data *data, const CGRect *rects
 static void update_client_overlay(HWND hwnd, bool unpainted)
 {
     struct overlay_window_list list = {0};
+    struct window_order order = {.list = NULL};
     struct overlay_window *window, *view, *other, *ancestor;
     unsigned int i, j, k, surfaces, count, serial, rect_count = 0;
     struct macdrv_win_data *data;
@@ -1729,7 +1806,8 @@ static void update_client_overlay(HWND hwnd, bool unpainted)
                 if (!(view->style & WS_CLIPCHILDREN)) continue;
             }
             else if (!(NtUserGetWindowLongW(view->chain[view_depth - 2], GWL_STYLE) & WS_CLIPSIBLINGS) ||
-                     !is_sibling_above(window->chain[depth - 2], view->chain[view_depth - 2]))
+                     !is_sibling_above(use_window_order(&order, toplevel), window->chain[depth - 2],
+                                       view->chain[view_depth - 2]))
                 continue;
             if (NtUserGetWindowLongW(window->chain[depth - 2], GWL_EXSTYLE) & WS_EX_TRANSPARENT) continue;
 
@@ -1748,13 +1826,16 @@ static void update_client_overlay(HWND hwnd, bool unpainted)
         {
             other = &list.windows[j];
             if (!other->count || !other->client_view || IsRectEmpty(&other->view_rect)) continue;
-            if (!is_window_above(other->chain, other->count, window->chain, window->count)) continue;
+            if (!is_window_above(use_window_order(&order, toplevel), other->chain, other->count,
+                                 window->chain, window->count))
+                continue;
             NtGdiSetRectRgn(rgn, other->view_rect.left, other->view_rect.top,
                             other->view_rect.right, other->view_rect.bottom);
             NtGdiCombineRgn(part, part, rgn, RGN_DIFF);
         }
         NtGdiCombineRgn(region, region, part, RGN_OR);
     }
+    if (order.list) free_window_order(&order);
     for (i = 0; i < count; i++)
         if (list.windows[i].region) NtGdiDeleteObjectApp(list.windows[i].region);
     free(list.windows);
@@ -1871,7 +1952,7 @@ static void macdrv_client_surface_update(struct client_surface *client)
     {
         struct macdrv_win_data *above_data = get_win_data(above_hwnd);
 
-        if (!above_data || above_data->client_view != above_view)
+        if (!above_data || get_lowest_client_view(above_data) != above_view)
         {
             TRACE("client view %p of %p is gone\n", above_view, above_hwnd);
             above_view = NULL;
@@ -1919,11 +2000,12 @@ static void macdrv_client_surface_present(struct client_surface *client, HDC hdc
 {
     struct macdrv_client_surface *surface = impl_from_client_surface(client);
     struct macdrv_win_data *data;
-    bool shown, presented, update;
+    bool shown, presented, update, toplevel;
 
     TRACE("%s\n", debugstr_client_surface(client));
 
     if (!(data = get_win_data(surface->client.hwnd))) return;
+    toplevel = !!data->cocoa_window;
     presented = surface->presented;
     /* mtld3d presents its surface itself: once when a device attaches, which
      * finds the view that creating the surface showed, and after that only
@@ -1939,6 +2021,8 @@ static void macdrv_client_surface_present(struct client_surface *client, HDC hdc
     release_win_data(data);
 
     if (update) update_client_overlay(surface->client.hwnd, false);
+    /* the views of the remote layers of a toplevel's child windows go into its client view */
+    if (shown && toplevel) update_remote_layers(surface->client.hwnd);
 }
 
 static const struct client_surface_funcs macdrv_client_surface_funcs =
@@ -1965,15 +2049,18 @@ struct client_surface *macdrv_CreateClientSurface(HWND hwnd, int pixel_format, B
     if (surface)
     {
         struct macdrv_win_data *data;
+        bool toplevel_view = false;
 
         surface->cocoa_view = macdrv_create_view(cgrect_from_rect(surface->client.monitor_rect));
         macdrv_set_view_hidden(surface->cocoa_view, TRUE);
         macdrv_client_surface_update(&surface->client);
         if ((data = get_win_data(hwnd)))
         {
-            show_client_view(surface, data);
+            toplevel_view = show_client_view(surface, data) && data->cocoa_window;
             release_win_data(data);
         }
+        /* the views of the remote layers of a toplevel's child windows go into its client view */
+        if (toplevel_view) update_remote_layers(hwnd);
     }
 
     return surface ? &surface->client : NULL;
@@ -1993,11 +2080,16 @@ bool macdrv_client_surface_acquire_metal_swapchain(struct macdrv_client_surface 
     }
     else
     {
+        HWND toplevel = NtUserGetAncestor(hwnd, GA_ROOT);
+        DWORD pid, toplevel_pid;
         RECT rect;
 
-        if (NtUserGetAncestor(hwnd, GA_ROOT) != hwnd)
+        /* The window's process hosts the layer in its toplevel's Cocoa window,
+         * see WM_MACDRV_CREATE_REMOTE_LAYER, so only when it owns that toplevel. */
+        if (toplevel != hwnd && (!NtUserGetWindowThread(hwnd, &pid) ||
+                                 !NtUserGetWindowThread(toplevel, &toplevel_pid) || pid != toplevel_pid))
         {
-            FIXME("Cross-process child window Metal swapchains are not implemented\n");
+            FIXME("Metal swapchains for a child window of another process than its toplevel are not implemented\n");
             return false;
         }
 
@@ -2006,6 +2098,192 @@ bool macdrv_client_surface_acquire_metal_swapchain(struct macdrv_client_surface 
     }
 
     return surface->metal_swapchain != NULL;
+}
+
+/* Get the client rect of a window in its toplevel's content view, not
+ * clipped by its ancestors, where win32u puts the client surfaces of a
+ * child window. The caller holds the window data lock. */
+static bool get_content_view_client_rect(const HWND *chain, unsigned int count, RECT *rect)
+{
+    const struct macdrv_win_data *data;
+    RECT window, client;
+    POINT origin;
+
+    if (!get_content_view_rects(chain, count, &window, &client, &origin)) return false;
+    data = CFDictionaryGetValue(win_datas, chain[0]);
+    *rect = data->rects.client;
+    OffsetRect(rect, origin.x - data->rects.window.left, origin.y - data->rects.window.top);
+    return true;
+}
+
+/***********************************************************************
+ *              place_remote_layers
+ *
+ * Put the views of the remote layers of hwnd where the client view of a
+ * child window goes (macdrv_client_surface_update): into the client view
+ * of its toplevel, or its content view, at the window's client rect there,
+ * ordered by window z-order through find_client_view_above, the first
+ * layer lowest and the last directly below the window's own client view.
+ * Hide them while the window or an ancestor below the toplevel is hidden,
+ * as update_client_view_hidden does for client views. The window data lock
+ * must not be held.
+ */
+static void place_remote_layers(HWND hwnd)
+{
+    const struct macdrv_win_data *toplevel_data, *above_data;
+    WineContentView *above_view = NULL, *superview = NULL;
+    struct macdrv_win_data *data;
+    WineWindow *window = NULL;
+    unsigned int i, count, serial;
+    HWND chain[32], above_hwnd = NULL;
+    RECT rect = {0};
+    bool hidden;
+
+    /* placements can finish out of order: only the one that started last places the views */
+    if (!(data = get_win_data(hwnd))) return;
+    serial = ++data->remote_layer_serial;
+    release_win_data(data);
+
+    count = get_window_ancestors(hwnd, chain, ARRAY_SIZE(chain));
+    hidden = count > 1 && !is_chain_visible(chain, count - 1);
+    if (count > 1) above_view = find_client_view_above(hwnd, chain[count - 1], &above_hwnd);
+
+    if (!(data = get_win_data(hwnd))) return;
+    if (data->remote_layer_serial == serial && data->remote_layer_count)
+    {
+        if (count && (toplevel_data = CFDictionaryGetValue(win_datas, chain[count - 1])) &&
+            get_content_view_client_rect(chain, count, &rect))
+        {
+            window = toplevel_data->cocoa_window;
+            if (count > 1) superview = toplevel_data->client_view;
+        }
+        /* a chain too deep to follow, or a toplevel without a Cocoa window, has no place for them */
+        if (!window) hidden = true;
+
+        /* the window data lock keeps the views found above alive while they are passed on */
+        if (data->client_view) above_view = data->client_view;
+        else if (above_view && (!(above_data = CFDictionaryGetValue(win_datas, above_hwnd)) ||
+                                get_lowest_client_view(above_data) != above_view))
+            above_view = NULL;
+
+        TRACE("%p: %u remote layers in %p/%p at %s below %p%s\n", hwnd, data->remote_layer_count, window,
+              superview, window ? wine_dbgstr_rect(&rect) : "(none)", above_view, hidden ? ", hidden" : "");
+        for (i = data->remote_layer_count; i--;)
+        {
+            WineContentView *view = data->remote_layers[i].view;
+
+            if (window)
+            {
+                macdrv_set_view_superview(view, superview, window, above_view, NULL);
+                macdrv_set_view_frame(view, cgrect_from_rect(rect));
+            }
+            macdrv_set_view_hidden(view, hidden);
+            above_view = view;
+        }
+    }
+    release_win_data(data);
+}
+
+struct remote_layer_windows
+{
+    unsigned int count;
+    HWND        *hwnds;
+};
+
+static void collect_remote_layer_window(const void *key, const void *value, void *context)
+{
+    const struct macdrv_win_data *data = value;
+    struct remote_layer_windows *list = context;
+
+    if (data->remote_layer_count) list->hwnds[list->count++] = data->hwnd;
+}
+
+/* Place the remote layers of hwnd and of its descendants, after hwnd moved,
+ * changed its size or was shown or hidden. The window data lock must not be
+ * held. */
+static void update_remote_layers(HWND hwnd)
+{
+    struct remote_layer_windows list = {0};
+    unsigned int i, j, count;
+    HWND chain[32];
+
+    pthread_mutex_lock(&win_data_mutex);
+    if (remote_layer_window_count && win_datas &&
+        (list.hwnds = malloc(remote_layer_window_count * sizeof(*list.hwnds))))
+        CFDictionaryApplyFunction(win_datas, collect_remote_layer_window, &list);
+    pthread_mutex_unlock(&win_data_mutex);
+
+    for (i = 0; i < list.count; i++)
+    {
+        count = get_window_ancestors(list.hwnds[i], chain, ARRAY_SIZE(chain));
+        for (j = 0; j < count; j++) if (chain[j] == hwnd) break;
+        if (!count || j < count) place_remote_layers(list.hwnds[i]);
+    }
+    free(list.hwnds);
+}
+
+/* Host the layer that another process renders into the child window hwnd,
+ * on the thread of the window. */
+static void add_remote_layer(HWND hwnd, unsigned int context_id)
+{
+    struct macdrv_win_data *data;
+    struct remote_layer *layers;
+    WineContentView *view;
+
+    /* macdrv_create_view and macdrv_view_create_ca_layer_host wait for the
+     * main thread, so not while the window data is held */
+    if (!(view = macdrv_create_view(CGRectZero))) return;
+    macdrv_view_create_ca_layer_host(view, context_id);
+
+    if (!(data = get_win_data(hwnd)))
+    {
+        macdrv_dispose_view(view);
+        return;
+    }
+    if (!(layers = realloc(data->remote_layers, (data->remote_layer_count + 1) * sizeof(*layers))))
+    {
+        release_win_data(data);
+        macdrv_dispose_view(view);
+        return;
+    }
+    if (!data->remote_layer_count) remote_layer_window_count++;
+    data->remote_layers = layers;
+    layers[data->remote_layer_count].context_id = context_id;
+    layers[data->remote_layer_count].view = view;
+    data->remote_layer_count++;
+    /* GW2 on Mac (WINE_MACDRV_VIEW=changes): a remote layer can be a client surface's above_view */
+    client_views_changed();
+    release_win_data(data);
+
+    place_remote_layers(hwnd);
+}
+
+/* Stop hosting a layer of add_remote_layer, on the thread of the window. */
+static void remove_remote_layer(HWND hwnd, unsigned int context_id)
+{
+    struct macdrv_win_data *data;
+    WineContentView *view = NULL;
+    unsigned int i;
+
+    if (!(data = get_win_data(hwnd))) return;
+    for (i = 0; i < data->remote_layer_count; i++)
+    {
+        if (data->remote_layers[i].context_id != context_id) continue;
+        view = data->remote_layers[i].view;
+        memmove(&data->remote_layers[i], &data->remote_layers[i + 1],
+                (data->remote_layer_count - i - 1) * sizeof(*data->remote_layers));
+        if (!--data->remote_layer_count)
+        {
+            free(data->remote_layers);
+            data->remote_layers = NULL;
+            remote_layer_window_count--;
+        }
+        client_views_changed();  /* GW2 on Mac (WINE_MACDRV_VIEW=changes), as in add_remote_layer */
+        break;
+    }
+    release_win_data(data);
+
+    if (view) macdrv_dispose_view(view);
 }
 
 /**********************************************************************
@@ -2082,6 +2360,8 @@ void macdrv_DestroyWindow(HWND hwnd)
 {
     struct macdrv_win_data *data;
     CFMutableArrayRef d3dmetal_client_surfaces;
+    struct remote_layer *remote_layers;
+    unsigned int i, remote_layer_count;
     bool child;
 
     TRACE("%p\n", hwnd);
@@ -2097,10 +2377,20 @@ void macdrv_DestroyWindow(HWND hwnd)
     data->d3dmetal_client_surfaces = NULL;
     if (d3dmetal_client_surfaces) d3dmetal_surface_count -= CFArrayGetCount(d3dmetal_client_surfaces);
 
+    /* the process that renders them may still run, or may have exited
+     * without releasing them */
+    remote_layers = data->remote_layers;
+    remote_layer_count = data->remote_layer_count;
+    if (remote_layer_count) remote_layer_window_count--;
+    if (remote_layer_count) client_views_changed();  /* GW2 on Mac (WINE_MACDRV_VIEW=changes), as in add_remote_layer */
+
     CFDictionaryRemoveValue(win_datas, hwnd);
     release_win_data(data);
     free(data->client_overlay.rects);
     free(data);
+
+    for (i = 0; i < remote_layer_count; i++) macdrv_dispose_view(remote_layers[i].view);
+    free(remote_layers);
 
     /* Releasing a client surface takes win32u's surface lock, and the other
      * holders of that lock (detach_client_surfaces, update_client_surfaces)
@@ -2255,7 +2545,10 @@ void macdrv_SetWindowStyle(HWND hwnd, INT offset, STYLESTRUCT *style)
      * The WS_VISIBLE of a toplevel does not count, see update_client_view_hidden. */
     if (offset == GWL_STYLE && ((style->styleNew ^ style->styleOld) & WS_VISIBLE) &&
         NtUserGetAncestor(hwnd, GA_ROOT) != hwnd)
+    {
         update_d3dmetal_client_views(hwnd);
+        update_remote_layers(hwnd);
+    }
 }
 
 
@@ -2401,9 +2694,12 @@ LRESULT macdrv_WindowMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_MACDRV_CREATE_REMOTE_LAYER:
         if ((data = get_win_data(hwnd)))
         {
-            TRACE("WM_MACDRV_CREATE_REMOTE_LAYER context_id %u\n", (unsigned int)lp);
+            bool child = !data->cocoa_window;
+
+            TRACE("WM_MACDRV_CREATE_REMOTE_LAYER context_id %u%s\n", (unsigned int)lp, child ? ", child" : "");
             if (data->cocoa_window) macdrv_window_create_ca_layer_host_view(data->cocoa_window, (unsigned int)lp);
             release_win_data(data);
+            if (child) add_remote_layer(hwnd, (unsigned int)lp);
         }
         return 0;
     case WM_MACDRV_RELEASE_REMOTE_LAYER:
@@ -2412,6 +2708,8 @@ LRESULT macdrv_WindowMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             TRACE("WM_MACDRV_RELEASE_REMOTE_LAYER context_id %u\n", (unsigned int)lp);
             if (data->cocoa_window) macdrv_window_release_ca_layer_host_view(data->cocoa_window, (unsigned int)lp);
             release_win_data(data);
+            /* also for a child that has become a toplevel since */
+            remove_remote_layer(hwnd, (unsigned int)lp);
         }
         return 0;
     case WM_MACDRV_REATTACH_CLIENT_VIEWS:
@@ -2575,6 +2873,7 @@ done:
     release_win_data(data);
 
     if (swp_flags & (SWP_SHOWWINDOW | SWP_HIDEWINDOW)) update_d3dmetal_client_views(hwnd);
+    update_remote_layers(hwnd);
 
     /* the window may have been shown, hidden, moved or reordered above a
      * client view, or the client view may have moved */
@@ -2690,6 +2989,25 @@ void macdrv_window_got_focus(HWND hwnd, const macdrv_event *event)
     TRACE("win %p/%p serial %lu enabled %d visible %d style %08x focus %p active %p fg %p\n",
           hwnd, event->window, event->window_got_focus.serial, NtUserIsWindowEnabled(hwnd),
           NtUserIsWindowVisible(hwnd), style, get_focus(), get_active_window(), NtUserGetForegroundWindow());
+
+    /* Wine made this window key because Windows had made it the foreground
+     * window or restored it.  Only a foreground that went to the desktop
+     * meanwhile, as it does when the application is deactivated, is taken
+     * back.  This window in the foreground needs nothing, another one has a
+     * request of its own on the way, which makes it the key window, and no
+     * foreground at all is a hand-over to a thread that has not activated
+     * its window yet. */
+    if (event->window_got_focus.requested)
+    {
+        HWND foreground = NtUserGetForegroundWindow();
+
+        if (foreground != NtUserGetDesktopWindow())
+        {
+            TRACE("win %p/%p requested by Wine, leaving the foreground with %p\n",
+                  hwnd, event->window, foreground);
+            return;
+        }
+    }
 
     if (can_window_become_foreground(hwnd) && !(style & WS_MINIMIZE))
     {

@@ -22,6 +22,7 @@
 extern int do_msync(void);
 extern void msync_init(void);
 extern void msync_close( int obj );
+extern void msync_abort_thread( struct thread_data *data );
 
 #ifdef __APPLE__
 

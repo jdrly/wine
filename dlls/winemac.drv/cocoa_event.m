@@ -515,42 +515,13 @@ static const OSType WineHotKeySignature = 'Wine';
     }
 
 
-/* Nonzero while this thread runs code that must not handle queries. */
-static __thread int query_deferral_depth;
-
-
 /***********************************************************************
- *              macdrv_begin_query_deferral
+ *              run_on_main_thread
  *
- * Make OnMainThread() on this thread leave queries queued instead of
- * handling them while it waits, until the matching
- * macdrv_end_query_deferral().  Query handlers call back into win32u
- * and into window procedures, so they must not run while the thread
- * holds a lock that they may need, such as win32u's display lock.  A
- * deferred query times out on the main thread and is handled later by
- * the thread's normal event processing.
+ * Run a block on the main thread synchronously, handling the queries of
+ * this thread's event queue while waiting if handle_queries is set.
  */
-void macdrv_begin_query_deferral(void)
-{
-    query_deferral_depth++;
-}
-
-
-/***********************************************************************
- *              macdrv_end_query_deferral
- */
-void macdrv_end_query_deferral(void)
-{
-    query_deferral_depth--;
-}
-
-
-/***********************************************************************
- *              OnMainThread
- *
- * Run a block on the main thread synchronously.
- */
-void OnMainThread(dispatch_block_t block)
+static void run_on_main_thread(dispatch_block_t block, BOOL handle_queries)
 {
 @autoreleasepool
 {
@@ -570,7 +541,7 @@ void OnMainThread(dispatch_block_t block)
 
     /* Wait without handling queries.  The pending ones stay queued, and
        so do the bytes signaling them, for the next event processing. */
-    if (query_deferral_depth)
+    if (!handle_queries)
         queue = nil;
 
     if (!queue)
@@ -656,6 +627,33 @@ void OnMainThread(dispatch_block_t block)
         dispatch_release(semaphore);
     }
 }
+}
+
+
+/***********************************************************************
+ *              OnMainThread
+ *
+ * Run a block on the main thread synchronously.
+ */
+void OnMainThread(dispatch_block_t block)
+{
+    run_on_main_thread(block, TRUE);
+}
+
+
+/***********************************************************************
+ *              OnMainThreadWithoutQueries
+ *
+ * Like OnMainThread(), but leave this thread's queries queued instead of
+ * handling them while waiting.  Query handlers call back into win32u and
+ * into window procedures, so they must not run while the thread holds a
+ * lock that they may need, such as win32u's display lock.  A query left
+ * queued times out on the main thread and is handled later by the
+ * thread's normal event processing.
+ */
+void OnMainThreadWithoutQueries(dispatch_block_t block)
+{
+    run_on_main_thread(block, FALSE);
 }
 
 

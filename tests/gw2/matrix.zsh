@@ -20,7 +20,7 @@
 #    block 3, not after its 20 s. None runs leftover.exe, which fails its run on
 #    purpose (the workflow's step for jdrly/gw2-on-mac#128 runs it), rundll.exe, which needs a
 #    compatdb rule to pass (the workflow's step for jdrly/gw2-on-mac#155 runs it), or modeset.exe,
-#    which fails under the engine's win32u.so, which all three have (the workflow's step for
+#    which changes the display mode and needs the Mac driver (the workflow's step for
 #    jdrly/gw2-on-mac#159 runs it).
 # 3. (jdrly/gw2-on-mac#44) mutexall three runs under the engine's ntdll.so, each of which has to
 #    fail on the bug it shows, and three under mine, which have to pass 20,000 wait-alls each
@@ -285,7 +285,7 @@ other_fex=$work/fexid/${mine:t}
 named=$(python3 -I - "$other_fex/lib/wine/aarch64-windows" <<'EOF'
 import os, struct, sys
 d = os.path.realpath(sys.argv[1])
-old = bytes.fromhex("656ee1a27027233b4c4c44205044422e")  # heatprof.h's HEAT_FEX_PIN_GUID
+old = bytes.fromhex("8607b03e5057dd524c4c44205044422e")  # heatprof.h's HEAT_FEX_PIN_GUID
 new = bytes([old[0] ^ 0xff]) + old[1:]
 done, out = set(), None
 for name in ("xtajit64.dll", "libarm64ecfex.dll"):
