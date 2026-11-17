@@ -9,7 +9,8 @@
 #    one,skip), three runs each. The modes run side by side, each in a prefix of its own.
 #    Blocks 1, 1b, 3 and 4 set WINE_HEAT_DUMP_MS=500, so their programs wait 1.5 s for the
 #    counters, not 6. Block 6's requests runs and block 7 set 1000: requests.exe makes its calls
-#    within one block, about 0.1 s of them, and peekyield.exe waits for five rewrites a run.
+#    in about 0.1 s, which can still fall in two blocks, and peekyield.exe waits for five rewrites
+#    a run.
 # 1b. evpool.exe under mine, as WINE_HEAT_EXE with WINE_HEAT_COUNT=1, with WINE_HEAT_EVPOOL off, 1
 #    and 1,mask, three runs each, side by side (jdrly/gw2-on-mac#42).
 # 2. Every program once more, side by side: under the engine's ntdll.so; under mine with no
