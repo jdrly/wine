@@ -588,6 +588,7 @@ jobs:
             echo "### Toolchain"
             echo '```'
             echo "$RUNNER, image $ImageOS $ImageVersion, macOS $(sw_vers -productVersion)"
+            echo "$(sysctl -n hw.ncpu) CPUs, $(( $(sysctl -n hw.memsize) / 1073741824 )) GB of memory"
             xcodebuild -version | sed -n 1p
             echo "macOS SDK $(xcrun -sdk macosx --show-sdk-version)"
             clang --version | sed -n 1p
@@ -790,7 +791,9 @@ jobs:
       # "unchanged, not sent" lines: at least 995 of the 1,000 calls with CLIP=changes, none without.
       # With CLIP=changes the driver also warns "not applied" for a clip the main thread refused,
       # which says that this runner can't confine the cursor, not that the record is wrong. Only
-      # where the Mac driver starts.
+      # where the Mac driver starts. WINE_HEAT_DUMP_MS=500: clip.exe waits for seven of the dumper's
+      # blocks a run and adds up however many its rounds take, so the blocks' length doesn't matter
+      # to it, and at 5 s a block the waits were 30 of each run's 39 s.
       - name: The cursor clip and the call's byte
         if: env.RUN_WINEMAC == '1' || env.RUN_NTDLL == '1'
         run: |
@@ -810,7 +813,7 @@ jobs:
             log=$RUNNER_TEMP/clip-log-$mode
             mkdir -p "$log"
             status=0
-            WINE_HEAT_EXE=clip.exe WINE_HEAT_COUNT=1 WINE_HEAT_LOG=$log GW2_TEST_WINEDEBUG=-all,+cursor GW2_TEST_SECONDS=300 \
+            WINE_HEAT_EXE=clip.exe WINE_HEAT_COUNT=1 WINE_HEAT_DUMP_MS=500 WINE_HEAT_LOG=$log GW2_TEST_WINEDEBUG=-all,+cursor GW2_TEST_SECONDS=300 \
               tests/gw2/run.zsh "$RUNNER_TEMP/both/wine" "$prefix" "$RUNNER_TEMP/tests/clip.exe" >"$RUNNER_TEMP/clip-$mode.txt" || status=1
             skipped=$(tr -d '\r' <"$prefix/clip.log" | grep -c 'macdrv_ClipCursor unchanged, not sent' || true)
             refused=$(tr -d '\r' <"$prefix/clip.log" | grep -c 'macdrv_ClipCursor .* not applied' || true)
