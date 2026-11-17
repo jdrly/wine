@@ -39,10 +39,10 @@ static CFMutableDictionaryRef win_datas;
 
 static unsigned int activate_on_focus_time;
 
-/* GW2 on Mac (WINE_MACDRV_VIEW=changes): changes whenever a Cocoa window or a client view comes or
-   goes, so that a client surface's record of what it sent to its view (struct
-   macdrv_client_surface) never matches a new object at an old one's address. Guarded by the window
-   data lock, never 0. */
+/* GW2 on Mac (WINE_MACDRV_VIEW=changes): changes whenever a Cocoa window, a client view or a remote
+   layer (since Mach9 0.4.0) comes or goes, so that a client surface's record of what it sent to its
+   view (struct macdrv_client_surface) never matches a new object at an old one's address. Guarded
+   by the window data lock, never 0. */
 static unsigned int client_view_serial = 1;
 
 /* The window data lock must be held. */
@@ -2251,6 +2251,8 @@ static void add_remote_layer(HWND hwnd, unsigned int context_id)
     layers[data->remote_layer_count].context_id = context_id;
     layers[data->remote_layer_count].view = view;
     data->remote_layer_count++;
+    /* GW2 on Mac (WINE_MACDRV_VIEW=changes): a remote layer can be a client surface's above_view */
+    client_views_changed();
     release_win_data(data);
 
     place_remote_layers(hwnd);
@@ -2276,6 +2278,7 @@ static void remove_remote_layer(HWND hwnd, unsigned int context_id)
             data->remote_layers = NULL;
             remote_layer_window_count--;
         }
+        client_views_changed();  /* GW2 on Mac (WINE_MACDRV_VIEW=changes), as in add_remote_layer */
         break;
     }
     release_win_data(data);
@@ -2379,6 +2382,7 @@ void macdrv_DestroyWindow(HWND hwnd)
     remote_layers = data->remote_layers;
     remote_layer_count = data->remote_layer_count;
     if (remote_layer_count) remote_layer_window_count--;
+    if (remote_layer_count) client_views_changed();  /* GW2 on Mac (WINE_MACDRV_VIEW=changes), as in add_remote_layer */
 
     CFDictionaryRemoveValue(win_datas, hwnd);
     release_win_data(data);

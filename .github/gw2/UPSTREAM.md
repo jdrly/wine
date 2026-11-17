@@ -50,7 +50,7 @@ without its `WINE_HEAT_`, `WINE_MACDRV_` or `WINE_` prefix.
 | `dlls/win32u/message.c` | `peek_no_yield`, `NtUserPeekMessage` | Reads the switch, then leaves out the empty peek's yield | `WIN32U_PEEK_YIELD` | #61 |
 | `dlls/winemac.drv/macdrv_main.c` | includes, globals, `switch_is`, `setup_options` | Reads every `WINE_MACDRV_*` | all `WINE_MACDRV_*` | #57, #59, #62 |
 | `dlls/winemac.drv/macdrv.h` | `struct macdrv_client_surface` | What a surface's last update sent to its view | `VIEW` | #62 |
-| `dlls/winemac.drv/window.c` | `client_view_serial`, `client_views_changed`, `create_cocoa_window`, `destroy_cocoa_window`, `macdrv_client_surface_detach` | A serial that changes when a Cocoa window or a client view comes or goes | `VIEW` | #62 |
+| `dlls/winemac.drv/window.c` | `client_view_serial`, `client_views_changed`, `create_cocoa_window`, `destroy_cocoa_window`, `macdrv_client_surface_detach`, `add_remote_layer`, `remove_remote_layer`, `macdrv_DestroyWindow` | A serial that changes when a Cocoa window, a client view or a remote layer comes or goes | `VIEW` | #62, #166 |
 | `dlls/winemac.drv/window.c` | `macdrv_client_surface_update` | Sends the view's frame and superview only when they changed | `VIEW` | #62 |
 | `dlls/winemac.drv/mouse.c` | the clip record, `macdrv_ClipCursor` | Leaves out a call for the rectangle applied last | `CLIP` | #62 |
 | `dlls/winemac.drv/cocoa_cursorclipping.m` | `clipping_changed`, `scale_rect_for_retina_mode`, both classes' `startClippingCursor` and `stopClippingCursor` | Bumps `clip_serial` on every change of the clipping | `CLIP` | #62 |
