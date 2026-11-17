@@ -22,15 +22,13 @@ without its `WINE_HEAT_`, `WINE_MACDRV_` or `WINE_` prefix.
 | `dlls/ntdll/unix/unix_private.h` | after `mutex_unlock` | Includes `heat.h` in every unix file | all `WINE_HEAT_*` | #40 |
 | `dlls/ntdll/unix/unix_private.h` | `server_async` | The pool forgets an event the server sets when the I/O ends | `EVPOOL` | #42 |
 | `dlls/ntdll/unix/loader.c` | `start_main_thread` | Calls `heat_init()` right after `load_compatdb()` | all `WINE_HEAT_*` | #40 |
-| `dlls/ntdll/unix/file.c` | `NtSetInformationObject` | A handle that may become inheritable loses its private mark, and the pool forgets it | `WAKE`, `EVPOOL` | #40, #42 |
+| `dlls/ntdll/unix/file.c` | `NtSetInformationObject` | The pool forgets a handle that may become inheritable | `EVPOOL` | #42 |
 | `dlls/ntdll/unix/registry.c` | `NtNotifyChangeMultipleKeys` | The pool forgets the event the server sets on a change | `EVPOOL` | #42 |
 | `dlls/ntdll/unix/socket.c` | `sock_ioctl` | The pool forgets the event the server sets on a socket event | `EVPOOL` | #42 |
 | `dlls/ntdll/unix/server.c` | `server_call_unlocked` | Records each request, its reply and its time | `COUNT` | #60 |
-| `dlls/ntdll/unix/server.c` | `NtDuplicateObject` | Updates the handle's marks, and the pool answers for a parked handle | `WAKE`, `EVPOOL` | #40, #42 |
-| `dlls/ntdll/unix/server.c` | `NtClose` | Clears the handle's marks, and the pool parks an event instead of closing it | `WAKE`, `EVPOOL`, `COUNT` | #40, #42 |
+| `dlls/ntdll/unix/server.c` | `NtDuplicateObject` | Counts a close of the source in this process and clears its event mark, and the pool answers for a parked handle | `COUNT`, `EVPOOL` | #40, #42 |
+| `dlls/ntdll/unix/server.c` | `NtClose` | Counts the close and clears the handle's event mark, and the pool parks an event instead of closing it | `EVPOOL`, `COUNT` | #40, #42 |
 | `dlls/ntdll/unix/sync.c` | `heat_inproc_sync_idle` (new) | Says whether no thread of this process holds the handle's in-process sync | `EVPOOL` | #42 |
-| `dlls/ntdll/unix/sync.c` | `NtCreateSemaphore` | Marks an unnamed, non-inheritable semaphore private | `WAKE=skip` | #40 |
-| `dlls/ntdll/unix/sync.c` | `NtReleaseSemaphore` | Names the releasing handle for `signal_all` | `WAKE=skip` | #40 |
 | `dlls/ntdll/unix/sync.c` | `NtCreateEvent` | Takes a parked event, offers a new one to the pool, counts creations | `EVPOOL`, `COUNT` | #40, #42 |
 | `dlls/ntdll/unix/sync.c` | `NtPulseEvent` | The pool forgets an event that may keep an untaken pulse | `EVPOOL` | #42 |
 | `dlls/ntdll/unix/sync.c` | `NtYieldExecution` | Times the yield | `COUNT` | #40 |
@@ -39,7 +37,7 @@ without its `WINE_HEAT_`, `WINE_MACDRV_` or `WINE_` prefix.
 | `dlls/ntdll/unix/sync.c` | `NtWaitForAlertByThreadId` | Spins before the first sleep, outside the emulator, and times the sleeps | `SPIN=lock`, `COUNT` | #45, #99 |
 | `dlls/ntdll/unix/msync.c` | `msync_wait_single` | Times the sleep, and counts the sleepers on a semaphore | `COUNT`, `WAKE=skip` | #40, #99 |
 | `dlls/ntdll/unix/msync.c` | `msync_wait_multiple` | Times the sleep. The bailout's fix is in the second table | `COUNT` | #99 |
-| `dlls/ntdll/unix/msync.c` | `signal_all` | Takes a semaphore release's count for `one` and `skip`, and times each wake call | `WAKE`, `COUNT` | #40, #99 |
+| `dlls/ntdll/unix/msync.c` | `signal_all` | Takes a semaphore release's count for `one` and `skip`, and times each wake call. `skip` decides by msync's reference count and this process's sleepers | `WAKE`, `COUNT` | #40, #99, #249 |
 | `dlls/ntdll/unix/msync.c` | `msync_release_semaphore_obj`, `msync_set_event_obj`, `msync_release_mutex_obj` | Pass `signal_all` its count (0 for an event or a mutex), and count releases and sets | `WAKE`, `COUNT` | #40, #99 |
 | `dlls/ntdll/unix/msync.c` | `msync_pulse_event_obj` | Keeps a pulse that a spinner may take | `SPIN=event` | #45 |
 | `dlls/ntdll/unix/msync.c` | `heat_spin_objs` (new) | The spin on events and on a semaphore | `SPIN=event`, `SPIN=sem` | #45 |
@@ -75,7 +73,7 @@ has changed a lot on that branch since 0.3.1. A rebase starts by checking every 
 | `dlls/ntdll/unix/msync.c`, `msync_wait_multiple` | Unregisters from the server on the contention bailout | #44, #104 | `f6097722b99`, `41ca59151dc` | dappermint/winecx `9be392b3b4` has it. athei: no |
 | `dlls/ntdll/unix/msync.c`, `msync_wait_objs` | The wait-all's rollback releases only the mutexes this pass took | #44 | `f6097722b99` | no |
 | `dlls/ntdll/unix/msync.c`, `msync_wait_objs` | A relative timeout's deadline is computed before the first spin or sleep, not at the wait's start | #101 | `41ca59151dc` | no |
-| `dlls/ntdll/unix/msync.c`, `msync_wait_objs` | A wait-all that puts an object back wakes its waiters | #219 | `30c65fd5a6d` | athei: no |
+| `dlls/ntdll/unix/msync.c`, `msync_wait_objs` | A wait-all that puts an object back wakes its waiters, all of them in every `WINE_HEAT_WAKE` mode since #249 | #219, #249 | `30c65fd5a6d` | athei: no |
 | `dlls/win32u/sysparams.c`, `make_ratio`, `ratio_error` (new, in place of `gcd`) | Approximates a ratio whose terms don't fit 16 bits | #159 | `6d2623ab5f0` | athei's branch after 0.3.1 (`871b6b77801`) |
 | `dlls/win32u/sysparams.c`, `set_winstation_monitors` | Gives the server the raw rect the current mode is shown on | #159 | `f4c7da17451` | athei's branch after 0.3.1 (`425b47a0a77`) |
 | `dlls/ntdll/unix/server.c`, `invoke_system_apc`; `dlls/ntdll/unix/thread.c`, `NtCreateThreadEx` | The target's own `DbgUiRemoteBreakin` for a remote break-in on ARM64 | #174 | `3fed5c1791b` | athei's branch after 0.3.1 |

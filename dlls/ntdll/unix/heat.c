@@ -18,8 +18,9 @@
  *   WINE_HEAT_WAKE=one    a semaphore release of count n makes at most n wake-one calls and
  *                         stops at the first that finds no waiter. msync wakes every waiter on
  *                         every release. Events and mutexes keep that (msync.c).
- *   WINE_HEAT_WAKE=skip   a release of a private semaphore with no thread of this process
- *                         asleep on it makes no wake call (heatwake.c). "one,skip" for both.
+ *   WINE_HEAT_WAKE=skip   a release of a semaphore that only this process has looked up, with
+ *                         no thread of it asleep on it, makes no wake call (heatwake.c).
+ *                         "one,skip" for both.
  *   WINE_HEAT_EVPOOL=1    NtClose of an event that only this process can hold parks the handle,
  *                         and NtCreateEvent takes one that has been parked for 2 ms: neither asks
  *                         the server (jdrly/gw2-on-mac#42, heatpool.c). "1,mask" blocks signals
@@ -58,6 +59,12 @@
  *                events too
  *   wait         msync_wait_objs calls; wait_timed those with a timeout neither infinite nor zero,
  *                wait_poll those with a zero timeout
+ *
+ * Since jdrly/gw2-on-mac#249, at the end of the counters:
+ *
+ *   wake_shared  with WINE_HEAT_WAKE=skip, the releases that made the wake call because msync's
+ *                reference count was above 2: another process, or a second handle of this one,
+ *                had looked the semaphore up
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public

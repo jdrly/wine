@@ -61,7 +61,7 @@ C_ASSERT( HEAT_BITS <= 32 );  /* heat_mode is an unsigned int */
  * step. A new one goes at the end of its group. */
 #define HEAT_COUNTERS(C) \
     C(RELEASE, release) /* semaphore releases */ \
-    C(WAKE_SKIPPED, wake_skipped) /* releases of a private semaphore with no waiter here: no wake call */ \
+    C(WAKE_SKIPPED, wake_skipped) /* releases of a semaphore only this process holds, with no waiter here: no wake call */ \
     C(WAKE_ONE, wake_one) /* wake-one calls of WINE_HEAT_WAKE=one that woke a thread */ \
     C(WAKE_NONE, wake_none) /* wake calls on a semaphore or mutex that found no waiter (events: HC_EVENT_WAKE_NONE) */ \
     C(WOKEN, woken) /* single waits woken */ \
@@ -100,7 +100,9 @@ C_ASSERT( HEAT_BITS <= 32 );  /* heat_mode is an unsigned int */
     C(EVENT_WAKE_NONE, event_wake_none) /* ... that found none */ \
     C(WAIT, wait) /* msync_wait_objs */ \
     C(WAIT_TIMED, wait_timed) /* ... with a timeout that is neither infinite nor zero */ \
-    C(WAIT_POLL, wait_poll) /* ... with a zero timeout */
+    C(WAIT_POLL, wait_poll) /* ... with a zero timeout */ \
+    /* jdrly/gw2-on-mac#249 */ \
+    C(WAKE_SHARED, wake_shared) /* releases the skip refused: msync counts another holder of the semaphore */
 
 #define HEAT_TIMERS(C) \
     C(SERVER, server_ms) C(YIELD, yield_ms) \
@@ -134,7 +136,6 @@ extern void heat_unmark( HANDLE handle, unsigned char flags );
 extern void heat_sleep_on( unsigned int obj );
 extern void heat_woke_on( unsigned int obj );
 extern BOOL heat_skip_wake_slow( unsigned int obj, const unsigned short *refcount );
-extern __thread HANDLE heat_releasing;
 
 /* jdrly/gw2-on-mac#60: a server call ended, <status> from the reply. Counts it as HC_SERVER with
  * HT_SERVER, and by its request code. <sent> is the request as it was before the reply overwrote it. */
@@ -166,16 +167,6 @@ static inline void heat_thread_named( const char *name )
     if (heat_mode & HEAT_COUNT) heat_named( name );
 }
 
-/* NtCreateSemaphore made it: private if unnamed, without a root directory and not inheritable */
-static inline void heat_semaphore_created( HANDLE handle, const OBJECT_ATTRIBUTES *attr )
-{
-    if (!(heat_mode & HEAT_WAKE_SKIP)) return;
-    if (attr && (attr->RootDirectory || (attr->ObjectName && attr->ObjectName->Length) ||
-                 (attr->Attributes & OBJ_INHERIT)))
-        return;
-    heat_mark( handle, 1 /* HEAT_H_PRIVATE */ );
-}
-
 static inline void heat_event_created( HANDLE handle )
 {
     if (!(heat_mode & HEAT_COUNT)) return;
@@ -183,25 +174,19 @@ static inline void heat_event_created( HANDLE handle )
     heat_mark( handle, 2 /* HEAT_H_EVENT */ );
 }
 
-/* duplicated or given new handle flags: a semaphore is no longer private */
-static inline void heat_handle_shared( HANDLE handle )
-{
-    if (heat_mode & HEAT_WAKE_SKIP) heat_unmark( handle, 1 );
-}
-
 /* before the server closes it, and can give its value to a new object */
 static inline void heat_handle_closed( HANDLE handle )
 {
     if (!heat_mode) return;
     heat_count( HC_CLOSE );
-    heat_unmark( handle, 1 | 2 );
+    heat_unmark( handle, 2 /* HEAT_H_EVENT */ );
 }
 
 /* signal_all, after the count changed: TRUE when the release may make no wake call. <refcount>
  * is the semaphore's reference count in msync's shared memory. */
 static inline BOOL heat_skip_wake( unsigned int obj, const unsigned short *refcount )
 {
-    return (heat_mode & HEAT_WAKE_SKIP) && heat_releasing && heat_skip_wake_slow( obj, refcount );
+    return (heat_mode & HEAT_WAKE_SKIP) && heat_skip_wake_slow( obj, refcount );
 }
 
 /***********************************************************************

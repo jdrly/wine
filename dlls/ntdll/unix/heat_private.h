@@ -147,12 +147,10 @@ extern int heat_req_block( char *buf, size_t size, unsigned int row, double now,
                            const unsigned char *fex, size_t fex_size ) HEAT_HIDDEN;
 
 /***********************************************************************
- *  the handle marks: the wake skip's and the event counter's (heatwake.c has the rules), and the
- *  event pool's (heatpool.c)
+ *  the handle marks: the event counter's (heatwake.c), and the event pool's (heatpool.c)
  */
 #define HEAT_HANDLES (1 << 22)  /* handle values up to 16M */
 #define HEAT_SLOTS   (1 << 22)  /* msync slots up to 4M */
-#define HEAT_H_PRIVATE 1        /* a private semaphore (WINE_HEAT_WAKE=skip) */
 #define HEAT_H_EVENT   2        /* made by NtCreateEvent (WINE_HEAT_COUNT=1) */
 #define HEAT_H_POOL    4
 #define HEAT_H_MANUAL  8
