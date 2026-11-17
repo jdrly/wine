@@ -29,8 +29,9 @@ for the run's leftovers, and on a shared machine that can be another session's.
 ## Where my code goes
 
 My code lives in files of my own: `dlls/ntdll/unix/heat*.{c,h}`, `dlls/winemac.drv/cocoa_calls.h`,
-`gcmouse_scale.h`, `surface_frame.h`, `tests/gw2/`, `.github/gw2/` and the workflow. An upstream
-file gets a narrow hook, a call into a function of mine, with a comment that names the issue.
+`gcmouse_scale.h`, `surface_frame.h`, `tests/gw2/`, `.github/gw2/`, `docs/gw2/` and the workflow.
+An upstream file gets a narrow hook, a call into a function of mine, with a comment that names the
+issue.
 Every line of mine in an upstream file is a possible conflict at the next rebase.
 `.github/gw2/UPSTREAM.md` lists them, and a change that adds or removes one changes its row.
 
