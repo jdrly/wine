@@ -36,9 +36,10 @@ wrong answer from a stale file would still be worse than a slow configure, so tw
   entry can't be overwritten. The better way out is a pull request that puts the missed input into
   the key: its key is new, so it's tested on fresh answers. Deleting the entry under Actions,
   Caches isn't enough alone. A re-run of the red push would then pass, and ADR 0013 would still
-  let it skip the tests on the strength of the pull request run that read the stale answers. So
-  after a delete I re-run that pull request's run first, which now configures from nothing, and
-  re-run the push after it's green.
+  let it skip the tests on the strength of the pull request run that read the stale answers. So I
+  delete every entry under that key, the pull request's own included, re-run that pull request's
+  run first, check that its Configure didn't start from kept answers, and re-run the push after
+  it's green.
 - Anything new that configure's answers depend on goes into the key: a new Homebrew package in the
   install step, a new variable that `wine.zsh` passes to configure from the environment. Arguments
   inside `wine.zsh` are covered by its hash.
