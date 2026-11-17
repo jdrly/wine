@@ -20,7 +20,9 @@ So I made two changes to how a pull request's run decides what to do:
   Markdown, and of `gw2.yml` what is left without its comment lines and its `lint` and `publish`
   jobs.
 - The build job's step "The head has gw2-on-mac's tip" compares the merge commit's tree with the
-  head's. If they differ, the run fails in its first minute and asks for a rebase.
+  head's. If they differ, the run fails in its first minute and asks for a rebase. The check is on
+  trees, not ancestry. A head that has the same changes as `gw2-on-mac`'s tip without being based
+  on it passes, and that's fine: its run tests the tree the merge will have.
 
 ## Consequences
 
@@ -51,15 +53,15 @@ So I made two changes to how a pull request's run decides what to do:
 - **The merge commit's tests against the head's files.** A test that came to `gw2-on-mac` with a
   fix would run against a head without the fix, and fail.
 - **A warning instead of a failure for a head that is behind.** The run would go on testing a
-  mixed tree, and the push would run every test again anyway. It is a one-line change back
-  (`::warning::` and no `exit 1`) if I ever want it.
+  mixed tree, and the push would run every test again anyway. If I ever want it, the step needs
+  `::warning::` for `::error::` and no `exit 1`.
 - **A finer rule for single test programs.** It needs a table of which program runs in which step,
   and a wrong row skips a test without a sound.
 
 ## Evidence
 
 - jdrly/gw2-on-mac #228 and #149, jdrly/wine PR #40 and its run 43957907232, run 43370004985.
-- GW2 on Mac workspace: `advisor-plans/2026-11-17-ci/REVIEW.md` (finding 2 and "The head against
-  the merge ref") and `advisor-plans/2026-11-17-ci/007-wine-ci-selection-and-behind-head.md`.
+- GW2 on Mac workspace: `advisor-plans/2026-11-17-ci/REVIEW.md`, finding 2 and "The head against
+  the merge ref", and `advisor-plans/2026-11-17-ci/007-wine-ci-selection-and-behind-head.md`.
 - The rule applied to the fork's history: `TESTS=0` for #38 and #40, `TESTS=1` for #33, #35, #36,
   #37 and #41.

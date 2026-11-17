@@ -16,9 +16,9 @@
 # build: one Wine tree configured as Mach9 configures its own (.github/gw2/wine.zsh), in the
 #   engine's paths, with Xcode $XCODE_VERSION, macOS $MACOSX_DEPLOYMENT_TARGET, llvm-mingw
 #   $LLVM_MINGW_VERSION and Homebrew's FreeType headers. Each build makes dlls/ntdll/ntdll.so,
-#   dlls/winemac.drv/winemac.so and dlls/win32u/win32u.so. On a pull request whose head is behind
-#   gw2-on-mac, GitHub's merge commit has another tree than the head, and the job stops before it
-#   builds anything (jdrly/gw2-on-mac#228). In the tree, one after the other:
+#   dlls/winemac.drv/winemac.so and dlls/win32u/win32u.so. On a pull request whose merge commit has
+#   another tree than its head, as it has when the head is behind gw2-on-mac, the job stops before
+#   it builds anything (jdrly/gw2-on-mac#228). In the tree, one after the other:
 #   - $BASE_COMMIT, the commit the engine was built from, each file compared with the engine's by
 #     .github/gw2/compare.py baseline with the gate above. The strict one wants the same exports
 #     and imports, and the header, every section, the load commands and the link edit data byte
