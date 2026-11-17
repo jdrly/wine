@@ -19,7 +19,10 @@
  *   16  A release with no waiter, a million times, on a thread of its own. With
  *       WINE_HEAT_COUNT=1 in this process, that thread's counters must say: with skip,
  *       wake_skipped equals the releases and wake_none is 0; without, every release made a wake
- *       call that found no waiter.
+ *       call that found no waiter. Then 10,000 such releases on another thread, of a semaphore
+ *       that a second handle of this process has looked up too, so msync counts this process
+ *       twice: with skip, wake_shared equals that thread's releases and wake_skipped is 0
+ *       (jdrly/gw2-on-mac#249). wake_shared is 0 on every other row this test reads.
  *
  * Each case prints its name first; a stall shows as the run's time limit with the last name
  * printed. Prints "gw2 test wakes: passed" and exits 0, or names what failed and exits 1.
@@ -34,6 +37,7 @@
 #define PRODUCER_SECONDS 60
 #define ROUNDS 200
 #define NO_WAITER 1000000
+#define SHARED 10000
 
 static const char *current = "startup";
 
@@ -481,36 +485,16 @@ static long long counter( const char *line, const char *name )
     return (p = strstr( line, key )) ? _atoi64( p + strlen( key ) ) : -1;
 }
 
-static DWORD WINAPI no_waiter( void *arg )
-{
-    HANDLE sem = private_semaphore( 0x7fffffff );
-    int i;
+struct row { long long release, skipped, none, one, shared; };
 
-    for (i = 0; i < NO_WAITER; i++) release( sem, 1 );
-    CloseHandle( sem );
-    return 0;
-}
-
-static void test_no_waiter(void)
+/* thread <tid>'s counters from the heat-*.log in <dir> that has its row */
+static void read_row( const char *dir, DWORD tid, struct row *row )
 {
-    char dir[MAX_PATH], path[MAX_PATH * 2], want[32], line[4096];
+    char path[MAX_PATH * 2], want[32], line[4096];
     WIN32_FIND_DATAA fd;
-    HANDLE releaser, find;
-    BOOL found = FALSE, skip;
-    long long releases = 0, skipped = 0, none = 0, one = 0;
-    DWORD tid;
+    BOOL found = FALSE;
+    HANDLE find;
     FILE *f;
-
-    start( "16 releases with no waiter" );
-    releaser = thread( no_waiter, NULL );
-    tid = GetThreadId( releaser );
-    join( releaser, 60000 );
-
-    /* counting: WINE_HEAT_COUNT=1, and WINE_HEAT_EXE names this program */
-    if (!env_is( "WINE_HEAT_COUNT", "1" ) || !env_is( "WINE_HEAT_EXE", "wakes.exe" )) return;
-    if (!GetEnvironmentVariableA( "WINE_HEAT_LOG", dir, sizeof(dir) )) FAIL( "WINE_HEAT_LOG isn't set" );
-    skip = env_has( "WINE_HEAT_WAKE", "skip" );
-    Sleep( dump_wait() );  /* until the counters are written again */
 
     /* this process's file is the one with that thread's row; the child's of 14 is there too */
     snprintf( want, sizeof(want), "thread %04lx ", tid );
@@ -524,21 +508,81 @@ static void test_no_waiter(void)
         {
             if (strncmp( line, want, strlen( want ) )) continue;
             found = TRUE;
-            releases = counter( line, "release" );
-            skipped = counter( line, "wake_skipped" );
-            none = counter( line, "wake_none" );
-            one = counter( line, "wake_one" );
+            row->release = counter( line, "release" );
+            row->skipped = counter( line, "wake_skipped" );
+            row->none = counter( line, "wake_none" );
+            row->one = counter( line, "wake_one" );
+            row->shared = counter( line, "wake_shared" );
         }
         fclose( f );
     } while (!found && FindNextFileA( find, &fd ));
     FindClose( find );
-    if (!found) FAIL( "no row for the releasing thread in %s", dir );
+    if (!found) FAIL( "no row for thread %04lx in %s", tid, dir );
+}
 
-    printf( "gw2 test wakes: the releasing thread: release %lld wake_skipped %lld wake_none %lld wake_one %lld\n",
-            releases, skipped, none, one );
-    if (releases < NO_WAITER) FAIL( "%lld releases counted, fewer than %d", releases, NO_WAITER );
-    if (skip && (skipped != releases || none)) FAIL( "with skip, wake_skipped must equal the releases and wake_none be 0" );
-    if (!skip && (skipped || none + one != releases)) FAIL( "without skip, every release makes a wake call" );
+static DWORD WINAPI no_waiter( void *arg )
+{
+    HANDLE sem = private_semaphore( 0x7fffffff );
+    int i;
+
+    for (i = 0; i < NO_WAITER; i++) release( sem, 1 );
+    CloseHandle( sem );
+    return 0;
+}
+
+/* the same through one of two handles, each of which a zero wait has looked up */
+static DWORD WINAPI shared_no_waiter( void *arg )
+{
+    HANDLE sem = private_semaphore( 0x7fffffff ), dup;
+    int i;
+
+    if (!DuplicateHandle( GetCurrentProcess(), sem, GetCurrentProcess(), &dup, 0, FALSE, DUPLICATE_SAME_ACCESS ))
+        FAIL( "DuplicateHandle: error %lu", GetLastError() );
+    if (WaitForSingleObject( sem, 0 ) != WAIT_TIMEOUT || WaitForSingleObject( dup, 0 ) != WAIT_TIMEOUT)
+        FAIL( "a zero wait on the empty semaphore didn't time out" );
+    for (i = 0; i < SHARED; i++) release( sem, 1 );
+    CloseHandle( dup );
+    CloseHandle( sem );
+    return 0;
+}
+
+static void test_no_waiter(void)
+{
+    char dir[MAX_PATH];
+    HANDLE releaser;
+    BOOL skip;
+    struct row mine, shared;
+    DWORD tid, shared_tid;
+
+    start( "16 releases with no waiter" );
+    releaser = thread( no_waiter, NULL );
+    tid = GetThreadId( releaser );
+    join( releaser, 60000 );
+    releaser = thread( shared_no_waiter, NULL );
+    shared_tid = GetThreadId( releaser );
+    join( releaser, 60000 );
+
+    /* counting: WINE_HEAT_COUNT=1, and WINE_HEAT_EXE names this program */
+    if (!env_is( "WINE_HEAT_COUNT", "1" ) || !env_is( "WINE_HEAT_EXE", "wakes.exe" )) return;
+    if (!GetEnvironmentVariableA( "WINE_HEAT_LOG", dir, sizeof(dir) )) FAIL( "WINE_HEAT_LOG isn't set" );
+    skip = env_has( "WINE_HEAT_WAKE", "skip" );
+    Sleep( dump_wait() );  /* until the counters are written again */
+    read_row( dir, tid, &mine );
+    read_row( dir, shared_tid, &shared );
+
+    printf( "gw2 test wakes: the releasing thread: release %lld wake_skipped %lld wake_none %lld wake_one %lld wake_shared %lld\n",
+            mine.release, mine.skipped, mine.none, mine.one, mine.shared );
+    printf( "gw2 test wakes: the thread with two handles: release %lld wake_skipped %lld wake_none %lld wake_one %lld wake_shared %lld\n",
+            shared.release, shared.skipped, shared.none, shared.one, shared.shared );
+    if (mine.release < NO_WAITER) FAIL( "%lld releases counted, fewer than %d", mine.release, NO_WAITER );
+    if (shared.release < SHARED) FAIL( "%lld releases counted with two handles, fewer than %d", shared.release, SHARED );
+    if (mine.shared) FAIL( "wake_shared must be 0 for a semaphore with one handle" );
+    if (skip && (mine.skipped != mine.release || mine.none)) FAIL( "with skip, wake_skipped must equal the releases and wake_none be 0" );
+    if (!skip && (mine.skipped || mine.none + mine.one != mine.release)) FAIL( "without skip, every release makes a wake call" );
+    if (skip && (shared.shared != shared.release || shared.skipped))
+        FAIL( "with skip and two handles, wake_shared must equal the releases and wake_skipped be 0" );
+    if (!skip && (shared.shared || shared.skipped)) FAIL( "without skip, wake_shared and wake_skipped stay 0" );
+    if (shared.none + shared.one != shared.release) FAIL( "with two handles, every release makes a wake call" );
 }
 
 int main( int argc, char **argv )

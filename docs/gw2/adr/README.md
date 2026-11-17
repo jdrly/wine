@@ -29,3 +29,4 @@ decision takes the next free number.
 | [0015](0015-a-pull-request-that-changes-only-docs-skips-the-tests.md) | 2026-11-17 | Only a change that can reach a test sets `TESTS`, so a pull request that changes only docs runs the smoke test. |
 | [0016](0016-the-tests-run-as-three-lanes.md) | 2026-11-17 | The tests run as three lanes side by side, and block 7 goes with the window steps. |
 | [0017](0017-a-pull-request-whose-head-is-behind-stops-at-once.md) | 2026-11-17 | A pull request whose merge tree differs from its head's fails in its first minute and asks for a rebase. |
+| [0018](0018-the-wake-skip-decides-by-msync-reference-count-alone.md) | 2026-11-17 | The wake skip decides by msync's reference count and my own sleepers, without the private mark. The put-back never skips. |
