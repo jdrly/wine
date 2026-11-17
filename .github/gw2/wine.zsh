@@ -75,7 +75,9 @@ configure() {
   local def want found
   mkdir -p "$BUILD"
   cd "$BUILD"
-  "$SRC/configure" "${args[@]}"
+  # -C: read and write config.cache here, configure's answers. The workflow puts an earlier run's
+  # there for a pull request (jdrly/gw2-on-mac#253); without one, configure asks everything.
+  "$SRC/configure" -C "${args[@]}"
   for def want in SONAME_LIBEGL libEGL.1.dylib SONAME_LIBFREETYPE libfreetype.6.dylib SONAME_LIBVULKAN libvulkan.1.dylib; do
     found=$(sed -n "s/^#define $def //p" include/config.h)
     [[ $found == "\"$bundled/$want\"" ]] || { print -u2 "config.h: $def is ${found:-not defined}, not \"$bundled/$want\""; exit 1 }
