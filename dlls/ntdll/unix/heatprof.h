@@ -23,8 +23,9 @@
  *  FEX, as the sampler reads it
  *
  * Every offset and value the sampler takes from FEX's memory, read from FEX at 9d4fa4b46b1 (the
- * commit Mach9 0.3.1 pins). FEX's source isn't in this tree, so nothing here checks these at build
- * time. My FEX fork does: its Source/Windows/Common/GW2Contract.h fails the fork's build when one
+ * commit Mach9 0.3.1 pins) and the same at 597e7ccbedd (Mach9 0.4.0's), whose JITCodeTail only
+ * gained a flag in its padding. Line numbers are 9d4fa4b46b1's. FEX's source isn't in this tree,
+ * so nothing here checks these at build time. My FEX fork does: its Source/Windows/Common/GW2Contract.h fails the fork's build when one
  * of them moves (jdrly/gw2-on-mac#109).
  *
  * The sampler refuses to start unless libarm64ecfex.dll's CodeView record and image size are those
@@ -35,11 +36,11 @@
  * what says "this one is mine".
  */
 
-/* Mach9 v0.3.1's lib/wine/aarch64-windows/libarm64ecfex.dll (sha256 99eb322e...): its CodeView
+/* Mach9 v0.4.0's lib/wine/aarch64-windows/libarm64ecfex.dll (sha256 cd6803d9...): its CodeView
  * record's GUID and age (lld's build id, a hash of the file) and SizeOfImage */
-#define HEAT_FEX_PIN_GUID "\x65\x6e\xe1\xa2\x70\x27\x23\x3b\x4c\x4c\x44\x20\x50\x44\x42\x2e"
+#define HEAT_FEX_PIN_GUID "\x86\x07\xb0\x3e\x50\x57\xdd\x52\x4c\x4c\x44\x20\x50\x44\x42\x2e"
 #define HEAT_FEX_PIN_AGE  1
-#define HEAT_FEX_PIN_SIZE 0x426000
+#define HEAT_FEX_PIN_SIZE 0x42f000
 #define HEAT_FEX_DLL      "libarm64ecfex.dll"
 
 /* The thread's state is FEXCore::Core::CpuStateFrame, whose first member is CPUState

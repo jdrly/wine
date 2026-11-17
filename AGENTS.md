@@ -3,8 +3,9 @@
 This fork belongs to GW2 on Mac, my app for Guild Wars 2 on Apple Silicon. Its branch `gw2-on-mac`
 (the default) carries my changes to three files of athei's arm64 Wine, the engine of Mach9:
 `ntdll.so`, `winemac.so` and `win32u.so`. My app drops them into Mach9's engine in place of its
-own. The branch starts at athei/wine `53def89293a` (wine-11.21-37), the commit Mach9 0.3.1's
-engine was built from, which `.github/workflows/gw2.yml` names as `BASE_COMMIT`.
+own. The branch starts at athei/wine `501796b0ed1` (wine-11.21-54), the commit Mach9 0.4.0's
+engine was built from, which `.github/workflows/gw2.yml` names as `BASE_COMMIT`. Up to 2026-11-17
+it started at `53def89293a`, Mach9 0.3.1's.
 
 - Nothing goes to athei's repositories or to WineHQ: no pull request, issue, comment or mail from
   this fork's work. The changes here are AI-written. A finding upstream should hear about goes to

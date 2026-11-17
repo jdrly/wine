@@ -1,5 +1,5 @@
-/* gw2 (jdrly/gw2-on-mac#159): display mode changes that the engine's win32u.so can't survive or
- * gets wrong, under emulated mode changes (EmulateModeset Y) at 192 DPI.
+/* gw2 (jdrly/gw2-on-mac#159): display mode changes that Mach9 0.3.1's win32u.so couldn't survive or
+ * got wrong, under emulated mode changes (EmulateModeset Y) at 192 DPI.
  *
  * The program writes EmulateModeset=Y (HKCU\Software\Wine\X11 Driver, where win32u reads it on
  * the Mac too) and LogPixels=192 (HKCU\Control Panel\Desktop) and starts itself again, since
@@ -8,18 +8,18 @@
  *    are then win32u's virtual ones, and the display's own mode is the physical one.
  * 2. Lists the sizes offered and picks one whose ratio to the display at this DPI has a term of
  *    16 bits or more in lowest terms, as monitor_get_dpi() asks make_ratio() for it: 1366x768 when
- *    it is such a size, or else the first. The engine's make_ratio() asserts on that and the process ends.
+ *    it is such a size, or else the first. 0.3.1's make_ratio() asserted on that and the process ended.
  *    It changes to that size and checks that the mode is the current one. Without such a size it
  *    says so and goes on.
  * 3. Changes to a size with another aspect ratio than the display's, which is shown letterboxed:
  *    640x480 when it is one, or else the first. Clearing the cursor clip has to leave it on the mode, 0,0 to its size.
- *    The engine's win32u.so gives the server the whole display as the monitor's raw rect, so the
- *    cleared clip there takes in the bars.
+ *    0.3.1's win32u.so gave the server the whole display as the monitor's raw rect, so the
+ *    cleared clip there took in the bars.
  * 4. Goes back to the registry's mode and checks it is the one it started with.
  * The first process reports how the second ended. Nothing here waits on a clock.
  *
- * Prints "gw2 test modeset: passed" and exits 0, or names what failed and exits 1. Under the
- * engine's win32u.so it fails with "the mode change ended the process" in step 2, or in step 3
+ * Prints "gw2 test modeset: passed" and exits 0, or names what failed and exits 1. Under Mach9
+ * 0.3.1's win32u.so it failed with "the mode change ended the process" in step 2, or in step 3
  * with "the cleared clip is …, not the mode's 0,0-…" when the display offers no size for step 2. */
 #include <stdio.h>
 #include <stdlib.h>
@@ -134,12 +134,12 @@ static int second( void )
 
     if (pick)
     {
-        printf( "gw2 test modeset: changing to %lux%lu, whose ratio to %lux%lu at %lu DPI the engine's make_ratio can't hold\n",
+        printf( "gw2 test modeset: changing to %lux%lu, whose ratio to %lux%lu at %lu DPI 0.3.1's make_ratio couldn't hold\n",
                 pick->dmPelsWidth, pick->dmPelsHeight, start.dmPelsWidth, start.dmPelsHeight, dpi );
         change( pick );
         printf( "gw2 test modeset: %lux%lu is the current mode, and the process is alive\n", pick->dmPelsWidth, pick->dmPelsHeight );
     }
-    else printf( "gw2 test modeset: no size here whose ratio to %lux%lu at %lu DPI the engine's make_ratio can't hold\n",
+    else printf( "gw2 test modeset: no size here whose ratio to %lux%lu at %lu DPI 0.3.1's make_ratio couldn't hold\n",
                  start.dmPelsWidth, start.dmPelsHeight, dpi );
 
     /* 3. a letterboxed mode's cleared clip */

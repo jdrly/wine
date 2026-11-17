@@ -14,7 +14,12 @@ read its version string, as the workflow's "Stage" step does with my build:
 strings -a wine/lib/wine/aarch64-unix/ntdll.so | grep -oE 'wine-[0-9]+\.[0-9]+-[0-9]+-g[0-9a-f]+'
 ```
 
-`wine-11.21-37-g53def89293` means athei/wine `53def89293a`.
+`wine-11.21-54-g501796b0ed` means athei/wine `501796b0ed1`.
+
+Then read `SERVER_PROTOCOL_VERSION` in that commit's `include/wine/server_protocol.h`. A release on
+the same Wine version can still change it: 0.4.0 is on 11.21 like 0.3.1, and went from 972 to 973
+with two requests of athei's. My files from the old base can't talk to the new wineserver then, so
+the app has to move the engine and my files in one step.
 
 ## 2. What the new base already has
 
@@ -57,6 +62,24 @@ hooks to carry over. Then each of these, with where its new value comes from:
   moves, the sampler refuses the new FEX and stays off.
 - The same GUID as hex in `tests/gw2/matrix.zsh`, on the line that names `HEAT_FEX_PIN_GUID`, for
   the sampler's test.
+- The tests that have to fail under the engine's own file, on a bug my file fixes: `engine_bugs` in
+  `tests/gw2/matrix.zsh`, and the workflow's steps that run a program under `$RUNNER_TEMP/engine`
+  or the engine's `win32u.so` and expect it to fail. For every fix the new base has, that run
+  passes now, so it goes. At 0.4.0 that was modeset.exe (#159) and attach.exe (#174).
+- Hooks that applied without a conflict into code athei changed. Read his diff of every file in
+  the first table of `UPSTREAM.md`. At 0.4.0 his remote layers became views a client surface can be
+  ordered under, so `WINE_MACDRV_VIEW`'s serial had to change with them too.
+
+## 3b. The pull request of a rebase
+
+athei rewrites his branch, so my rebased commits share only upstream Wine with `gw2-on-mac`, and
+GitHub can't merge them into it: the pull request gets no merge commit and no run. Its head is
+therefore a merge of `gw2-on-mac` into the rebased commits that keeps the rebased tree (`git merge
+-s ours origin/gw2-on-mac`). That head merges into `gw2-on-mac` without a conflict, its merge has the
+head's tree, and the commits of the old base stay reachable, so the commit ids in this folder and in
+the ADRs still resolve. The pull request lands as a merge commit or a fast-forward, never squashed:
+a squash would leave athei's new commits out of the branch's history, and `BASE_COMMIT`, which
+every build checks out, would then hang on the pull request's branch alone.
 
 ## 4. Outside this repository
 
