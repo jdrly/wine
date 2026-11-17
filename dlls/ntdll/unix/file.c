@@ -7650,7 +7650,6 @@ NTSTATUS WINAPI NtSetInformationObject( HANDLE handle, OBJECT_INFORMATION_CLASS 
 
         if (len < sizeof(*p)) return STATUS_INVALID_BUFFER_SIZE;
 
-        heat_handle_shared( handle );  /* it may become inheritable */
         heat_evpool_forget( handle );
         SERVER_START_REQ( set_handle_info )
         {

@@ -18,6 +18,8 @@ release or a set does. Like my other fixes to athei's msync, it has no switch (A
 - With `one`, a wait-all passes a wake on for a semaphore only when the pass slept on that semaphore
   and was woken. The put-back's wake comes first in the history for that reason.
 - With `skip`, the semaphore's put-back is never skipped. No release is in progress there.
+  Changed on 2026-11-17 by ADR 0018: the put-back passes 0 to `signal_all`, so it wakes every
+  waiter in every mode, `one` included.
 - The fix is always on and acts in every process. It is a row in `.github/gw2/UPSTREAM.md`'s second
   table, "Fixes without a switch", checked against athei's branch on 2026-11-16: he doesn't have it.
 - `tests/gw2/putback.c` shows it on the runner. Under the engine's own `ntdll.so` the test has to
@@ -28,7 +30,7 @@ release or a set does. Like my other fixes to athei's msync, it has no switch (A
   session on the dev build that carries it is the check that nothing got worse.
 - The plan that makes the wake skip decide by msync's reference count alone (plan 034) comes after
   this one, so each change to the wake path gets its own run of the matrix. On 2026-11-17 I let it
-  go ahead with its verifier's conditions.
+  go ahead with its verifier's conditions. ADR 0018 records it.
 
 ## Alternatives I rejected
 

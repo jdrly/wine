@@ -1058,7 +1058,6 @@ NTSTATUS WINAPI NtCreateSemaphore( HANDLE *handle, ACCESS_MASK access, const OBJ
     }
     SERVER_END_REQ;
 
-    if (!ret) heat_semaphore_created( *handle, attr );
     free( objattr );
     return ret;
 }
@@ -1143,15 +1142,8 @@ NTSTATUS WINAPI NtReleaseSemaphore( HANDLE handle, LONG count, ULONG *previous )
     if (count <= 0)
         return STATUS_INVALID_PARAMETER;
 
-    /* for WINE_HEAT_WAKE=skip, which asks whether the handle is private */
-    if (heat_mode & HEAT_WAKE_SKIP)
-    {
-        heat_releasing = handle;
-        ret = inproc_release_semaphore( handle, count, previous );
-        heat_releasing = 0;
-    }
-    else ret = inproc_release_semaphore( handle, count, previous );
-    if (ret != STATUS_NOT_IMPLEMENTED) return ret;
+    if ((ret = inproc_release_semaphore( handle, count, previous )) != STATUS_NOT_IMPLEMENTED)
+        return ret;
 
     SERVER_START_REQ( release_semaphore )
     {
