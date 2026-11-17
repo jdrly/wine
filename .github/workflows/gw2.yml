@@ -16,7 +16,9 @@
 # build: one Wine tree configured as Mach9 configures its own (.github/gw2/wine.zsh), in the
 #   engine's paths, with Xcode $XCODE_VERSION, macOS $MACOSX_DEPLOYMENT_TARGET, llvm-mingw
 #   $LLVM_MINGW_VERSION and Homebrew's FreeType headers. Each build makes dlls/ntdll/ntdll.so,
-#   dlls/winemac.drv/winemac.so and dlls/win32u/win32u.so. In the tree, one after the other:
+#   dlls/winemac.drv/winemac.so and dlls/win32u/win32u.so. On a pull request whose merge commit has
+#   another tree than its head, as it has when the head is behind gw2-on-mac, the job stops before
+#   it builds anything (jdrly/gw2-on-mac#228). In the tree, one after the other:
 #   - $BASE_COMMIT, the commit the engine was built from, each file compared with the engine's by
 #     .github/gw2/compare.py baseline with the gate above. The strict one wants the same exports
 #     and imports, and the header, every section, the load commands and the link edit data byte
@@ -77,7 +79,9 @@
 #   runs every test. A pull request runs only the tests of the files it can have changed: the
 #   build job's selection.env says which of ntdll.so, winemac.so and win32u.so the fork report or
 #   the changed paths reach, and a change to tests/gw2 or .github runs everything
-#   (jdrly/gw2-on-mac#217). A new test step names the RUN_* of the files it tests in its if:.
+#   (jdrly/gw2-on-mac#217), unless it changes only Markdown files, comment lines of this workflow
+#   or its lint and publish jobs (jdrly/gw2-on-mac#228). A new test step names the RUN_* of the
+#   files it tests in its if:.
 # lint: actionlint (.github/actionlint.yaml names the xcode-27 label), the Python scripts compile,
 #   .github/gw2/SWITCHES.md names exactly the switches the sources read, and heatreq.h's request
 #   list is enum request's (.github/gw2/heatreq.py).
@@ -196,6 +200,21 @@ jobs:
           fetch-depth: 0
           filter: blob:none
           persist-credentials: false
+      # A pull request's run builds and tests its head with the workflow of GitHub's merge commit.
+      # With a head that is behind gw2-on-mac the two disagree: new steps run against old tests
+      # (jdrly/gw2-on-mac#149, run 43370004985), and the merge will have another tree than the
+      # head, so the push runs every test again whatever this run shows (jdrly/gw2-on-mac#214).
+      # Such a run stops here, in its first minute.
+      - name: The head has gw2-on-mac's tip
+        if: github.event_name == 'pull_request'
+        run: |
+          merged=$(git -C gw2-ci rev-parse 'HEAD^{tree}')
+          head=$(git -C src rev-parse "$COMMIT^{tree}")
+          if [[ $merged != "$head" ]]; then
+            echo "::error::the head $COMMIT is behind $GITHUB_BASE_REF: merged, its tree is $merged, not the head's $head. Rebase the branch onto $GITHUB_BASE_REF and push."
+            exit 1
+          fi
+          echo "the merge commit's tree is the head's, $head"
       - name: Restore Mach9
         id: mach9
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -427,8 +446,10 @@ jobs:
           # Which of my three files this pull request can have changed, for the tests job: a file
           # counts as changed when the fork report lists a function, or when the change touches a
           # path that can reach it (a data-only change has no changed function). TESTS says the
-          # tests or the CI changed, and then everything runs. A push gets all four set: its tests
-          # job decides by FULL alone.
+          # tests or the CI changed, and then everything runs: any file under tests/gw2 or .github
+          # but the Markdown ones, and of this workflow what is left without its comment lines and
+          # its lint and publish jobs, which reach no test (jdrly/gw2-on-mac#228). A push gets all
+          # four set: its tests job decides by FULL alone.
           mkdir -p "$RUNNER_TEMP/selection"
           {
             for lib in ntdll winemac win32u; do
@@ -448,7 +469,14 @@ jobs:
             flag=1
             if [[ -n ${FORK:-} ]]; then
               flag=0
-              git -C "$SRC" diff --quiet "$FORK" "$COMMIT" -- tests/gw2 .github || flag=1
+              git -C "$SRC" diff --quiet "$FORK" "$COMMIT" -- tests/gw2 .github ':(exclude)*.md' \
+                ':(exclude).github/workflows/gw2.yml' || flag=1
+              # reach <commit>: its gw2.yml without comment lines and without the lint and publish jobs
+              reach() {
+                git -C "$SRC" show "$1:.github/workflows/gw2.yml" |
+                  awk '/^  (lint|publish):$/ { skip = 1; next } /^  [a-z][a-z0-9_-]*:$/ { skip = 0 } !skip && !/^[[:space:]]*#/'
+              }
+              [[ $(reach "$FORK") == "$(reach "$COMMIT")" ]] || flag=1
             fi
             echo "TESTS=$flag"
           } >"$RUNNER_TEMP/selection/selection.env"
