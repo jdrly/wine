@@ -75,13 +75,13 @@
 #   stand-in for arcdps's d3d11.dll: it has to fail with Wine's default order and pass with the app's
 #   compatdb rule for rundll32.exe (jdrly/gw2-on-mac#155). A push to gw2-on-mac runs only the
 #   prefix boot and smoke.exe, under the engine's ntdll.so and under mine, when a green pull
-#   request run tested the same tree, which Publish names. A push whose tree no such run tested
-#   runs every test. A pull request runs only the tests of the files it can have changed: the
-#   build job's selection.env says which of ntdll.so, winemac.so and win32u.so the fork report or
-#   the changed paths reach, and a change to tests/gw2 or .github runs everything
-#   (jdrly/gw2-on-mac#217), unless it changes only Markdown files, comment lines of this workflow
-#   or its lint and publish jobs (jdrly/gw2-on-mac#228). A new test step names the RUN_* of the
-#   files it tests in its if:.
+#   request run tested the same tree on a head that contains the push's parent, which Publish
+#   names (jdrly/gw2-on-mac#241). Any other push runs every test. A pull request runs only the
+#   tests of the files it can have changed: the build job's selection.env says which of ntdll.so,
+#   winemac.so and win32u.so the fork report or the changed paths reach, and a change to tests/gw2
+#   or .github runs everything (jdrly/gw2-on-mac#217), unless it changes only Markdown files,
+#   comment lines of this workflow or its lint and publish jobs (jdrly/gw2-on-mac#228). A new test
+#   step names the RUN_* of the files it tests in its if:.
 #   The tests job runs as lanes side by side, one job each (jdrly/gw2-on-mac#229): window (every
 #   step but the matrix, then the matrix's block 7), matrix-a and matrix-b (matrix.zsh's other
 #   blocks, cut in "Run them"), or smoke alone. The build job's last steps say which lanes a run
@@ -96,8 +96,8 @@
 # publish: after the others are green, packs ntdll-arm64-<commit>.tar.xz and
 #   macdrv-arm64-<commit>.tar.xz and prints their sha256. For a push to gw2-on-mac it adds both to
 #   the pre-release arm64-builds, the one release this workflow makes, never marked latest, keeps
-#   the 30 newest of each kind, and says which pull request's green run tested the same tree, or
-#   that none did. The pre-release this workflow filled before jdrly/gw2-on-mac#121 keeps the
+#   the 30 newest of each kind, and says which pull request's green run tested the same tree with
+#   the push's parent in its head, or that none did. The pre-release this workflow filled before jdrly/gw2-on-mac#121 keeps the
 #   archives of earlier commits under the names they had, and gets nothing more.
 name: GW2
 
@@ -511,8 +511,12 @@ jobs:
 
       # What the tests job owes, as this job's outputs. full: a pull request owes every test of
       # what it changed; a push owes them too, unless a green pull request run tested the same
-      # tree: then the smoke test is enough (jdrly/gw2-on-mac#214). A lookup that fails counts as
-      # "not tested". run_<file>: full, and the file, the tests or the CI changed
+      # tree: then the smoke test is enough (jdrly/gw2-on-mac#214). A pull request's run tests
+      # GitHub's merge of the head into gw2-on-mac, so the push's parent (gw2-on-mac before the
+      # push) also has to be an ancestor of the head: then every gw2-on-mac that run could have
+      # merged was already in the head. The tree alone isn't enough, because gw2-on-mac can gain a
+      # commit and revert it while the pull request waits (jdrly/gw2-on-mac#241). A lookup that
+      # fails counts as "not tested". run_<file>: full, and the file, the tests or the CI changed
       # (jdrly/gw2-on-mac#217). lanes: the tests job's lanes that have a step to run, as a JSON
       # list for its matrix (jdrly/gw2-on-mac#229): window for the steps with a window or a
       # program of their own and the matrix's block 7, matrix-a and matrix-b for its ntdll blocks,
@@ -526,9 +530,11 @@ jobs:
           full=1
           if [[ $GITHUB_EVENT_NAME != pull_request ]]; then
             tree=$(gh api "repos/$GH_REPO/commits/$COMMIT" -q .commit.tree.sha) || tree=""
+            parent=$(gh api "repos/$GH_REPO/commits/$COMMIT" -q '.parents[0].sha // empty') || parent=""
             while read -r pr head; do
-              [[ -n $pr && -n $tree ]] || continue
+              [[ -n $pr && -n $tree && -n $parent ]] || continue
               [[ $(gh api "repos/$GH_REPO/commits/$head" -q .commit.tree.sha) == "$tree" ]] || continue
+              [[ $(gh api "repos/$GH_REPO/compare/$parent...$head" -q .status) == ahead ]] || continue
               run=$(gh api "repos/$GH_REPO/actions/workflows/gw2.yml/runs?event=pull_request&status=success&head_sha=$head" \
                 -q '.workflow_runs[0].html_url // empty') || run=""
               if [[ -n $run ]]; then
@@ -1296,16 +1302,19 @@ jobs:
           echo "releases/latest: ${latest:-none}"
           [[ $latest != "$RELEASE" ]]
       # The push's run skips the matrix; the run of the pull request it merged ran it. That run counts
-      # if it was green and on a head whose tree is the pushed tree (a head up to date with
-      # gw2-on-mac, squashed). Says which, or that none did; it fails nothing.
+      # if it was green and on a head whose tree is the pushed tree and that contains the push's
+      # parent (a head up to date with gw2-on-mac, squashed), the build job's check
+      # (jdrly/gw2-on-mac#241). Says which, or that none did; it fails nothing.
       - name: Which pull request's run tested this tree
         if: github.event_name == 'push' && github.ref == 'refs/heads/gw2-on-mac'
         run: |
           tree=$(gh api "repos/$GH_REPO/commits/$COMMIT" -q .commit.tree.sha)
+          parent=$(gh api "repos/$GH_REPO/commits/$COMMIT" -q '.parents[0].sha // empty') || parent=""
           found=""
           while read -r pr head; do
-            [[ -n $pr ]] || continue
+            [[ -n $pr && -n $parent ]] || continue
             [[ $(gh api "repos/$GH_REPO/commits/$head" -q .commit.tree.sha) == "$tree" ]] || continue
+            [[ $(gh api "repos/$GH_REPO/compare/$parent...$head" -q .status) == ahead ]] || continue
             run=$(gh api "repos/$GH_REPO/actions/workflows/gw2.yml/runs?event=pull_request&status=success&head_sha=$head" \
               -q '.workflow_runs[0].html_url // empty')
             [[ -n $run ]] && found="pull request #$pr, head $head, the same tree: $run" && break
