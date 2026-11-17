@@ -16,7 +16,7 @@
  * set_cursor request of its own once the thread has set a cursor.
  *
  * With WINE_HEAT_COUNT=1 and WINE_HEAT_EXE=requests.exe it starts right after the dumper's first
- * block, so the calls fall in one 5 s block, then waits for the next and adds up this thread's
+ * block, so the calls fall in one block or two, then waits for the next and adds up this thread's
  * blocks in heat-requests-*.log: 1,010 set_cursor requests, all handle requests, 1,000 repeats and
  * none of the other flags; the messages 0x8001 100 times and 0x8002 50 times; at least 150
  * get_message and 100 set_queue_mask requests. With GW2_TEST_SETCURSOR_SKIPS=1, for my win32u.so
@@ -126,14 +126,28 @@ static void check_fex( const char *line, long long *jit )
     }
 }
 
+/* the end of one of this thread's blocks: the set_cursor requests its req lines leave out. Those
+ * lines are the block's twelve most frequent requests, so a block may leave set_cursor out only when
+ * it lists twelve, none of them less frequent than its set_cursor split line's handle requests,
+ * which then count them (jdrly/gw2-on-mac#234) */
+static long long unlisted_cursor( BOOL listed, long long reqs, long long least, long long handle )
+{
+    if (listed || !handle) return 0;
+    if (reqs < 12 || least < handle)
+        FAIL( "a block whose req lines leave out its %lld set_cursor handle requests lists %lld requests, the least %lld times",
+              handle, reqs, least );
+    return handle;
+}
+
 static void check_log(void)
 {
     char path[MAX_PATH * 2], want[64], line[512];
     long long blocks = 0, req_cursor = 0, req_message = 0, req_mask = 0, handle = 0, repeat = 0, others = 0;
     long long app1 = 0, app2 = 0, other = 0, internal = 0, poll = 0, nopoll = 0, fex_lines = 0, jit = 0;
+    long long reqs = 0, least = 0, block_handle = 0, unlisted = 0;  /* of the block being read */
     double cursor_ms = 0;
     BOOL mine = FALSE, skips = env_is( "GW2_TEST_SETCURSOR_SKIPS", "1" );
-    BOOL fex = env_is( "FEX_PROFILESTATS", "1" ), first = FALSE;
+    BOOL fex = env_is( "FEX_PROFILESTATS", "1" ), first = FALSE, listed = FALSE;
     long long want_cursor = skips ? ROUNDS * 2 : ROUNDS * (2 + A_RUN), want_repeat = skips ? 0 : ROUNDS * A_RUN;
     FILE *f;
 
@@ -147,6 +161,9 @@ static void check_log(void)
         first = FALSE;
         if (!strncmp( line, "requests thread ", 16 ))
         {
+            if (mine) unlisted += unlisted_cursor( listed, reqs, least, block_handle );
+            reqs = least = block_handle = 0;
+            listed = FALSE;
             if ((mine = !strncmp( line, want, strlen( want ) ))) blocks++;
             first = TRUE;
             continue;
@@ -163,8 +180,14 @@ static void check_log(void)
             continue;
         }
         if (!mine) continue;
+        if (!strncmp( line, "req ", 4 ))
+        {
+            long long n = _atoi64( strchr( line + 4, ' ' ) + 1 );
+            if (!reqs++ || n < least) least = n;
+        }
         if (!strncmp( line, "req set_cursor ", 15 ))
         {
+            listed = TRUE;
             req_cursor += _atoi64( line + 15 );
             cursor_ms += atof( strchr( line + 15, ' ' ) + 1 );
         }
@@ -172,6 +195,7 @@ static void check_log(void)
         else if (!strncmp( line, "req set_queue_mask ", 19 )) req_mask += _atoi64( line + 19 );
         else if (!strncmp( line, "set_cursor ", 11 ))
         {
+            block_handle += field( line, "handle" );
             handle += field( line, "handle" );
             repeat += field( line, "repeat" );
             others += field( line, "count" ) + field( line, "pos" ) + field( line, "clip" ) + field( line, "noclip" );
@@ -190,21 +214,22 @@ static void check_log(void)
         }
     }
     fclose( f );
+    if (mine) unlisted += unlisted_cursor( listed, reqs, least, block_handle );
 
-    printf( "gw2 test requests: %lld blocks of this thread; req set_cursor %lld (%.3f ms) get_message %lld "
+    printf( "gw2 test requests: %lld blocks of this thread; req set_cursor %lld (%.3f ms, %lld more in blocks that "
+            "leave it out) get_message %lld "
             "set_queue_mask %lld; set_cursor handle %lld repeat %lld other flags %lld; get_message internal %lld "
             "other %lld; message 0x8001 %lld 0x8002 %lld; set_queue_mask poll %lld nopoll %lld\n",
-            blocks, req_cursor, cursor_ms, req_message, req_mask, handle, repeat, others, internal, other,
+            blocks, req_cursor, cursor_ms, unlisted, req_message, req_mask, handle, repeat, others, internal, other,
             app1, app2, poll, nopoll );
     if (fex) printf( "gw2 test requests: %lld fex lines of this thread, jit %lld\n", fex_lines, jit );
     if (!blocks) FAIL( "no block of this thread: it isn't the game thread" );
     if (fex && (fex_lines != blocks || !jit))
         FAIL( "%lld fex lines in %lld blocks of this thread, jit %lld: each block needs one, and FEX compiled code",
               fex_lines, blocks, jit );
-    /* the splits count every request of a block, the req lines only a block's twelve most frequent,
-       where the 10 requests with skips may not be */
-    if (req_cursor != want_cursor && !(skips && !req_cursor))
-        FAIL( "%lld set_cursor requests, not %lld", req_cursor, want_cursor );
+    if (req_cursor + unlisted != want_cursor)
+        FAIL( "%lld set_cursor requests, %lld of them in blocks whose req lines leave it out, not %lld",
+              req_cursor + unlisted, unlisted, want_cursor );
     if (req_cursor && cursor_ms <= 0) FAIL( "no time for set_cursor" );
     if (handle != want_cursor || others) FAIL( "set_cursor: %lld handle requests, %lld with other flags", handle, others );
     if (repeat != want_repeat) FAIL( "%lld repeats, not %lld", repeat, want_repeat );
