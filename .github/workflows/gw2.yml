@@ -1309,7 +1309,7 @@ jobs:
         if: github.event_name == 'push' && github.ref == 'refs/heads/gw2-on-mac'
         run: |
           tree=$(gh api "repos/$GH_REPO/commits/$COMMIT" -q .commit.tree.sha)
-          parent=$(gh api "repos/$GH_REPO/commits/$COMMIT" -q '.parents[0].sha // empty')
+          parent=$(gh api "repos/$GH_REPO/commits/$COMMIT" -q '.parents[0].sha // empty') || parent=""
           found=""
           while read -r pr head; do
             [[ -n $pr && -n $parent ]] || continue
