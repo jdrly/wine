@@ -2,8 +2,7 @@
 
 My three files replace the engine's, so they have to be built from the commit the engine was
 built from, with the engine's configuration. This is the list of what moves when the engine does,
-in the order I'd do it. Line numbers are as of this file's last change; the names are what to
-search for.
+in the order I'd do it. Line numbers drift, so it names what to search for instead.
 
 ## 1. The new engine's Wine commit
 
@@ -28,49 +27,57 @@ the "Upstream has it" column for the rest.
 Rebase `gw2-on-mac` onto the new commit, with the first table of `UPSTREAM.md` as the list of
 hooks to carry over. Then each of these, with where its new value comes from:
 
-- `.github/workflows/gw2.yml:113`, `BASE_COMMIT`: the commit of step 1, and its comment's
+- `BASE_COMMIT` in `.github/workflows/gw2.yml`'s `env:`: the commit of step 1, and its comment's
   `wine-<version>-<n>-g<sha>`.
-- `gw2.yml:124-125`, `ENGINE_RUNNER` and `ENGINE_XCODE_VERSION`, with the comment above them: the
+- `ENGINE_RUNNER` and `ENGINE_XCODE_VERSION` in the same block, with the comment above them: the
   image and Xcode of Mach9's release run for the new tag (its run log names both).
-- `gw2.yml:119-120`, `RUNNER` and `XCODE_VERSION`: the engine's two if GitHub assigns that runner,
-  for the strict gate, otherwise the newest Xcode image my app builds with. See the last section.
-- `gw2.yml:126-127`, `LLVM_MINGW_VERSION` and `LLVM_MINGW_SHA256`: Mach9's `pins/redist.env` at
-  the new tag.
-- `gw2.yml:128-129`, `MACH9_VERSION` and `MACH9_SHA256`: the new tag, and the sha256 of its
+- `RUNNER` and `XCODE_VERSION`: the engine's two if GitHub assigns that runner, for the strict
+  gate, otherwise the newest Xcode image my app builds with. See the last section.
+- `LLVM_MINGW_VERSION` and `LLVM_MINGW_SHA256`: Mach9's `pins/redist.env` at the new tag.
+- `MACH9_VERSION` and `MACH9_SHA256`: the new tag, and the sha256 of its
   `wine-<tag>-macos-arm64.tar.xz`, computed from the download.
-- `gw2.yml:141`, `MACOSX_DEPLOYMENT_TARGET: "26.4"` in the build job: `MACOS_FLOOR` in Mach9's
+- `MACOSX_DEPLOYMENT_TARGET: "26.4"` in the build job's `env:`: `MACOS_FLOOR` in Mach9's
   `bin/lib/profile.sh`.
-- `.github/gw2/wine.zsh:54-74`, the configure arguments in `configure()`: Mach9's
-  `bin/build-wine.sh` and `bin/lib/profile.sh` at the new tag. `ac_cv_func_pipe2=no` follows the
-  deployment target. `SRC` and `BUILD` (`wine.zsh:26` and the build job's env) are Mach9's CI
-  paths, which reach the file through its debug map; check them against the release run.
-- `wine.zsh:44`, `core.abbrev 10`: the number of hex digits after `-g` in the string of step 1.
-- `gw2.yml:251`, the comment on FreeType: the version in Mach9's new release run. The build takes
-  whatever Homebrew has and names it in `VERSION`.
+- The configure arguments in `configure()` of `.github/gw2/wine.zsh`: Mach9's `bin/build-wine.sh`
+  and `bin/lib/profile.sh` at the new tag. `ac_cv_func_pipe2=no` follows the deployment target.
+  `SRC` and `BUILD` (their defaults in `wine.zsh` and the build job's `env:`) are Mach9's CI paths,
+  which reach the file through its debug map; check them against the release run.
+- `core.abbrev 10` in `wine.zsh`: the number of hex digits after `-g` in the string of step 1.
+- The comment on FreeType in the build job's step "Install Homebrew's bison, freetype, gnutls and
+  SDL": the version in Mach9's new release run. The build takes whatever Homebrew has and names it
+  in `VERSION`.
 - `dlls/ntdll/unix/heatreq.h`, the server's request list: run
   `python3 -I .github/gw2/heatreq.py write include/wine/server_protocol.h dlls/ntdll/unix/heatreq.h`
   after the rebase. Lint fails until it matches.
-- `dlls/ntdll/unix/heatprof.h:40-42`, `HEAT_FEX_PIN_GUID`, `HEAT_FEX_PIN_AGE` and
-  `HEAT_FEX_PIN_SIZE`: the CodeView GUID, age and SizeOfImage of the new engine's
+- `HEAT_FEX_PIN_GUID`, `HEAT_FEX_PIN_AGE` and `HEAT_FEX_PIN_SIZE` in
+  `dlls/ntdll/unix/heatprof.h`: the CodeView GUID, age and SizeOfImage of the new engine's
   `wine/lib/wine/aarch64-windows/libarm64ecfex.dll`, and the sha256 in the comment above them. If the
   new engine has another FEX, check the layouts in `heatprof.h` (`HEAT_FEX_STATE_*`,
   `HEAT_FEX_TAIL_*`) and `heatfex.h` (`HEAT_FEX_STATS_*`) against its source too. Until the pin
   moves, the sampler refuses the new FEX and stays off.
-- `tests/gw2/matrix.zsh:258`, the same GUID as hex, for the sampler's test.
+- The same GUID as hex in `tests/gw2/matrix.zsh`, on the line that names `HEAT_FEX_PIN_GUID`, for
+  the sampler's test.
 
 ## 4. Outside this repository
 
-- My FEX fork, `.github/workflows/gw2.yml`: `BASE_COMMIT` and `BASE_VERSION` (lines 117-118), the
-  FEX the new engine has, and `LLVM_MINGW_VERSION`, `MACH9_VERSION` and `MACH9_COMMIT` (128-133).
-- My DXMT fork, `.github/workflows/gw2.yml:63-66`: `LLVM_MINGW_VERSION`, `LLVM_MINGW_SHA256`,
-  `MACH9_VERSION` and `MACH9_SHA256`.
-- My app, on its `arm64` branch: the `ENGINE_*` block of `src/gw2om.sh:129-157`, which its
-  comment says to bump together. The name, title, URL, the asset's API URL (its id), size and
-  sha256 come from the release; the Wine, FEX and DXMT commits from the release page's Components
-  list; the loader's, `ntdll.so`'s, `winemac.so`'s, `win32u.so`'s, `d3d11.dll`'s, `winemetal.so`'s
-  and FEX's hashes from the unpacked tarball. An old hash makes `engine_matches` refuse the new
-  engine. `MACOS_MIN` (line 159) follows the loader's `Info.plist`. Then the `engine:` lines of `.github/workflows/checks.yml:196,215`, the
-  engine's name, commits and URL in `scripts/test-sandbox.sh:283,288`, and `README.md:398-399`.
+My DXMT fork keeps the same list for its side, with my app's items too, in
+[`docs/gw2/README.md`, "Moving to a new Mach9"](https://github.com/jdrly/dxmt/blob/gw2-on-mac/docs/gw2/README.md#moving-to-a-new-mach9)
+on its `gw2-on-mac`. In short:
+
+- My FEX fork, the `env:` of `.github/workflows/gw2.yml`: `BASE_COMMIT` and `BASE_VERSION`, the
+  FEX the new engine has, and `LLVM_MINGW_VERSION`, `LLVM_MINGW_SHA256`, `MACH9_VERSION`,
+  `MACH9_SHA256`, `MACH9_COMMIT` and `FEX_SMOKE_SHA256`, the sha256 of `smoke/fex.c` at that commit.
+- My DXMT fork, the `env:` of `.github/workflows/gw2.yml`: `LLVM_MINGW_VERSION`,
+  `LLVM_MINGW_SHA256`, `MACH9_VERSION` and `MACH9_SHA256`.
+- My app, on its `arm64` branch: the `ENGINE_*` block of `src/gw2om.sh`, which its comment says
+  to bump together. The name, title, URL, the asset's API URL (its id), size and sha256 come from
+  the release; the Wine, FEX and DXMT commits from the release page's Components list; the
+  loader's, `ntdll.so`'s, `winemac.so`'s, `win32u.so`'s, `d3d11.dll`'s, `winemetal.so`'s and FEX's
+  hashes from the unpacked tarball. An old hash makes `engine_matches` refuse the new engine.
+  `MACOS_MIN`, right after the block, follows the loader's `Info.plist`. Then the two `engine:`
+  lines of `.github/workflows/checks.yml`; in `scripts/test-sandbox.sh`, `ENGINE_WINE`,
+  `ENGINE_FEX` and every check that names the engine's tag, URL, size, sha256 or commits (search
+  for `v0.3.1` and the three commits); and the engine paragraph of `README.md`'s "The pieces".
 
 ## 5. What the gates hold my files to then
 
