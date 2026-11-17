@@ -8,16 +8,10 @@
 # to the structural gate: the engine's exports and where each points, imports, libraries, install
 # name, rpaths, minos, segments, sections and functions by name, with the functions and sections
 # whose bytes differ only a report (.github/gw2/compare.py). Going back is one edit: RUNNER and
-# XCODE_VERSION below to the engine's values. Until 2026-11-12 it ran on macos-26 with Xcode 26.6,
-# and my build of the engine's commit was the engine's ntdll.so and winemac.so byte for byte in the
-# header, every section of every loaded segment, the load commands and the link edit data (run
-# 43109476509 of pull request #1 and run 43156131896 of #10). Since 2026-11-12 it runs on GitHub's
-# Xcode 27 image: no macos-26 runner was assigned all evening, and I have no Mac of my own for it.
-# Xcode 27's clang isn't the engine's, so my files can't be the engine's byte for byte. The patched
-# compare is the same either way, my base build against this commit's from one run and one
-# toolchain, and the tests on the engine are the proof that files from the other compiler work.
-# The flags stay the engine's: Mach9 builds its unix side with -g -O2, and my build's compile
-# commands are those of Mach9's release run (-O0 was the CrossOver engine's).
+# XCODE_VERSION below to the engine's values. Why my build runs on another runner than the
+# engine's, and what that costs the gate, is in .github/gw2/MOVING.md. The flags stay the
+# engine's: Mach9 builds its unix side with -g -O2, and my build's compile commands are those of
+# Mach9's release run (-O0 was the CrossOver engine's).
 #
 # build: one Wine tree configured as Mach9 configures its own (.github/gw2/wine.zsh), in the
 #   engine's paths, with Xcode $XCODE_VERSION, macOS $MACOSX_DEPLOYMENT_TARGET, llvm-mingw
@@ -85,7 +79,8 @@
 #   the changed paths reach, and a change to tests/gw2 or .github runs everything
 #   (jdrly/gw2-on-mac#217). A new test step names the RUN_* of the files it tests in its if:.
 # lint: actionlint (.github/actionlint.yaml names the xcode-27 label), the Python scripts compile,
-#   and heatreq.h's request list is enum request's (.github/gw2/heatreq.py).
+#   .github/gw2/SWITCHES.md names exactly the switches the sources read, and heatreq.h's request
+#   list is enum request's (.github/gw2/heatreq.py).
 # publish: after the others are green, packs ntdll-arm64-<commit>.tar.xz and
 #   macdrv-arm64-<commit>.tar.xz and prints their sha256. For a push to gw2-on-mac it adds both to
 #   the pre-release arm64-builds, the one release this workflow makes, never marked latest, keeps
@@ -1087,6 +1082,8 @@ jobs:
             .github
             include/wine
             dlls/ntdll/unix
+            dlls/winemac.drv
+            dlls/win32u
           persist-credentials: false
       - name: actionlint
         env:
@@ -1100,6 +1097,13 @@ jobs:
           "$RUNNER_TEMP/actionlint" -color .github/workflows/gw2.yml
       - name: Python
         run: python3 -I -m py_compile .github/gw2/compare.py .github/gw2/heatreq.py
+      # .github/gw2/SWITCHES.md names every switch the sources read, and no other. The sources are
+      # the Stage step's, so the index covers what VERSION's "switches:" line can name.
+      - name: The switch index
+        run: |
+          # shellcheck disable=SC2016 # the backticks are the table's, not a command
+          diff <(grep -ohE 'getenv\( *"WINE_(HEAT|MACDRV|WIN32U)_[A-Z0-9_]+" *\)' dlls/ntdll/unix/*.[ch] dlls/winemac.drv/*.[chm] dlls/win32u/*.[ch] dlls/win32u/dibdrv/*.[ch] | grep -oE 'WINE_[A-Z0-9_]+' | sort -u) \
+               <(grep -oE '^\| `WINE_[A-Z0-9_]+`' .github/gw2/SWITCHES.md | grep -oE 'WINE_[A-Z0-9_]+' | sort -u)
       # my ntdll.so's list of the server's requests is the enum's (jdrly/gw2-on-mac#218)
       - name: heatreq.h
         run: python3 -I .github/gw2/heatreq.py check include/wine/server_protocol.h dlls/ntdll/unix/heatreq.h
