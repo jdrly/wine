@@ -1353,20 +1353,32 @@ jobs:
       # The push's run skips the matrix; the run of the pull request it merged ran it. That run counts
       # if it was green and on a head whose tree is the pushed tree and that contains the push's
       # parent (a head up to date with gw2-on-mac, squashed), the build job's check
-      # (jdrly/gw2-on-mac#241). Says which, or that none did; it fails nothing.
+      # (jdrly/gw2-on-mac#241). Says which, or that none did; it fails nothing. A failed lookup
+      # (jdrly/gw2-on-mac#254) is a warning, and the pull request it was for doesn't count.
       - name: Which pull request's run tested this tree
         if: github.event_name == 'push' && github.ref == 'refs/heads/gw2-on-mac'
         run: |
-          tree=$(gh api "repos/$GH_REPO/commits/$COMMIT" -q .commit.tree.sha)
-          parent=$(gh api "repos/$GH_REPO/commits/$COMMIT" -q '.parents[0].sha // empty') || parent=""
+          failed=""
+          # a failed gh api call prints the error's body on stdout, so the variable is emptied
+          tree=$(gh api "repos/$GH_REPO/commits/$COMMIT" -q .commit.tree.sha) || { failed+="${failed:+, }$COMMIT's tree"; tree=""; }
+          parent=$(gh api "repos/$GH_REPO/commits/$COMMIT" -q '.parents[0].sha // empty') ||
+            { failed+="${failed:+, }$COMMIT's parent"; parent=""; }
+          pulls=$(gh api "repos/$GH_REPO/commits/$COMMIT/pulls" -q '.[] | select(.merged_at != null) | "\(.number) \(.head.sha)"') ||
+            { failed+="${failed:+, }$COMMIT's pull requests"; pulls=""; }
           found=""
           while read -r pr head; do
-            [[ -n $pr && -n $parent ]] || continue
-            [[ $(gh api "repos/$GH_REPO/commits/$head" -q .commit.tree.sha) == "$tree" ]] || continue
-            [[ $(gh api "repos/$GH_REPO/compare/$parent...$head" -q .status) == ahead ]] || continue
+            [[ -n $pr && -n $tree && -n $parent ]] || continue
+            pr_tree=$(gh api "repos/$GH_REPO/commits/$head" -q .commit.tree.sha) || { failed+="${failed:+, }#$pr's tree"; continue; }
+            [[ $pr_tree == "$tree" ]] || continue
+            status=$(gh api "repos/$GH_REPO/compare/$parent...$head" -q .status) || { failed+="${failed:+, }#$pr's compare"; continue; }
+            [[ $status == ahead ]] || continue
             run=$(gh api "repos/$GH_REPO/actions/workflows/gw2.yml/runs?event=pull_request&status=success&head_sha=$head" \
-              -q '.workflow_runs[0].html_url // empty')
+              -q '.workflow_runs[0].html_url // empty') || { failed+="${failed:+, }#$pr's runs"; continue; }
             [[ -n $run ]] && found="pull request #$pr, head $head, the same tree: $run" && break
-          done < <(gh api "repos/$GH_REPO/commits/$COMMIT/pulls" -q '.[] | select(.merged_at != null) | "\(.number) \(.head.sha)"')
-          [[ -n $found ]] || found="no green run of a pull request tested this tree"
-          echo "The matrix for $COMMIT (tree $tree): $found" | tee -a "$GITHUB_STEP_SUMMARY"
+          done <<< "$pulls"
+          if [[ -z $found ]]; then
+            found="no green run of a pull request tested this tree"
+            [[ -z $failed ]] || found="no tested pull request found, a lookup failed"
+          fi
+          [[ -z $failed ]] || echo "::warning title=A lookup failed::the lookup of $failed failed, see gh's errors above"
+          echo "The matrix for $COMMIT (tree ${tree:-unknown}): $found" | tee -a "$GITHUB_STEP_SUMMARY"
