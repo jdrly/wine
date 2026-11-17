@@ -68,6 +68,16 @@ stop() {
   "$wine/bin/wineserver" -w 2>/dev/null || true
 }
 
+# A prefix that isn't there yet starts as an APFS clone of the booted prefix that
+# $GW2_TEST_TEMPLATES holds for this engine tree, when it holds one (jdrly/gw2-on-mac#239): on the
+# runner the boot of a new prefix took 11 to 25 s more than the boot of one that exists. The boot
+# below then runs in the clone. A tree's name is its folder's, <name>/wine.
+template=${GW2_TEST_TEMPLATES:+$GW2_TEST_TEMPLATES/${wine:h:t}}
+if [[ ! -e $prefix && -n $template && -d $template ]]; then
+  cp -Rc "$template" "$prefix"
+  rm -f "$prefix"/*.log(N)
+  print "      the prefix is a clone of ${template:t}'s booted one"
+fi
 mkdir -p "$prefix"
 rc=0
 integer t0=$SECONDS

@@ -86,7 +86,9 @@
 #   step but the matrix, then the matrix's block 7), matrix-a and matrix-b (matrix.zsh's other
 #   blocks, cut in "Run them"), or smoke alone. The build job's last steps say which lanes a run
 #   owes, and build the test programs once for all of them. A new test step names its lane in its
-#   if: as well, and a new matrix block goes into one lane's list in "Run them".
+#   if: as well, and a new matrix block goes into one lane's list in "Run them". Each lane but
+#   smoke first boots one prefix for each engine tree it uses, and run.zsh starts every later
+#   prefix as an APFS clone of its tree's (jdrly/gw2-on-mac#239).
 # lint: actionlint (.github/actionlint.yaml names the xcode-27 label), the Python scripts compile,
 #   compare.py's self-test on the engine's files (every address-bearing instruction changed in turn),
 #   .github/gw2/SWITCHES.md names exactly the switches the sources read, and heatreq.h's request
@@ -763,6 +765,31 @@ jobs:
           fi
           "$RUNNER_TEMP/mine/wine/bin/wine" --version
           ls "$RUNNER_TEMP/tests" "$RUNNER_TEMP/tests/addon" "$RUNNER_TEMP/attach"
+      # One booted prefix for each engine tree this lane uses, side by side, with smoke.exe run in
+      # each. run.zsh starts every later prefix as a clone of its tree's (GW2_TEST_TEMPLATES), so a
+      # lane boots a new prefix once per tree and not once per run (jdrly/gw2-on-mac#239). The
+      # matrix lanes use engine and mine; window, with block 7, all five. The smoke lane boots its
+      # own two.
+      - name: A booted prefix for each engine tree
+        if: matrix.lane != 'smoke'
+        run: |
+          trees=(engine mine)
+          [[ $LANE == window ]] && trees+=(macdrv both)
+          [[ $LANE == window && -d $RUNNER_TEMP/win32u ]] && trees+=(win32u)
+          pids=()
+          for tree in "${trees[@]}"; do
+            tests/gw2/run.zsh "$RUNNER_TEMP/$tree/wine" "$RUNNER_TEMP/templates/$tree" "$RUNNER_TEMP/tests/smoke.exe" \
+              >"$RUNNER_TEMP/template-$tree.txt" 2>&1 &
+            pids+=($!)
+          done
+          status=0
+          for i in "${!pids[@]}"; do
+            wait "${pids[$i]}" || status=1
+            echo "== ${trees[$i]}"
+            cat "$RUNNER_TEMP/template-${trees[$i]}.txt"
+          done
+          echo "GW2_TEST_TEMPLATES=$RUNNER_TEMP/templates" >>"$GITHUB_ENV"
+          exit "$status"
       # whether the Mac driver starts on this runner, with my winemac.so in the engine (matrix.zsh
       # runs window.exe under the engine's own as well)
       - name: The Mac driver on the runner
