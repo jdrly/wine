@@ -8,13 +8,15 @@
 # 1. wakes.exe under mine, as WINE_HEAT_EXE with WINE_HEAT_COUNT=1, in each mode (off, one, skip,
 #    one,skip), three runs each. The modes run side by side, each in a prefix of its own.
 #    Blocks 1, 1b, 3 and 4 set WINE_HEAT_DUMP_MS=500, so their programs wait 1.5 s for the
-#    counters, not 6.
+#    counters, not 6. Block 6's requests runs and block 7 set 1000: requests.exe makes its calls
+#    within one block, about 0.1 s of them, and peekyield.exe waits for five rewrites a run.
 # 1b. evpool.exe under mine, as WINE_HEAT_EXE with WINE_HEAT_COUNT=1, with WINE_HEAT_EVPOOL off, 1
 #    and 1,mask, three runs each, side by side (jdrly/gw2-on-mac#42).
 # 2. Every program once more, side by side: under the engine's ntdll.so; under mine with no
 #    WINE_HEAT_* variable; under mine with the variables set but WINE_HEAT_EXE naming another
 #    program. Neither of the last two may write a counters file. The engine skips the programs in
-#    $engine_bugs, which show a bug of its file. None runs leftover.exe, which fails its run on
+#    $engine_bugs, which show a bug of its file. mutexall stops at 20,000 wait-alls here, as in
+#    block 3, not after its 20 s. None runs leftover.exe, which fails its run on
 #    purpose (the workflow's step for jdrly/gw2-on-mac#128 runs it), rundll.exe, which needs a
 #    compatdb rule to pass (the workflow's step for jdrly/gw2-on-mac#155 runs it), or modeset.exe,
 #    which fails under the engine's win32u.so, which all three have (the workflow's step for
@@ -112,7 +114,7 @@ quiet() {
   mkdir -p "$log"
   env -u WINE_HEAT_COUNT -u WINE_HEAT_WAKE -u WINE_HEAT_EVPOOL -u WINE_HEAT_SPIN -u WINE_HEAT_PROF -u WINE_HEAT_EXE -u WINE_HEAT_LOG -u WINE_HEAT_DUMP_MS \
     -u WINE_WIN32U_SETCURSOR -u WINE_WIN32U_PEEK_YIELD -u GW2_TEST_SETCURSOR_SKIPS -u GW2_TEST_PEEK_NO_YIELD "$@" \
-    GW2_TEST_PRODUCER_SECONDS=20 GW2_TEST_SECONDS=300 \
+    GW2_TEST_PRODUCER_SECONDS=20 GW2_TEST_WAIT_ALLS=20000 GW2_TEST_SECONDS=300 \
     "$run" "$wine" "$work/prefix-$name" $programs
   left=("$log"/*(N) /tmp/heat-*(N))
   if (( ${#left} )); then
@@ -303,27 +305,28 @@ requests() {
     if (( n < 3 )); then fex=(FEX_PROFILESTATS=1); fi
     env -u WINE_HEAT_WAKE -u WINE_HEAT_EVPOOL -u WINE_HEAT_SPIN -u WINE_HEAT_PROF \
       -u WINE_WIN32U_SETCURSOR -u WINE_WIN32U_PEEK_YIELD -u GW2_TEST_SETCURSOR_SKIPS -u GW2_TEST_PEEK_NO_YIELD \
-      -u FEX_PROFILESTATS WINE_HEAT_EXE=requests.exe WINE_HEAT_COUNT=1 WINE_HEAT_LOG=$log $fex \
+      -u FEX_PROFILESTATS WINE_HEAT_EXE=requests.exe WINE_HEAT_COUNT=1 WINE_HEAT_DUMP_MS=1000 WINE_HEAT_LOG=$log $fex \
       GW2_TEST_SECONDS=300 "$run" "$mine" "$work/prefix-requests" "$exes/requests.exe"
   done
 }
 
 # jdrly/gw2-on-mac#99: timers beside it. It checks counts only, no rates. Block 2 ran it without counting.
+# timers <n>: one run, in a prefix of its own. The three run side by side: a run mostly waits for
+# three of the dumper's blocks, which stay 5 s here, since its first case needs its three threads'
+# requests in one block.
 timers() {
-  local n log
-  for n in 1 2 3; do
-    print -r -- "run $n"
-    log=$work/log-timers-$n
-    mkdir -p "$log"
-    env -u WINE_HEAT_WAKE -u WINE_HEAT_EVPOOL -u WINE_HEAT_SPIN -u WINE_HEAT_PROF \
-      -u WINE_WIN32U_SETCURSOR -u WINE_WIN32U_PEEK_YIELD -u GW2_TEST_SETCURSOR_SKIPS -u GW2_TEST_PEEK_NO_YIELD \
-      WINE_HEAT_EXE=timers.exe WINE_HEAT_COUNT=1 WINE_HEAT_LOG=$log \
-      GW2_TEST_SECONDS=300 "$run" "$mine" "$work/prefix-timers" "$exes/timers.exe"
-  done
+  local n=$1 log=$work/log-timers-$1
+  mkdir -p "$log"
+  env -u WINE_HEAT_WAKE -u WINE_HEAT_EVPOOL -u WINE_HEAT_SPIN -u WINE_HEAT_PROF -u WINE_HEAT_DUMP_MS \
+    -u WINE_WIN32U_SETCURSOR -u WINE_WIN32U_PEEK_YIELD -u GW2_TEST_SETCURSOR_SKIPS -u GW2_TEST_PEEK_NO_YIELD \
+    WINE_HEAT_EXE=timers.exe WINE_HEAT_COUNT=1 WINE_HEAT_LOG=$log \
+    GW2_TEST_SECONDS=300 "$run" "$mine" "$work/prefix-timers-$n" "$exes/timers.exe"
 }
 
 side requests requests
-side timers timers
+for n in 1 2 3; do
+  side timers-$n timers $n
+done
 mkdir -p "$work/log-prof-refused"
 side prof-refused env -u WINE_HEAT_COUNT -u WINE_HEAT_WAKE -u WINE_HEAT_EVPOOL -u WINE_HEAT_SPIN -u WINE_HEAT_PROF_FEX \
   WINE_HEAT_EXE=prof.exe WINE_HEAT_PROF=1 GW2_TEST_PROF_REFUSED=1 WINE_HEAT_LOG=$work/log-prof-refused GW2_TEST_SECONDS=300 \
@@ -347,7 +350,7 @@ win32u_run() {
       -u WINE_HEAT_EXE -u WINE_HEAT_COUNT -u WINE_WIN32U_SETCURSOR -u WINE_WIN32U_PEEK_YIELD \
       -u GW2_TEST_SETCURSOR_SKIPS -u GW2_TEST_PEEK_NO_YIELD "$@" \
       ${${exe:#setcursor}:+WINE_HEAT_EXE=$exe.exe} ${${exe:#setcursor}:+WINE_HEAT_COUNT=1} \
-      WINE_HEAT_LOG=$work/log-$exe-$name GW2_TEST_SECONDS=300 \
+      WINE_HEAT_LOG=$work/log-$exe-$name WINE_HEAT_DUMP_MS=1000 GW2_TEST_SECONDS=300 \
       "$run" "$wine" "$work/prefix-win32u-$name" "$exes/$exe.exe" || return 1
   done
 }

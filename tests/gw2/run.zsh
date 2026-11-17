@@ -15,7 +15,8 @@
 # and the wineserver ends those. The variable alone doesn't do: Wine rewrites what ps reads, and
 # on GitHub's runner ps -E showed it for none of Wine's processes (jdrly/FEX run 43297396698).
 # The groups also keep the runs matrix.zsh starts side by side under one engine apart. Ends what
-# is left by pid. Prints one line per program and the log of each that failed; exits 1 if any did.
+# is left by pid. Prints one line per program, with the seconds it took on a line of its own, and
+# the log of each that failed; exits 1 if any did.
 emulate -L zsh
 setopt err_exit pipe_fail no_unset extended_glob
 
@@ -69,6 +70,7 @@ stop() {
 
 mkdir -p "$prefix"
 rc=0
+integer t0=$SECONDS
 # the prefix boot runs wineboot, which took 16 s in Mach9's release run
 run_limited 600 "$prefix/boot.log" "$wine/bin/wine" cmd /c exit || rc=$?
 if (( rc )); then
@@ -78,9 +80,11 @@ if (( rc )); then
   exit 1
 fi
 print "ok    the prefix boot"
+print "      took $(( SECONDS - t0 )) s"
 
 for exe in "$@"; do
   name=${exe:t:r} log=$prefix/${exe:t:r}.log rc=0
+  t0=$SECONDS
   run_limited ${GW2_TEST_SECONDS:-120} "$log" "$wine/bin/wine" "${exe:A}" || rc=$?
   # grep without -q, which would end the pipe early and fail it under pipe_fail
   if (( rc == 0 )) && tr -d '\r' <"$log" | grep -xF "gw2 test $name: passed" >/dev/null; then
@@ -92,6 +96,7 @@ for exe in "$@"; do
     sed 's/^/      /' "$log"
     failed+=1
   fi
+  print "      took $(( SECONDS - t0 )) s"
 done
 
 stop
