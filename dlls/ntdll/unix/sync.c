@@ -884,10 +884,16 @@ extern NTSTATUS check_signal_access( struct inproc_sync *sync )
  * wait or a set; it may not be cached at all */
 BOOL heat_inproc_sync_idle( HANDLE handle )
 {
-    unsigned int entry, idx = inproc_sync_handle_to_index( handle, &entry );
+    unsigned int spare, entry, idx = inproc_sync_handle_to_index( handle, &entry );
+    struct inproc_sync *cache;
 
     if (entry >= INPROC_SYNC_CACHE_ENTRIES || !inproc_sync_cache[entry]) return TRUE;
-    return InterlockedCompareExchange( &inproc_sync_cache[entry][idx].refcount, 0, 0 ) <= 1;
+    cache = &inproc_sync_cache[entry][idx];
+    /* an entry that still holds a closed object caches the handle in the spare it names, for the
+     * handle's whole life (since Mach9 0.4.0) */
+    spare = __atomic_load_n( &cache->closed, __ATOMIC_ACQUIRE ) >> 1;
+    if (spare) cache = &inproc_sync_spares[spare - 1];
+    return InterlockedCompareExchange( &cache->refcount, 0, 0 ) <= 1;
 }
 
 /* caller must hold fd_cache_mutex */
