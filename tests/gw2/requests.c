@@ -16,11 +16,13 @@
  * set_cursor request of its own once the thread has set a cursor.
  *
  * With WINE_HEAT_COUNT=1 and WINE_HEAT_EXE=requests.exe it starts right after the dumper's first
- * block, so the calls fall in one block or two, then waits for the next and adds up this thread's
- * blocks in heat-requests-*.log: 1,010 set_cursor requests, all handle requests, 1,000 repeats and
- * none of the other flags; the messages 0x8001 100 times and 0x8002 50 times; at least 150
- * get_message and 100 set_queue_mask requests. With GW2_TEST_SETCURSOR_SKIPS=1, for my win32u.so
- * with WINE_WIN32U_SETCURSOR=shm (jdrly/gw2-on-mac#61), the repeats make no request: 10 set_cursor
+ * block. The calls can span several blocks, since the tests set a short dump period
+ * (WINE_HEAT_DUMP_MS: 1 s in matrix.zsh, 5 s unless set). Then it waits for the first block
+ * written after the calls, at most one period on, and adds up this thread's blocks in
+ * heat-requests-*.log: 1,010 set_cursor requests, all handle requests, 1,000 repeats and none of
+ * the other flags; the messages 0x8001 100 times and 0x8002 50 times; at least 150 get_message and
+ * 100 set_queue_mask requests. With GW2_TEST_SETCURSOR_SKIPS=1, for my win32u.so with
+ * WINE_WIN32U_SETCURSOR=shm (jdrly/gw2-on-mac#61), the repeats make no request: 10 set_cursor
  * requests, each run's first call, and 0 repeats.
  *
  * With FEX_PROFILESTATS=1 as well (jdrly/gw2-on-mac#111), each of this thread's blocks has FEX's
@@ -291,7 +293,7 @@ int main(void)
 
     if (counting)
     {
-        /* a block written after the calls, at most 5 s on */
+        /* a block written after the calls, at most one dump period on */
         for (size = log_size( path ), start = GetTickCount(); log_size( path ) == size; Sleep( 20 ))
             if (GetTickCount() - start > 15000) FAIL( "no block in 15 s after the calls" );
         check_log();
