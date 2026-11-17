@@ -51,6 +51,8 @@
 # 8. (jdrly/gw2-on-mac#101) timeout three runs under the engine's ntdll.so and three under mine.
 # Prints each run's lines and exits 1 if any failed.
 # GW2_MATRIX_BLOCKS picks the blocks: "ntdll" for 1 to 6 and 8, "win32u" for 7; both by default.
+# In place of "ntdll" it takes the blocks' own names, 1, 1b, 2, 3, 3b, 4, 5, 6 and 8, for the
+# workflow's lanes. 6 needs 5 named with it: it runs under the clone block 5 makes.
 emulate -L zsh
 setopt err_exit pipe_fail no_unset extended_glob
 
@@ -59,10 +61,22 @@ engine=${1:A} mine=${2:A} exes=${3:A} work=${4:A} win32u=${5:+${5:A}}
 run=${0:A:h}/run.zsh
 mkdir -p "$work"
 integer failed=0
-# GW2_MATRIX_BLOCKS: which blocks run, "ntdll" (1 to 6 and 8) and "win32u" (7). Both by default.
-# The workflow leaves ntdll out for a pull request that doesn't change my ntdll.so.
+# GW2_MATRIX_BLOCKS: which blocks run, "ntdll" (1 to 6 and 8) or their own names, and "win32u"
+# (7). Both by default. Each of the workflow's lanes names its own blocks, and none of the ntdll
+# ones for a pull request that doesn't change my ntdll.so.
 blocks=(${=GW2_MATRIX_BLOCKS-ntdll win32u})
 pids=() names=()
+
+# want <block>: whether the ntdll block <block> runs: GW2_MATRIX_BLOCKS names it, or "ntdll"
+want() { (( ${blocks[(Ie)ntdll]} || ${blocks[(Ie)$1]} )) }
+# a name of no block would run nothing in its place, and no step would go red for it
+for b in $blocks; do
+  [[ $b == (ntdll|win32u|1|1b|2|3|3b|4|5|6|8) ]] || { print -u2 "matrix.zsh: there is no block $b"; exit 2 }
+done
+if want 6 && ! want 5; then
+  print -u2 "matrix.zsh: block 6 needs block 5 with it"
+  exit 2
+fi
 
 # side <name> <command>...: start it in the background, its output in $work/<name>.txt
 side() {
@@ -125,13 +139,15 @@ quiet() {
 }
 
 # blocks 1 to 6, my ntdll.so
-if (( ${blocks[(I)ntdll]} )); then
+if want 1; then
 for m in off one skip one,skip; do
   mkdir -p "$work"/log-$m-{1,2,3}
   side "wake=$m" mode $m
 done
 collect
+fi
 
+if want 1b; then
 # evpool <mode>: three runs of evpool.exe with counting and WINE_HEAT_EVPOOL=<mode>
 evpool() {
   local m=$1 n
@@ -147,17 +163,21 @@ for m in off 1 1,mask; do
   side "evpool=$m" evpool $m
 done
 collect
+fi
 
+if want 2; then
 side engine quiet engine "$engine" "$work/log-engine" WINE_HEAT_LOG=$work/log-engine
 side unset quiet unset "$mine" "$work/log-unset"
 side other quiet other "$mine" "$work/log-other" WINE_HEAT_EXE=other.exe WINE_HEAT_COUNT=1 \
   WINE_HEAT_WAKE=one,skip WINE_HEAT_EVPOOL=1 WINE_HEAT_SPIN=lock=20,event=30,sem=5 WINE_HEAT_PROF=1 FEX_PROFILESTATS=1 \
   WINE_HEAT_LOG=$work/log-other
 collect
+fi
 
 # 3. jdrly/gw2-on-mac#44
 
 # engine_bug <program> <line>: three runs under the engine's ntdll.so, each failing with <line>
+# (blocks 3 and 3b)
 engine_bug() {
   local exe=$exes/$1.exe line=$2 out rc=0
   integer n
@@ -192,12 +212,14 @@ unreg() {
   done
 }
 
+if want 3; then
 side mutexall-engine engine_bug mutexall "another thread took the mutex its owner held"
 side mutexall-mine env -u WINE_HEAT_COUNT -u WINE_HEAT_WAKE -u WINE_HEAT_EXE -u WINE_HEAT_LOG GW2_TEST_WAIT_ALLS=20000 GW2_TEST_SECONDS=300 \
   "$run" "$mine" "$work/prefix-mutexall-mine" "$exes/mutexall.exe" "$exes/mutexall.exe" "$exes/mutexall.exe"
 side unreg-engine unreg engine "$engine"
 side unreg-mine unreg mine "$mine"
 collect
+fi
 
 # 3b. jdrly/gw2-on-mac#219: putback three runs under the engine's ntdll.so, each of which has to
 # fail on the wake its wait-all loses, and three under mine in each WINE_HEAT_WAKE mode, which
@@ -208,11 +230,13 @@ putback() {
     "$run" "$mine" "$work/prefix-putback-$m" "$exes/putback.exe" "$exes/putback.exe" "$exes/putback.exe"
 }
 
+if want 3b; then
 side putback-engine engine_bug putback "the waiter slept on with the token put back"
 for m in off one skip one,skip; do
   side "putback=$m" putback $m
 done
 collect
+fi
 
 # 4. jdrly/gw2-on-mac#45
 
@@ -231,6 +255,7 @@ spin() {
 
 # one mode at a time: a spin hits only when the thread it waits for runs during it, and four
 # programs side by side, each with two busy threads, leave that to chance on 3 CPUs
+if want 4; then
 side spin-off spin off ""
 collect
 side spin-app spin app "lock=20:game,event=30:game"
@@ -239,9 +264,11 @@ side spin-sem spin sem "sem=5" one,skip
 collect
 side spin-scopes spin scopes "lock=20:all,event=30:not=2,sem=20:game"
 collect
+fi
 
 # 5. jdrly/gw2-on-mac#43
 
+if want 5; then
 mkdir -p "$work/log-prof"
 side prof env -u WINE_HEAT_COUNT -u WINE_HEAT_WAKE -u WINE_HEAT_EVPOOL -u WINE_HEAT_SPIN WINE_HEAT_EXE=prof.exe \
   WINE_HEAT_PROF=1 FEX_PROFILESTATS=1 WINE_HEAT_LOG=$work/log-prof GW2_TEST_SECONDS=300 \
@@ -289,6 +316,7 @@ side prof-named env -u WINE_HEAT_COUNT -u WINE_HEAT_WAKE -u WINE_HEAT_EVPOOL -u 
   WINE_HEAT_PROF=1 WINE_HEAT_PROF_FEX=$named FEX_PROFILESTATS=1 WINE_HEAT_LOG=$work/log-prof-named GW2_TEST_SECONDS=300 \
   "$run" "$other_fex" "$work/prefix-prof-named" "$exes/prof.exe"
 collect
+fi
 
 # 6. jdrly/gw2-on-mac#60: requests three runs under mine with counting, each with a log folder of
 # its own, so each finds its own heat-requests-<pid>.log. After block 5, not beside it: prof
@@ -323,6 +351,7 @@ timers() {
     GW2_TEST_SECONDS=300 "$run" "$mine" "$work/prefix-timers-$n" "$exes/timers.exe"
 }
 
+if want 6; then
 side requests requests
 for n in 1 2 3; do
   side timers-$n timers $n
@@ -332,10 +361,9 @@ side prof-refused env -u WINE_HEAT_COUNT -u WINE_HEAT_WAKE -u WINE_HEAT_EVPOOL -
   WINE_HEAT_EXE=prof.exe WINE_HEAT_PROF=1 GW2_TEST_PROF_REFUSED=1 WINE_HEAT_LOG=$work/log-prof-refused GW2_TEST_SECONDS=300 \
   "$run" "$other_fex" "$work/prefix-prof-refused" "$exes/prof.exe"
 collect
+fi
 # no block after this one runs under the clone of block 5
 rm -rf "$work/fexid"
-
-fi
 
 # 7. jdrly/gw2-on-mac#61
 
@@ -368,7 +396,7 @@ fi
 # 8. jdrly/gw2-on-mac#101: timeout three runs under the engine's ntdll.so and three under mine, with
 # no WINE_HEAT_* variable. The two side by side only: its waits have to end no earlier than 45 ms
 # into 50, and the shortest of each 20 before 150.
-if (( ${blocks[(I)ntdll]} )); then
+if want 8; then
 side timeout-engine env -u WINE_HEAT_COUNT -u WINE_HEAT_EXE -u WINE_HEAT_LOG GW2_TEST_SECONDS=300 \
   "$run" "$engine" "$work/prefix-timeout-engine" "$exes/timeout.exe" "$exes/timeout.exe" "$exes/timeout.exe"
 side timeout-mine env -u WINE_HEAT_COUNT -u WINE_HEAT_EXE -u WINE_HEAT_LOG GW2_TEST_SECONDS=300 \
