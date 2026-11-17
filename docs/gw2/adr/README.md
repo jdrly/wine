@@ -30,3 +30,4 @@ decision takes the next free number.
 | [0016](0016-the-tests-run-as-three-lanes.md) | 2026-11-17 | The tests run as three lanes side by side, and block 7 goes with the window steps. |
 | [0017](0017-a-pull-request-whose-head-is-behind-stops-at-once.md) | 2026-11-17 | A pull request whose merge tree differs from its head's fails in its first minute and asks for a rebase. |
 | [0018](0018-the-wake-skip-decides-by-msync-reference-count-alone.md) | 2026-11-17 | The wake skip decides by msync's reference count and my own sleepers, without the private mark. The put-back never skips. |
+| [0019](0019-a-pull-request-configures-from-kept-answers.md) | 2026-11-17 | A pull request's configure starts from `config.cache` kept under a key that names its inputs. A push asks everything again, fails if its answers differ, and fills the cache. |

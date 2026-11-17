@@ -288,12 +288,54 @@ jobs:
           echo "FREETYPE_VERSION=$FREETYPE_VERSION" >>"$GITHUB_ENV"
           echo "Homebrew's FreeType: $FREETYPE_VERSION" | tee -a "$GITHUB_STEP_SUMMARY"
 
+      # jdrly/gw2-on-mac#253: configure's answers (config.cache, autoconf's own file for them),
+      # kept under a key that names everything they depend on: the image, Xcode and its SDK,
+      # Homebrew's packages, llvm-mingw, the deployment target, the engine's commit and wine.zsh.
+      # A pull request's configure starts from them and skips its compile checks. A push never
+      # does: its configure asks everything again, its answers have to be the kept ones, and a
+      # push is what fills the cache, since a pull request can read only the branch's.
+      - name: The key of configure's answers
+        run: |
+          key=$({
+            echo "$ImageOS $ImageVersion $(sw_vers -buildVersion)"
+            xcodebuild -version
+            xcrun -sdk macosx --show-sdk-version
+            clang --version
+            brew list --versions bison freetype gnutls sdl2-compat pkgconf
+            echo "$LLVM_MINGW_VERSION $MACOSX_DEPLOYMENT_TARGET $BASE_COMMIT"
+            shasum -a 256 <"$GW2/wine.zsh"
+          } | shasum -a 256 | cut -d' ' -f1)
+          echo "CONFIG_KEY=wine-configure-answers-$key" >>"$GITHUB_ENV"
+      - name: Restore configure's answers
+        id: answers
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          key: ${{ env.CONFIG_KEY }}
+          path: ${{ runner.temp }}/config.cache
       - name: Configure
         run: |
           mkdir -p "${SRC%/*}"
           mv src "$SRC"
           "$GW2/wine.zsh" prepare "$BASE_COMMIT"
+          kept=$RUNNER_TEMP/config.cache
+          if [[ $GITHUB_EVENT_NAME == pull_request && -f $kept ]]; then
+            mkdir -p "$BUILD"
+            cp "$kept" "$BUILD/config.cache"
+            echo "configure starts from the answers kept under $CONFIG_KEY" | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
           "$GW2/wine.zsh" configure
+          if [[ $GITHUB_EVENT_NAME != pull_request && -f $kept ]]; then
+            diff "$kept" "$BUILD/config.cache" ||
+              { echo "::error::configure's answers aren't the ones kept under $CONFIG_KEY: something the key doesn't name changed them"; exit 1; }
+            echo "configure's answers are the ones kept under $CONFIG_KEY" | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+          [[ -f $kept ]] || cp "$BUILD/config.cache" "$kept"
+      - name: Save configure's answers
+        if: steps.answers.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          key: ${{ env.CONFIG_KEY }}
+          path: ${{ runner.temp }}/config.cache
 
       - name: Build the engine's commit
         id: base
