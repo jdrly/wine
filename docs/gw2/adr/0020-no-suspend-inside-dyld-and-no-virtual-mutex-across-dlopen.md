@@ -51,9 +51,14 @@ Both are fixes to Wine's own code, so they have no switch (ADR 0006).
   waits until `dlopen` returns.
 - `tests/gw2/dlsuspend.c` runs the three roles: one thread loads `ws2_32.so` by name and unloads
   it, one maps `dnsapi.dll` and loads its unix lib, and one suspends the first, reads memory and
-  resumes it. matrix.zsh's block 3b runs it three times under mine, which have to pass, and three
-  times under the engine's own `ntdll.so`, where it only reports how many runs deadlocked. Whether
-  a run hits the race is up to the runner's timing, and I couldn't run it before the first push.
+  resumes it. matrix.zsh's block 3b runs it three times under mine, which have to pass, and once
+  under the engine's own `ntdll.so`, where it only reports how the run ended. Whether a run hits
+  the race is up to the runner's timing, and I couldn't run it before the first push.
+- The engine's side has a 30 s limit, where a run that passes took 16 s under mine. A run that
+  finds the deadlock itself prints its line by about 26 s, before the limit. It ran three times
+  with 120 s each until #322: in run 44585227370 all three ended at the limit, `dlsuspend`'s
+  part of block 3b took 363 s and `matrix-a` 742 s, the longest lane of a pull request that
+  reaches `ntdll.so`.
 - A row in `.github/gw2/UPSTREAM.md`'s "Fixes without a switch". Neither athei's `501796b0ed1`
   nor WineHQ's master on 2026-11-19 has either change.
 - The check that matters is Steam's first start with GPU acceleration on, which only my play
