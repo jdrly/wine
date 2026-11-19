@@ -233,17 +233,19 @@ putback() {
     "$run" "$mine" "$work/prefix-putback-$m" "$exes/putback.exe" "$exes/putback.exe" "$exes/putback.exe"
 }
 
-# engine_report <program> <line>: three runs under the engine's ntdll.so, and how many failed
-# with <line>. A report, never a failure: whether a run hits the race is up to the runner's timing.
-# 120 s each at most, as a run that deadlocks and doesn't unwind is ended by run.zsh's time limit.
+# engine_report <program> <line>: three runs under the engine's ntdll.so, and how many passed,
+# failed with <line> or failed otherwise. A report, never a failure: whether a run hits the race
+# is up to the runner's timing. 120 s each at most, as a run that deadlocks and doesn't unwind is
+# ended by run.zsh's time limit.
 engine_report() {
   local exe=$exes/$1.exe line=$2 out
-  integer n
+  integer n p
   out=$(env -u WINE_HEAT_COUNT -u WINE_HEAT_WAKE -u WINE_HEAT_EXE -u WINE_HEAT_LOG GW2_TEST_SECONDS=120 \
     "$run" "$engine" "$work/prefix-report-$1" "$exe" "$exe" "$exe") || true
   print -r -- "$out"
   n=${#${(M)${(f)out}:#*$line*}}
-  print "report: $1 failed $n of 3 under the engine's ntdll.so with \"$line\""
+  p=${#${(M)${(f)out}:#ok    $1}}
+  print "report: $1 under the engine's ntdll.so: $p of 3 passed, $n failed with \"$line\", $(( 3 - p - n )) failed otherwise"
 }
 
 if want 3b; then

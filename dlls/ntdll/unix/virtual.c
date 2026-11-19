@@ -786,29 +786,36 @@ static NTSTATUS load_builtin_unixlib( void *module, BOOL wow, const void **funcs
 
     /* jdrly/gw2-on-mac#304: no virtual_mutex across dlopen. A thread suspended in dyld's lock
      * would hold up this one, and with it every thread that wants virtual_mutex, the one that
-     * would resume it among them. If another thread stored a handle meanwhile, that one stays and
-     * this one is closed. */
-    server_enter_uninterrupted_section( &virtual_mutex, &sigset );
-    if ((builtin = get_builtin_module( module )) && builtin->unix_path && !builtin->unix_handle)
-        path = strdup( builtin->unix_path );
-    server_leave_uninterrupted_section( &virtual_mutex, &sigset );
-
-    if (path && !(handle = heat_dlopen( path, RTLD_NOW )))
-        WARN_(module)( "failed to load %s: %s\n", debugstr_a(path), dlerror() );
-
+     * would resume it among them. After the dlopen only a module with the same unix lib counts,
+     * since another can be mapped at this address meanwhile. If another thread stored a handle
+     * for it, that one stays and this one is closed. */
     server_enter_uninterrupted_section( &virtual_mutex, &sigset );
     if ((builtin = get_builtin_module( module )))
     {
-        if (handle && !builtin->unix_handle && builtin->unix_path && !strcmp( builtin->unix_path, path ))
-        {
-            builtin->unix_handle = handle;
-            handle = NULL;
-        }
-        if (builtin->unix_handle) status = get_unixlib_funcs( builtin->unix_handle, wow, funcs, &entry );
+        if (builtin->unix_path && !builtin->unix_handle) path = strdup( builtin->unix_path );
+        else if (builtin->unix_handle) status = get_unixlib_funcs( builtin->unix_handle, wow, funcs, &entry );
     }
     server_leave_uninterrupted_section( &virtual_mutex, &sigset );
-    if (handle) heat_dlclose( handle );
-    free( path );
+
+    if (path)
+    {
+        if (!(handle = heat_dlopen( path, RTLD_NOW )))
+            WARN_(module)( "failed to load %s: %s\n", debugstr_a(path), dlerror() );
+
+        server_enter_uninterrupted_section( &virtual_mutex, &sigset );
+        if ((builtin = get_builtin_module( module )) && builtin->unix_path && !strcmp( builtin->unix_path, path ))
+        {
+            if (handle && !builtin->unix_handle)
+            {
+                builtin->unix_handle = handle;
+                handle = NULL;
+            }
+            if (builtin->unix_handle) status = get_unixlib_funcs( builtin->unix_handle, wow, funcs, &entry );
+        }
+        server_leave_uninterrupted_section( &virtual_mutex, &sigset );
+        if (handle) heat_dlclose( handle );
+        free( path );
+    }
     if (!status && entry) status = entry();
     return status;
 }

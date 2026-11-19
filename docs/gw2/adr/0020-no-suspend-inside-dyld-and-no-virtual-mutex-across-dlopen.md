@@ -26,9 +26,11 @@ because each closes a different way in:
   that arrives meanwhile is taken when the mask is put back, outside dyld's lock. That removes
   step 1: a thread can't stop while it holds dyld's lock in these calls.
 - `load_builtin_unixlib` looks the module up under `virtual_mutex`, drops it for `dlopen`, and
-  takes it again to store the handle. If another thread stored one meanwhile, or the module is gone
-  or has another path, it keeps what is there and closes its own. That removes step 2's hold: a
-  thread waiting for dyld's lock no longer keeps every memory query out.
+  takes it again to store the handle. Then it uses only a module at that address with the same unix
+  lib path, since another module can be mapped there meanwhile. If the module is gone or has another
+  path, it closes its own handle and returns `STATUS_DLL_NOT_FOUND`. If another thread stored a
+  handle meanwhile, it keeps that one and closes its own. That removes step 2's hold: a thread
+  waiting for dyld's lock no longer keeps every memory query out.
 
 Both are fixes to Wine's own code, so they have no switch (ADR 0006).
 

@@ -14,10 +14,13 @@
  * - S suspends L, waits until L is stopped, sleeps HOLD_MS, queries memory, and resumes L, in a
  *   loop.
  *
- * L and S use no heap, stdio or loader call, so a thread suspended inside one of those can't hang
- * the test on its own. When S makes no progress for STALL_MS, the test prints the deadlock, then
- * resumes L itself so the threads can end. The engine's own ntdll.so is expected to deadlock here.
- * Mine has to pass. Runs SECONDS, and fails if a thread made fewer than MIN_PASSES passes.
+ * L and S make no heap, stdio or loader call of their own, so a thread suspended in one of those
+ * can't hang the test. ntdll's load by name still calls malloc and free outside the mask, so a
+ * stall can also come from a suspend inside malloc's lock, though dyld's lock is far likelier.
+ * When S makes no progress for STALL_MS, or the threads don't end within STALL_MS of the stop,
+ * the test prints the deadlock, then resumes L itself so the threads can end. The engine's own
+ * ntdll.so is expected to deadlock here. Mine has to pass. Runs SECONDS, and fails if a thread
+ * made fewer than MIN_PASSES passes.
  * Prints "gw2 test dlsuspend: passed" and exits 0, or names what failed and exits 1. */
 #include <stdio.h>
 #include <windows.h>
@@ -193,6 +196,8 @@ int main(void)
         }
     }
     stop = 1;
+    /* a stall that started in the last STALL_MS shows as threads that don't end */
+    if (!stalled && WaitForMultipleObjects( 3, threads, TRUE, STALL_MS ) != WAIT_OBJECT_0) stalled = TRUE;
     if (stalled)
     {
         print_stall();
