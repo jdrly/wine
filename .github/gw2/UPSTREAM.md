@@ -74,4 +74,6 @@ fixes of #159 and the break-in of #174.
 | `dlls/ntdll/unix/msync.c`, `msync_wait_objs` | The wait-all's rollback releases only the mutexes this pass took | #44 | `f6097722b99` | no |
 | `dlls/ntdll/unix/msync.c`, `msync_wait_objs` | A relative timeout's deadline is computed before the first spin or sleep, not at the wait's start | #101 | `41ca59151dc` | no |
 | `dlls/ntdll/unix/msync.c`, `msync_wait_objs` | A wait-all that puts an object back wakes its waiters, all of them in every `WINE_HEAT_WAKE` mode since #249 | #219, #249 | `30c65fd5a6d` | athei: no |
+| `dlls/ntdll/unix/loader.c`, `load_unixlib_by_name`; `dlls/ntdll/unix/virtual.c`, `get_unixlib_funcs`, `NtQueryVirtualMemory` | `dlopen`, `dlsym` and `dlclose` of the unix libs run with the server's signals blocked (`heatdl.h`), so no thread is suspended inside dyld's lock (ADR 0020) | #304 | at merge | athei: no. WineHQ: no, master on 2026-11-19 |
+| `dlls/ntdll/unix/virtual.c`, `load_builtin_unixlib` | Drops `virtual_mutex` for `dlopen` and takes it again to store the handle, keeping one another thread stored meanwhile (ADR 0020) | #304 | at merge | athei: no. WineHQ: no, master on 2026-11-19 |
 | `dlls/winemac.drv/window.c`, `macdrv_window_did_unminimize` | A restored window becomes the foreground window before it is activated | #160 | `8384433b856` | WineHQ `ede017e2b24`. athei: no |
