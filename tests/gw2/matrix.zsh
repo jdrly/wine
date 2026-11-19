@@ -24,15 +24,16 @@
 #    jdrly/gw2-on-mac#159 runs it).
 # 3. (jdrly/gw2-on-mac#44) mutexall three runs under the engine's ntdll.so, each of which has to
 #    fail on the bug it shows, and three under mine, which have to pass 20,000 wait-alls each
-#    (GW2_TEST_WAIT_ALLS; the engine's runs keep mutexall's 20 s). (#104) unreg three runs
+#    (GW2_TEST_WAIT_ALLS; the engine's runs keep mutexall's 20 s). The engine's three run unless
+#    GW2_MATRIX_ENGINE_BUGS is 0 (jdrly/gw2-on-mac#324). (#104) unreg three runs
 #    under the engine's ntdll.so and three under mine with counting. No run sets
 #    WINE_HEAT_MSYNC_UNREG, which the app may still write: .github/gw2/switches.zsh fails the
 #    build when my file holds a WINE_HEAT_* name its sources don't read.
 # 3b. (jdrly/gw2-on-mac#219) putback three runs under the engine's ntdll.so, each of which
-#    has to fail on the lost wake, and three under mine in each WINE_HEAT_WAKE mode. Then
-#    (jdrly/gw2-on-mac#304) dlsuspend once under the engine's ntdll.so with a 30 s limit
-#    (jdrly/gw2-on-mac#322), which only reports how the run ended, and three under mine, which
-#    have to pass.
+#    has to fail on the lost wake, unless GW2_MATRIX_ENGINE_BUGS is 0, and three under mine in
+#    each WINE_HEAT_WAKE mode. Then (jdrly/gw2-on-mac#304) dlsuspend once under the engine's
+#    ntdll.so with a 30 s limit (jdrly/gw2-on-mac#322), which only reports how the run ended, and
+#    three under mine, which have to pass.
 # 4. (jdrly/gw2-on-mac#45) spin.exe under mine, as WINE_HEAT_EXE with WINE_HEAT_COUNT=1, with
 #    WINE_HEAT_SPIN unset and in three settings, three runs each, one setting at a time: the app's string
 #    (lock and event at :game), sem alone at its default scope with WINE_HEAT_WAKE=one,skip (the
@@ -53,7 +54,12 @@
 #    the empty peek's yield (GW2_TEST_PEEK_NO_YIELD=1), each with its own switch. Block 2 ran
 #    setcursor and peekyield under the engine's win32u.so with neither set.
 # 8. (jdrly/gw2-on-mac#101) timeout three runs under the engine's ntdll.so and three under mine.
-# Prints each run's lines and exits 1 if any failed.
+# Prints each run's lines and exits 1 if any failed. A run under the engine's ntdll.so that has to
+# fail, or only reports, passes GW2_TEST_EXPECT_FAIL=programs to run.zsh, which then prints
+# "expected" for it, not "FAIL" (jdrly/gw2-on-mac#324).
+# GW2_MATRIX_ENGINE_BUGS=0 leaves out mutexall's and putback's runs under the engine's ntdll.so,
+# which have to lose a race to pass: the workflow sets it when the change can't reach what they
+# prove, the engine, msync.c or the tests (jdrly/gw2-on-mac#324, docs/gw2/adr/0009).
 # GW2_MATRIX_BLOCKS picks the blocks: "ntdll" for 1 to 6 and 8, "win32u" for 7; both by default.
 # In place of "ntdll" it takes the blocks' own names, 1, 1b, 2, 3, 3b, 4, 5, 6 and 8, for the
 # workflow's lanes. 6 needs 5 named with it: it runs under the clone block 5 makes.
@@ -69,6 +75,8 @@ integer failed=0
 # (7). Both by default. Each of the workflow's lanes names its own blocks, and none of the ntdll
 # ones for a pull request that doesn't change my ntdll.so.
 blocks=(${=GW2_MATRIX_BLOCKS-ntdll win32u})
+engine_bugs_run=${GW2_MATRIX_ENGINE_BUGS:-1}
+[[ $engine_bugs_run == [01] ]] || { print -u2 "matrix.zsh: GW2_MATRIX_ENGINE_BUGS is 0 or 1, not $engine_bugs_run"; exit 2 }
 pids=() names=()
 
 # want <block>: whether the ntdll block <block> runs: GW2_MATRIX_BLOCKS names it, or "ntdll"
@@ -186,7 +194,7 @@ engine_bug() {
   local exe=$exes/$1.exe line=$2 out rc=0
   integer n
   out=$(env -u WINE_HEAT_COUNT -u WINE_HEAT_WAKE -u WINE_HEAT_EXE -u WINE_HEAT_LOG GW2_TEST_SECONDS=300 \
-    "$run" "$engine" "$work/prefix-bug-$1" "$exe" "$exe" "$exe") || rc=$?
+    GW2_TEST_EXPECT_FAIL=programs "$run" "$engine" "$work/prefix-bug-$1" "$exe" "$exe" "$exe") || rc=$?
   print -r -- "$out"
   n=${#${(M)${(f)out}:#*$line*}}
   if (( rc && n == 3 )); then
@@ -216,8 +224,15 @@ unreg() {
   done
 }
 
+# skipped <program>: the line for the engine's runs that GW2_MATRIX_ENGINE_BUGS=0 leaves out
+skipped() { print "== $1-engine: not run, the change doesn't reach the engine, msync.c or the tests" }
+
 if want 3; then
-side mutexall-engine engine_bug mutexall "another thread took the mutex its owner held"
+if (( engine_bugs_run )); then
+  side mutexall-engine engine_bug mutexall "another thread took the mutex its owner held"
+else
+  skipped mutexall
+fi
 side mutexall-mine env -u WINE_HEAT_COUNT -u WINE_HEAT_WAKE -u WINE_HEAT_EXE -u WINE_HEAT_LOG GW2_TEST_WAIT_ALLS=20000 GW2_TEST_SECONDS=300 \
   "$run" "$mine" "$work/prefix-mutexall-mine" "$exes/mutexall.exe" "$exes/mutexall.exe" "$exes/mutexall.exe"
 side unreg-engine unreg engine "$engine"
@@ -245,7 +260,7 @@ engine_report() {
   local exe=$exes/$1.exe line=$2 out
   integer n p
   out=$(env -u WINE_HEAT_COUNT -u WINE_HEAT_WAKE -u WINE_HEAT_EXE -u WINE_HEAT_LOG GW2_TEST_SECONDS=30 \
-    "$run" "$engine" "$work/prefix-report-$1" "$exe") || true
+    GW2_TEST_EXPECT_FAIL=programs "$run" "$engine" "$work/prefix-report-$1" "$exe") || true
   print -r -- "$out"
   n=${#${(M)${(f)out}:#*$line*}}
   p=${#${(M)${(f)out}:#ok    $1}}
@@ -253,7 +268,11 @@ engine_report() {
 }
 
 if want 3b; then
-side putback-engine engine_bug putback "the waiter slept on with the token put back"
+if (( engine_bugs_run )); then
+  side putback-engine engine_bug putback "the waiter slept on with the token put back"
+else
+  skipped putback
+fi
 for m in off one skip one,skip; do
   side "putback=$m" putback $m
 done

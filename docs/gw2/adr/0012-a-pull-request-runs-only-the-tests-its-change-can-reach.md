@@ -13,7 +13,8 @@ wasted compute. So a pull request now runs the tests of the files it can have ch
   A file's flag is 1 when `compare.py fork` lists a moved, changed, new or gone function of it, or
   when the diff touches a path that reaches it: `dlls/ntdll`, `server` and `tools` for `ntdll.so`,
   `dlls/winemac.drv` or `dlls/win32u` for the other two, `include` for all three. The paths are
-  there because a change to data alone shows no changed function.
+  there because a change to data alone shows no changed function. A fifth line, `ENGINE_BUGS`,
+  came on 2026-11-19 with ADR 0009's last consequence.
 - A change under `tests/gw2` or `.github` sets `TESTS` and runs everything. Narrowed on 2026-11-17
   by ADR 0015: only a file there that can reach a test counts.
 - The matrix runs blocks 1 to 6 and 8 only when `ntdll.so` is selected, and block 7 when `ntdll.so`
