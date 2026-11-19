@@ -30,8 +30,9 @@
 #    build when my file holds a WINE_HEAT_* name its sources don't read.
 # 3b. (jdrly/gw2-on-mac#219) putback three runs under the engine's ntdll.so, each of which
 #    has to fail on the lost wake, and three under mine in each WINE_HEAT_WAKE mode. Then
-#    (jdrly/gw2-on-mac#304) dlsuspend three runs under the engine's ntdll.so, which only reports
-#    how many deadlocked, and three under mine, which have to pass.
+#    (jdrly/gw2-on-mac#304) dlsuspend once under the engine's ntdll.so with a 30 s limit
+#    (jdrly/gw2-on-mac#322), which only reports how the run ended, and three under mine, which
+#    have to pass.
 # 4. (jdrly/gw2-on-mac#45) spin.exe under mine, as WINE_HEAT_EXE with WINE_HEAT_COUNT=1, with
 #    WINE_HEAT_SPIN unset and in three settings, three runs each, one setting at a time: the app's string
 #    (lock and event at :game), sem alone at its default scope with WINE_HEAT_WAKE=one,skip (the
@@ -233,19 +234,22 @@ putback() {
     "$run" "$mine" "$work/prefix-putback-$m" "$exes/putback.exe" "$exes/putback.exe" "$exes/putback.exe"
 }
 
-# engine_report <program> <line>: three runs under the engine's ntdll.so, and how many passed,
+# engine_report <program> <line>: one run under the engine's ntdll.so, and whether it passed,
 # failed with <line> or failed otherwise. A report, never a failure: whether a run hits the race
-# is up to the runner's timing. 120 s each at most, as a run that deadlocks and doesn't unwind is
-# ended by run.zsh's time limit.
+# is up to the runner's timing. 30 s at most, as a run that deadlocks and doesn't unwind is ended
+# by run.zsh's time limit. A run that passes took 16 s under mine. One that finds the deadlock
+# itself prints its line by about 26 s, then waits up to 10 s more for its threads, so the limit
+# can end it after the line is in its log. jdrly/gw2-on-mac#322: three runs of 120 s each ended at
+# the limit in run 44585227370 and set matrix-a's length.
 engine_report() {
   local exe=$exes/$1.exe line=$2 out
   integer n p
-  out=$(env -u WINE_HEAT_COUNT -u WINE_HEAT_WAKE -u WINE_HEAT_EXE -u WINE_HEAT_LOG GW2_TEST_SECONDS=120 \
-    "$run" "$engine" "$work/prefix-report-$1" "$exe" "$exe" "$exe") || true
+  out=$(env -u WINE_HEAT_COUNT -u WINE_HEAT_WAKE -u WINE_HEAT_EXE -u WINE_HEAT_LOG GW2_TEST_SECONDS=30 \
+    "$run" "$engine" "$work/prefix-report-$1" "$exe") || true
   print -r -- "$out"
   n=${#${(M)${(f)out}:#*$line*}}
   p=${#${(M)${(f)out}:#ok    $1}}
-  print "report: $1 under the engine's ntdll.so: $p of 3 passed, $n failed with \"$line\", $(( 3 - p - n )) failed otherwise"
+  print "report: $1 under the engine's ntdll.so: $p of 1 passed, $n failed with \"$line\", $(( 1 - p - n )) failed otherwise"
 }
 
 if want 3b; then
