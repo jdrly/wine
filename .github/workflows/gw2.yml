@@ -82,8 +82,8 @@
 #   or .github runs everything (jdrly/gw2-on-mac#217), unless it changes only Markdown files,
 #   comment lines of this workflow or its lint and publish jobs (jdrly/gw2-on-mac#228). A new test
 #   step names the RUN_* of the files it tests in its if:. mutexall's and putback's runs under the
-#   engine's ntdll.so, which have to lose a race to pass, run only when such a change to the tests
-#   or the CI, MACH9_VERSION among them, or one to msync.c sets ENGINE_BUGS (jdrly/gw2-on-mac#324,
+#   engine's ntdll.so, which have to lose a race to pass, run only when MACH9_VERSION, msync.c,
+#   either program, matrix.zsh or run.zsh changed, which sets ENGINE_BUGS (jdrly/gw2-on-mac#324,
 #   docs/gw2/adr/0009). A run that has to fail prints "expected", not "FAIL", so a green run's log
 #   has no line that starts with FAIL.
 #   The tests job runs as lanes side by side, one job each (jdrly/gw2-on-mac#229): window (every
@@ -518,10 +518,12 @@ jobs:
           # path that can reach it (a data-only change has no changed function). TESTS says the
           # tests or the CI changed, and then everything runs: any file under tests/gw2 or .github
           # but the Markdown ones, and of this workflow what is left without its comment lines and
-          # its lint and publish jobs, which reach no test (jdrly/gw2-on-mac#228). ENGINE_BUGS says
-          # whether mutexall's and putback's runs under the engine's ntdll.so are owed: TESTS, which
-          # a new MACH9_VERSION sets too, or a change to msync.c, where both bugs are
-          # (jdrly/gw2-on-mac#324). A push gets all five set: its tests job decides by FULL alone.
+          # its lint and publish jobs, which reach no test (jdrly/gw2-on-mac#228). A push gets the
+          # first four set: its tests job decides by FULL alone. ENGINE_BUGS says whether mutexall's
+          # and putback's runs under the engine's ntdll.so are owed (jdrly/gw2-on-mac#324): a new
+          # MACH9_VERSION, or a change to msync.c, where both bugs are, to either program, or to
+          # matrix.zsh or run.zsh, which decide what their runs mean. On a push it compares with the
+          # push's parent.
           mkdir -p "$RUNNER_TEMP/selection"
           {
             for lib in ntdll winemac win32u; do
@@ -551,8 +553,15 @@ jobs:
               [[ $(reach "$FORK") == "$(reach "$COMMIT")" ]] || flag=1
             fi
             echo "TESTS=$flag"
-            if [[ -n ${FORK:-} && $flag == 0 ]]; then
-              git -C "$SRC" diff --quiet "$FORK" "$COMMIT" -- dlls/ntdll/unix/msync.c || flag=1
+            # against the fork point, or on a push against its parent
+            flag=1
+            since=${FORK:-$(git -C "$SRC" rev-parse --verify -q "$COMMIT^" || true)}
+            if [[ -n $since ]]; then
+              flag=0
+              git -C "$SRC" diff --quiet "$since" "$COMMIT" -- dlls/ntdll/unix/msync.c tests/gw2/mutexall.c \
+                tests/gw2/putback.c tests/gw2/matrix.zsh tests/gw2/run.zsh || flag=1
+              mach9() { git -C "$SRC" show "$1:.github/workflows/gw2.yml" | sed -n 's/^  MACH9_VERSION: *//p'; }
+              [[ $(mach9 "$since") == "$(mach9 "$COMMIT")" ]] || flag=1
             fi
             echo "ENGINE_BUGS=$flag"
           } >"$RUNNER_TEMP/selection/selection.env"
@@ -1153,6 +1162,8 @@ jobs:
               tr -d '\r' <"$RUNNER_TEMP/rundll-$mode.log" | grep "^gw2 test rundll: the entry point didn't run (" >/dev/null ||
                 { echo "::error::without the rule: rundll.exe didn't fail on the missing entry point"; exit 1; }
               (( status == 1 )) || { echo "::error::without the rule: run.zsh exited $status, not 1"; exit 1; }
+              # the program's failure prints "expected"; a FAIL is the prefix boot's or a process left behind
+              ! grep -q '^FAIL' "$RUNNER_TEMP/rundll-$mode.txt" || { echo "::error::without the rule: run.zsh printed FAIL"; exit 1; }
               [[ $loaded == "builtin " ]] || { echo "::error::without the rule: rundll32's d3d11.dll was \"$loaded\", not Wine's own alone"; exit 1; }
             else
               (( status == 0 )) || { echo "::error::with the rule: rundll.exe failed"; exit 1; }

@@ -24,12 +24,14 @@ fix holds, which a count does. So only my side is counted.
   `WINE_HEAT_MSYNC_UNREG=1`, a variable my file no longer reads, and `collect` frees each block's
   prefixes once its runs have ended. A runner had run out of disk the same day.
 - Since jdrly/gw2-on-mac #324 (2026-11-19) the engine's `mutexall` runs, and `putback`'s, run
-  only when `selection.env`'s `ENGINE_BUGS` is 1: a change under `tests/gw2` or `.github` that sets
-  `TESTS`, a new `MACH9_VERSION` among them, or one to `dlls/ntdll/unix/msync.c`, or a push that
-  owes every test. They prove that the test still finds athei's bug. A new engine or a changed test
-  can change that, and so can a change of mine to `msync.c`, where both bugs are. Each run also has
-  to lose a race, and in run 43923114537 the engine lost only 1 of 3. Their failures print
-  `expected`, not `FAIL`.
+  only when `selection.env`'s `ENGINE_BUGS` is 1: a new `MACH9_VERSION`, or a change to
+  `dlls/ntdll/unix/msync.c`, `mutexall.c`, `putback.c`, `matrix.zsh` or `run.zsh`, against the fork
+  point or, on a push, the push's parent. They prove that the test still finds athei's bug. A new
+  engine or a changed test can change that, and so can a change of mine to `msync.c`, where both
+  bugs are. The two scripts decide what a run under the engine means. Each run also has to lose a
+  race, and in run 43923114537 the engine lost only 1 of 3. Their failures print `expected`, not
+  `FAIL`, and a `FAIL` that run.zsh prints in such a run, for the prefix boot or processes left
+  behind, fails the lane.
 
 ## Alternatives I rejected
 

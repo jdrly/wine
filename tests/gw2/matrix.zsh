@@ -58,8 +58,9 @@
 # fail, or only reports, passes GW2_TEST_EXPECT_FAIL=programs to run.zsh, which then prints
 # "expected" for it, not "FAIL" (jdrly/gw2-on-mac#324).
 # GW2_MATRIX_ENGINE_BUGS=0 leaves out mutexall's and putback's runs under the engine's ntdll.so,
-# which have to lose a race to pass: the workflow sets it when the change can't reach what they
-# prove, the engine, msync.c or the tests (jdrly/gw2-on-mac#324, docs/gw2/adr/0009).
+# which have to lose a race to pass: the workflow sets it when the change leaves MACH9_VERSION,
+# msync.c, both programs and this script and run.zsh alone (jdrly/gw2-on-mac#324,
+# docs/gw2/adr/0009).
 # GW2_MATRIX_BLOCKS picks the blocks: "ntdll" for 1 to 6 and 8, "win32u" for 7; both by default.
 # In place of "ntdll" it takes the blocks' own names, 1, 1b, 2, 3, 3b, 4, 5, 6 and 8, for the
 # workflow's lanes. 6 needs 5 named with it: it runs under the clone block 5 makes.
@@ -188,19 +189,25 @@ fi
 
 # 3. jdrly/gw2-on-mac#44
 
+# unmarked <output>: how many lines of run.zsh's <output> start with FAIL. With the programs'
+# failures marked as expected, those are the prefix boot and processes left behind, which fail
+# the caller as well (jdrly/gw2-on-mac#324).
+unmarked() { print ${#${(M)${(f)1}:#FAIL*}} }
+
 # engine_bug <program> <line>: three runs under the engine's ntdll.so, each failing with <line>
 # (blocks 3 and 3b)
 engine_bug() {
   local exe=$exes/$1.exe line=$2 out rc=0
-  integer n
+  integer n f
   out=$(env -u WINE_HEAT_COUNT -u WINE_HEAT_WAKE -u WINE_HEAT_EXE -u WINE_HEAT_LOG GW2_TEST_SECONDS=300 \
     GW2_TEST_EXPECT_FAIL=programs "$run" "$engine" "$work/prefix-bug-$1" "$exe" "$exe" "$exe") || rc=$?
   print -r -- "$out"
   n=${#${(M)${(f)out}:#*$line*}}
-  if (( rc && n == 3 )); then
+  f=$(unmarked "$out")
+  if (( rc && n == 3 && f == 0 )); then
     print "ok    $1 failed 3 of 3 under the engine's ntdll.so, on its bug"
   else
-    print "FAIL  $1 under the engine's ntdll.so: $n of 3 runs failed on its bug, the run exited $rc"
+    print "FAIL  $1 under the engine's ntdll.so: $n of 3 runs failed on its bug, run.zsh printed FAIL $f times, the run exited $rc"
     return 1
   fi
 }
@@ -225,7 +232,7 @@ unreg() {
 }
 
 # skipped <program>: the line for the engine's runs that GW2_MATRIX_ENGINE_BUGS=0 leaves out
-skipped() { print "== $1-engine: not run, the change doesn't reach the engine, msync.c or the tests" }
+skipped() { print "== $1-engine: not run, the change leaves the engine, msync.c and the test alone" }
 
 if want 3; then
 if (( engine_bugs_run )); then
@@ -250,21 +257,28 @@ putback() {
 }
 
 # engine_report <program> <line>: one run under the engine's ntdll.so, and whether it passed,
-# failed with <line> or failed otherwise. A report, never a failure: whether a run hits the race
-# is up to the runner's timing. 30 s at most, as a run that deadlocks and doesn't unwind is ended
-# by run.zsh's time limit. A run that passes took 16 s under mine. One that finds the deadlock
-# itself prints its line by about 26 s, then waits up to 10 s more for its threads, so the limit
-# can end it after the line is in its log. jdrly/gw2-on-mac#322: three runs of 120 s each ended at
-# the limit in run 44585227370 and set matrix-a's length.
+# failed with <line> or failed otherwise. How the program's run ends is a report, never a
+# failure: whether a run hits the race is up to the runner's timing. A FAIL from run.zsh, the
+# prefix boot's or one for processes left behind, still fails it (jdrly/gw2-on-mac#324). 30 s at
+# most, as a run that deadlocks and doesn't unwind is ended by run.zsh's time limit. A run that
+# passes took 16 s under mine. One that finds the deadlock itself prints its line by about 26 s,
+# then waits up to 10 s more for its threads, so the limit can end it after the line is in its
+# log. jdrly/gw2-on-mac#322: three runs of 120 s each ended at the limit in run 44585227370 and set
+# matrix-a's length.
 engine_report() {
   local exe=$exes/$1.exe line=$2 out
-  integer n p
+  integer n p f
   out=$(env -u WINE_HEAT_COUNT -u WINE_HEAT_WAKE -u WINE_HEAT_EXE -u WINE_HEAT_LOG GW2_TEST_SECONDS=30 \
     GW2_TEST_EXPECT_FAIL=programs "$run" "$engine" "$work/prefix-report-$1" "$exe") || true
   print -r -- "$out"
   n=${#${(M)${(f)out}:#*$line*}}
   p=${#${(M)${(f)out}:#ok    $1}}
   print "report: $1 under the engine's ntdll.so: $p of 1 passed, $n failed with \"$line\", $(( 1 - p - n )) failed otherwise"
+  f=$(unmarked "$out")
+  if (( f )); then
+    print "FAIL  $1 under the engine's ntdll.so: run.zsh printed FAIL $f times"
+    return 1
+  fi
 }
 
 if want 3b; then
