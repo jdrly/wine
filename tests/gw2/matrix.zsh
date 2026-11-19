@@ -29,7 +29,9 @@
 #    WINE_HEAT_MSYNC_UNREG, which the app may still write: .github/gw2/switches.zsh fails the
 #    build when my file holds a WINE_HEAT_* name its sources don't read.
 # 3b. (jdrly/gw2-on-mac#219) putback three runs under the engine's ntdll.so, each of which
-#    has to fail on the lost wake, and three under mine in each WINE_HEAT_WAKE mode.
+#    has to fail on the lost wake, and three under mine in each WINE_HEAT_WAKE mode. Then
+#    (jdrly/gw2-on-mac#304) dlsuspend three runs under the engine's ntdll.so, which only reports
+#    how many deadlocked, and three under mine, which have to pass.
 # 4. (jdrly/gw2-on-mac#45) spin.exe under mine, as WINE_HEAT_EXE with WINE_HEAT_COUNT=1, with
 #    WINE_HEAT_SPIN unset and in three settings, three runs each, one setting at a time: the app's string
 #    (lock and event at :game), sem alone at its default scope with WINE_HEAT_WAKE=one,skip (the
@@ -116,8 +118,8 @@ mode() {
   done
 }
 
-# programs that fail under the engine's ntdll.so, on a bug of its that mine fixes (block 3)
-engine_bugs=(mutexall putback)
+# programs that fail under the engine's ntdll.so, on a bug of its that mine fixes (blocks 3 and 3b)
+engine_bugs=(mutexall putback dlsuspend)
 
 # quiet <name> <wine> <log> [<variable>=<value>...]: every program, then no counters file in <log>
 quiet() {
@@ -231,11 +233,29 @@ putback() {
     "$run" "$mine" "$work/prefix-putback-$m" "$exes/putback.exe" "$exes/putback.exe" "$exes/putback.exe"
 }
 
+# engine_report <program> <line>: three runs under the engine's ntdll.so, and how many failed
+# with <line>. A report, never a failure: whether a run hits the race is up to the runner's timing.
+# 120 s each at most, as a run that deadlocks and doesn't unwind is ended by run.zsh's time limit.
+engine_report() {
+  local exe=$exes/$1.exe line=$2 out
+  integer n
+  out=$(env -u WINE_HEAT_COUNT -u WINE_HEAT_WAKE -u WINE_HEAT_EXE -u WINE_HEAT_LOG GW2_TEST_SECONDS=120 \
+    "$run" "$engine" "$work/prefix-report-$1" "$exe" "$exe" "$exe") || true
+  print -r -- "$out"
+  n=${#${(M)${(f)out}:#*$line*}}
+  print "report: $1 failed $n of 3 under the engine's ntdll.so with \"$line\""
+}
+
 if want 3b; then
 side putback-engine engine_bug putback "the waiter slept on with the token put back"
 for m in off one skip one,skip; do
   side "putback=$m" putback $m
 done
+collect
+# jdrly/gw2-on-mac#304, after putback: each run has three busy threads
+side dlsuspend-engine engine_report dlsuspend "failed: deadlock"
+side dlsuspend-mine env -u WINE_HEAT_COUNT -u WINE_HEAT_WAKE -u WINE_HEAT_EXE -u WINE_HEAT_LOG GW2_TEST_SECONDS=120 \
+  "$run" "$mine" "$work/prefix-dlsuspend-mine" "$exes/dlsuspend.exe" "$exes/dlsuspend.exe" "$exes/dlsuspend.exe"
 collect
 fi
 

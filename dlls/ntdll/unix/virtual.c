@@ -90,6 +90,7 @@
 #include "wine/list.h"
 #include "wine/rbtree.h"
 #include "unix_private.h"
+#include "heatdl.h"  /* jdrly/gw2-on-mac#304: the unix libs' dlopen, dlsym and dlclose */
 #include "wine/debug.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(virtual);
@@ -765,8 +766,8 @@ void *get_builtin_so_handle( void *module )
  */
 static NTSTATUS get_unixlib_funcs( void *so_handle, BOOL wow, const void **funcs, NTSTATUS (**entry)(void) )
 {
-    *funcs = dlsym( so_handle, wow ? "__wine_unix_call_wow64_funcs" : "__wine_unix_call_funcs" );
-    if (!*funcs) *entry = dlsym( so_handle, "__wine_unix_lib_init" );
+    *funcs = heat_dlsym( so_handle, wow ? "__wine_unix_call_wow64_funcs" : "__wine_unix_call_funcs" );
+    if (!*funcs) *entry = heat_dlsym( so_handle, "__wine_unix_lib_init" );
     return *funcs || *entry ? STATUS_SUCCESS : STATUS_ENTRYPOINT_NOT_FOUND;
 }
 
@@ -780,19 +781,34 @@ static NTSTATUS load_builtin_unixlib( void *module, BOOL wow, const void **funcs
     sigset_t sigset;
     NTSTATUS status = STATUS_DLL_NOT_FOUND;
     struct builtin_module *builtin;
+    char *path = NULL;
+    void *handle = NULL;
+
+    /* jdrly/gw2-on-mac#304: no virtual_mutex across dlopen. A thread suspended in dyld's lock
+     * would hold up this one, and with it every thread that wants virtual_mutex, the one that
+     * would resume it among them. If another thread stored a handle meanwhile, that one stays and
+     * this one is closed. */
+    server_enter_uninterrupted_section( &virtual_mutex, &sigset );
+    if ((builtin = get_builtin_module( module )) && builtin->unix_path && !builtin->unix_handle)
+        path = strdup( builtin->unix_path );
+    server_leave_uninterrupted_section( &virtual_mutex, &sigset );
+
+    if (path && !(handle = heat_dlopen( path, RTLD_NOW )))
+        WARN_(module)( "failed to load %s: %s\n", debugstr_a(path), dlerror() );
 
     server_enter_uninterrupted_section( &virtual_mutex, &sigset );
     if ((builtin = get_builtin_module( module )))
     {
-        if (builtin->unix_path && !builtin->unix_handle)
+        if (handle && !builtin->unix_handle && builtin->unix_path && !strcmp( builtin->unix_path, path ))
         {
-            builtin->unix_handle = dlopen( builtin->unix_path, RTLD_NOW );
-            if (!builtin->unix_handle)
-                WARN_(module)( "failed to load %s: %s\n", debugstr_a(builtin->unix_path), dlerror() );
+            builtin->unix_handle = handle;
+            handle = NULL;
         }
         if (builtin->unix_handle) status = get_unixlib_funcs( builtin->unix_handle, wow, funcs, &entry );
     }
     server_leave_uninterrupted_section( &virtual_mutex, &sigset );
+    if (handle) heat_dlclose( handle );
+    free( path );
     if (!status && entry) status = entry();
     return status;
 }
@@ -6200,7 +6216,7 @@ NTSTATUS WINAPI NtQueryVirtualMemory( HANDLE process, LPCVOID addr,
                     res[1] = (UINT_PTR)funcs;
                     if (entry) status = entry();
                 }
-                if (status) dlclose( handle );
+                if (status) heat_dlclose( handle );
                 else memcpy( buffer, res, min( len, sizeof(res) ));
                 return status;
             }
@@ -6211,7 +6227,7 @@ NTSTATUS WINAPI NtQueryVirtualMemory( HANDLE process, LPCVOID addr,
             {
                 const unixlib_module_t *handle = addr;
 
-                if (!dlclose( (void *)(UINT_PTR)*handle )) return STATUS_SUCCESS;
+                if (!heat_dlclose( (void *)(UINT_PTR)*handle )) return STATUS_SUCCESS;
             }
             return STATUS_INVALID_HANDLE;
 
