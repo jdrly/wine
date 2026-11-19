@@ -52,6 +52,12 @@ with block 5, whose clone of my tree it runs under, and `matrix.zsh` refuses 6 w
   tests this run owes" and the `case $LANE` of "Run them".
 - The seconds are from two runs. If one lane runs much longer than the others on the runner, "Run
   them" is the one place to move a block.
+- Since jdrly/gw2-on-mac #323 (2026-11-20) block 1 runs once in each mode, about 115 s shorter, so
+  the sentence above that it can't shrink no longer holds: ADR 0009 keeps the first run's minute,
+  and the other two runs went. Blocks 4, 5 and 6 run only with `HEAT` (ADR 0012). From
+  run 44623457706's blocks I expect about 325 s of matrix-a's steps and 345 s of matrix-b's when
+  every block runs, so the lanes stay as they are. The pull request's run has the measured
+  seconds.
 
 ## Alternatives I rejected
 

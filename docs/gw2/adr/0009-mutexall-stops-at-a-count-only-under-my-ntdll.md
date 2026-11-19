@@ -32,6 +32,13 @@ fix holds, which a count does. So only my side is counted.
   race, and in run 43923114537 the engine lost only 1 of 3. Their failures print `expected`, not
   `FAIL`, and a `FAIL` that run.zsh prints in such a run, for the prefix boot or processes left
   behind, fails the lane.
+- Since jdrly/gw2-on-mac #323 (2026-11-20) a push compares `ENGINE_BUGS`'s files with the
+  branch's tip before the push (`github.event.before`), not with the pushed commit's parent, so a
+  push of several commits counts all of them. Without that tip in the clone the flag is 1.
+- Since #323 block 1 runs `wakes.exe` once in each mode, the run with the minute of producing. The
+  second and third runs of each mode went, with their 20 seconds each: about 115 s of matrix-a,
+  the lane that set the run's length. The minute this record keeps is the first run's, and it
+  stays. Block 2's runs of `wakes.exe` keep their 20 seconds.
 
 ## Alternatives I rejected
 

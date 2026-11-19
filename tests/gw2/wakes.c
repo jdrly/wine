@@ -5,7 +5,7 @@
  *   13  20,000 single jobs to 7 workers that sleep between them, all taken. A producer that
  *       outpaces its consumer for a minute (the semaphore reaches its maximum), every release
  *       taken, no stall. GW2_TEST_PRODUCER_SECONDS shortens the minute: matrix.zsh keeps it for
- *       the first of a mode's three runs and gives the other runs 20 seconds.
+ *       block 1's one run in each mode and gives block 2's runs 20 seconds.
  *   14  A waiter on a duplicated handle and a release through it. A named semaphore opened
  *       twice. A semaphore duplicated into a child process, released by the parent after
  *       300 ms: the child wakes (with a real handle to this process and with the pseudo-handle,

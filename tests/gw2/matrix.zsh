@@ -6,7 +6,8 @@
 #
 # <win32u-wine> is the engine with my ntdll.so and my win32u.so, when the build ships one.
 # 1. wakes.exe under mine, as WINE_HEAT_EXE with WINE_HEAT_COUNT=1, in each mode (off, one, skip,
-#    one,skip), three runs each. The modes run side by side, each in a prefix of its own.
+#    one,skip), one run each with test 13's minute of producing. The modes run side by side, each
+#    in a prefix of its own. Up to jdrly/gw2-on-mac#323 each mode had two more runs of 20 s.
 #    Blocks 1, 1b, 3 and 4 set WINE_HEAT_DUMP_MS=500, so their programs wait 1.5 s for the
 #    counters, not 6. Block 6's requests runs and block 7 set 1000: requests.exe makes its calls
 #    in about 0.1 s, which can still fall in two blocks, and peekyield.exe waits for five rewrites
@@ -18,10 +19,8 @@
 #    program. Neither of the last two may write a counters file. The engine skips the programs in
 #    $engine_bugs, which show a bug of its file. mutexall stops at 20,000 wait-alls here, as in
 #    block 3, not after its 20 s. None runs leftover.exe, which fails its run on
-#    purpose (the workflow's step for jdrly/gw2-on-mac#128 runs it), rundll.exe, which needs a
-#    compatdb rule to pass (the workflow's step for jdrly/gw2-on-mac#155 runs it), or modeset.exe,
-#    which changes the display mode and needs the Mac driver (the workflow's step for
-#    jdrly/gw2-on-mac#159 runs it).
+#    purpose (the workflow's step for jdrly/gw2-on-mac#128 runs it), or rundll.exe, which needs a
+#    compatdb rule to pass (the workflow's step for jdrly/gw2-on-mac#155 runs it).
 # 3. (jdrly/gw2-on-mac#44) mutexall three runs under the engine's ntdll.so, each of which has to
 #    fail on the bug it shows, and three under mine, which have to pass 20,000 wait-alls each
 #    (GW2_TEST_WAIT_ALLS; the engine's runs keep mutexall's 20 s). The engine's three run unless
@@ -63,7 +62,8 @@
 # docs/gw2/adr/0009).
 # GW2_MATRIX_BLOCKS picks the blocks: "ntdll" for 1 to 6 and 8, "win32u" for 7; both by default.
 # In place of "ntdll" it takes the blocks' own names, 1, 1b, 2, 3, 3b, 4, 5, 6 and 8, for the
-# workflow's lanes. 6 needs 5 named with it: it runs under the clone block 5 makes.
+# workflow's lanes. 6 needs 5 named with it: it runs under the clone block 5 makes. The workflow
+# names 4, 5 and 6 only when its HEAT is 1 (jdrly/gw2-on-mac#323).
 emulate -L zsh
 setopt err_exit pipe_fail no_unset extended_glob
 
@@ -116,16 +116,13 @@ collect() {
   rm -rf "$work"/prefix-*(N)
 }
 
-# mode <mode>: three runs of wakes.exe with counting and WINE_HEAT_WAKE=<mode>. The first keeps test
-# 13's minute of producing on one semaphore; the others give it 20 seconds.
+# mode <mode>: one run of wakes.exe with counting and WINE_HEAT_WAKE=<mode>, with test 13's minute
+# of producing on one semaphore (docs/gw2/adr/0009)
 mode() {
-  local m=$1 n
-  for n in 1 2 3; do
-    print -r -- "run $n"
-    env WINE_HEAT_EXE=wakes.exe WINE_HEAT_COUNT=1 WINE_HEAT_DUMP_MS=500 WINE_HEAT_WAKE=$m WINE_HEAT_LOG=$work/log-$m-$n \
-      GW2_TEST_PRODUCER_SECONDS=$(( n == 1 ? 60 : 20 )) GW2_TEST_SECONDS=300 \
-      "$run" "$mine" "$work/prefix-$m" "$exes/wakes.exe"
-  done
+  local m=$1
+  env WINE_HEAT_EXE=wakes.exe WINE_HEAT_COUNT=1 WINE_HEAT_DUMP_MS=500 WINE_HEAT_WAKE=$m WINE_HEAT_LOG=$work/log-$m \
+    GW2_TEST_PRODUCER_SECONDS=60 GW2_TEST_SECONDS=300 \
+    "$run" "$mine" "$work/prefix-$m" "$exes/wakes.exe"
 }
 
 # programs that fail under the engine's ntdll.so, on a bug of its that mine fixes (blocks 3 and 3b)
@@ -135,7 +132,7 @@ engine_bugs=(mutexall putback dlsuspend)
 quiet() {
   local name=$1 wine=$2 log=$3 left
   local -a programs=("$exes"/*.exe)
-  programs=(${programs:#*/(leftover|rundll|modeset).exe})
+  programs=(${programs:#*/(leftover|rundll).exe})
   shift 3
   [[ $wine == "$engine" ]] && programs=(${programs:#*/(${(~j:|:)engine_bugs}).exe})
   mkdir -p "$log"
@@ -154,7 +151,7 @@ quiet() {
 # blocks 1 to 6, my ntdll.so
 if want 1; then
 for m in off one skip one,skip; do
-  mkdir -p "$work"/log-$m-{1,2,3}
+  mkdir -p "$work/log-$m"
   side "wake=$m" mode $m
 done
 collect

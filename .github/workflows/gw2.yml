@@ -26,7 +26,10 @@
 #   - the same with one line of NtYieldExecution changed, and then with one line of an
 #     Objective-C method of the Mac driver changed: the strict gate has to fail on the file and name
 #     the function. It holds the broken file to the engine's with the strict gate, and to my base
-#     build of the engine's commit with the structural one, so it runs whatever the toolchain.
+#     build of the engine's commit with the structural one, so it runs whatever the toolchain. Its
+#     inputs are the scripts, the toolchain and the engine's commit, never the change's source, so
+#     a pull request runs the two only when it changes a file under .github or a test script
+#     (tests/gw2/*.zsh). A push always runs them (jdrly/gw2-on-mac#323).
 #   - this commit, every object of the three files compiled again, compared by compare.py patched: each
 #     object none of whose inputs (makedep's rule for it: its .c or .m and every header it
 #     includes) the commit changes is the base build's, by its compile command, code, data,
@@ -50,10 +53,8 @@
 #   tests/gw2/native/frames.c and mouse_scale.c, built natively, test the driver's frame decision
 #   and its mouse speed factor (WINE_MACDRV_MOUSE_SCALE), and fexstats.c the reader of FEX's
 #   counters (jdrly/gw2-on-mac#111) and their tick rate (jdrly/gw2-on-mac#156), and ratio.c win32u's
-#   make_ratio(), cut out of dlls/win32u/sysparams.c (jdrly/gw2-on-mac#159); modeset.exe changes the
-#   display mode with EmulateModeset Y at 192 DPI under the engine with my ntdll.so and my win32u.so;
-#   layered.exe under the engine
-#   with my winemac.so counts the frames WINE_MACDRV_SURFACE skips, where the driver starts; and
+#   make_ratio(), cut out of dlls/win32u/sysparams.c (jdrly/gw2-on-mac#159); layered.exe under the
+#   engine with my winemac.so counts the frames WINE_MACDRV_SURFACE skips, where the driver starts; and
 #   tests/gw2/matrix.zsh runs them all under the engine from the release tarball: with its own
 #   ntdll.so, and with mine in each WINE_HEAT_WAKE mode, with no WINE_HEAT_* variable and with
 #   them set for another program, and, when the build ships my win32u.so, SetCursor and the empty
@@ -67,20 +68,22 @@
 #   restore.exe minimizes its window and has tests/gw2/native/reopen bring it back with the reopen
 #   Apple event, as a click on the Dock icon does, under the engine with my winemac.so and under
 #   the engine's own, and checks which WM_NCACTIVATE each sends (jdrly/gw2-on-mac#160).
-#   tests/gw2/attach/attach.c, built for arm64 as the engine's winedbg is, attaches to the x86_64
-#   count.exe and detaches: count.exe has to run on under the engine with my ntdll.so
-#   (jdrly/gw2-on-mac#174).
 #   leftover.exe leaves a process behind, and tests/gw2/run.zsh has to fail its run, name the
 #   process and end it (jdrly/gw2-on-mac#128). rundll.exe has rundll32 call the entry point of a
 #   stand-in for arcdps's d3d11.dll: it has to fail with Wine's default order and pass with the app's
-#   compatdb rule for rundll32.exe (jdrly/gw2-on-mac#155). A push to gw2-on-mac runs only the
-#   prefix boot and smoke.exe, under the engine's ntdll.so and under mine, when a green pull
-#   request run tested the same tree on a head that contains the push's parent, which Publish
-#   names (jdrly/gw2-on-mac#241). Any other push runs every test. A pull request runs only the
+#   compatdb rule for rundll32.exe (jdrly/gw2-on-mac#155). A push to gw2-on-mac runs every test
+#   (jdrly/gw2-on-mac#323; up to then a push whose tree a green pull request run had tested ran
+#   only smoke.exe, jdrly/gw2-on-mac#241). A pull request runs only the
 #   tests of the files it can have changed: the build job's selection.env says which of ntdll.so,
-#   winemac.so and win32u.so the fork report or the changed paths reach, and a change to tests/gw2
-#   or .github runs everything (jdrly/gw2-on-mac#217), unless it changes only Markdown files,
-#   comment lines of this workflow or its lint and publish jobs (jdrly/gw2-on-mac#228). A new test
+#   winemac.so and win32u.so the fork report or the changed paths reach, and any change under
+#   tests/gw2 or .github runs the tests of all three (jdrly/gw2-on-mac#217, #323), blocks 4 to 6
+#   as HEAT below says. One that changes only
+#   Markdown files doesn't build at all: the changes job says so, and the build job and with it
+#   the tests are skipped (jdrly/gw2-on-mac#228, #323). Of matrix.zsh's ntdll blocks, blocks 4, 5
+#   and 6 (spin.exe, the sampler and the requests log) run only when selection.env's HEAT is 1:
+#   on a push, and on a pull request unless every file it changes is clearly outside them
+#   (Markdown, the Mac driver, win32u, and tests of other blocks), as the Compare step lists
+#   (jdrly/gw2-on-mac#323). A new test
 #   step names the RUN_* of the files it tests in its if:. mutexall's and putback's runs under the
 #   engine's ntdll.so, which have to lose a race to pass, run only when MACH9_VERSION, msync.c,
 #   either program, matrix.zsh or run.zsh changed, which sets ENGINE_BUGS (jdrly/gw2-on-mac#324,
@@ -100,8 +103,7 @@
 # publish: after the others are green, packs ntdll-arm64-<commit>.tar.xz and
 #   macdrv-arm64-<commit>.tar.xz and prints their sha256. For a push to gw2-on-mac it adds both to
 #   the pre-release arm64-builds, the one release this workflow makes, never marked latest, keeps
-#   the 30 newest of each kind, and says which pull request's green run tested the same tree with
-#   the push's parent in its head, or that none did. The pre-release this workflow filled before jdrly/gw2-on-mac#121 keeps the
+#   the 30 newest of each kind. The pre-release this workflow filled before jdrly/gw2-on-mac#121 keeps the
 #   archives of earlier commits under the names they had, and gets nothing more.
 name: GW2
 
@@ -149,20 +151,55 @@ defaults:
     shell: bash
 
 jobs:
+  # A pull request that changes only Markdown files builds and tests nothing
+  # (jdrly/gw2-on-mac#323, docs/gw2/adr/0015): every file of GitHub's compare of its base with its
+  # head, a renamed file under both names, ends in .md. A lookup that fails, and a list GitHub cut
+  # at 300 files, count as code. A push always builds.
+  changes:
+    name: Markdown only
+    runs-on: ubuntu-24.04
+    outputs:
+      docs: ${{ steps.docs.outputs.docs }}
+    steps:
+      - name: Whether the pull request changes only Markdown files
+        id: docs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          docs=0 why="a push builds"
+          if [[ $GITHUB_EVENT_NAME == pull_request ]]; then
+            out=$(gh api "repos/$GH_REPO/compare/$PR_BASE...$COMMIT" \
+              -q '(.files | length | tostring), (.files[] | .filename, (.previous_filename // empty))') || out=""
+            n=$(sed -n 1p <<<"$out")
+            names=$(sed 1d <<<"$out")
+            if ! [[ $n =~ ^[0-9]+$ ]]; then
+              why="the compare of $PR_BASE with $COMMIT failed"
+            elif (( n == 0 || n >= 300 )); then
+              why="GitHub's compare lists $n files"
+            elif grep -qv '\.md$' <<<"$names"; then
+              why="not only Markdown: $(grep -v '\.md$' <<<"$names" | awk 'NR <= 3 { printf "%s%s", (NR > 1 ? " " : ""), $0 }')"
+            else
+              docs=1 why="only Markdown files, $n of them: the build and the tests are skipped"
+            fi
+          fi
+          echo "docs=$docs" >>"$GITHUB_OUTPUT"
+          echo "Markdown only: $docs, $why" | tee -a "$GITHUB_STEP_SUMMARY"
+
   build:
     name: Build ntdll.so, winemac.so and win32u.so
+    needs: changes
+    if: needs.changes.outputs.docs != '1'
     runs-on: *runner
     timeout-minutes: 60
     permissions:
       contents: read
-      # to find the pull request whose run tested a pushed tree
-      actions: read
-      pull-requests: read
     outputs:
-      full: ${{ steps.owes.outputs.full }}
       run_ntdll: ${{ steps.owes.outputs.run_ntdll }}
       run_winemac: ${{ steps.owes.outputs.run_winemac }}
       run_win32u: ${{ steps.owes.outputs.run_win32u }}
+      heat: ${{ steps.owes.outputs.heat }}
       engine_bugs: ${{ steps.owes.outputs.engine_bugs }}
       lanes: ${{ steps.owes.outputs.lanes }}
     env:
@@ -239,6 +276,29 @@ jobs:
             exit 1
           fi
           echo "the merge commit's tree is the head's, $head"
+      # Whether the two broken builds below are owed (jdrly/gw2-on-mac#323): they test compare.py's
+      # strict gate on the engine's commit, so their inputs are the scripts under .github/gw2 and
+      # this workflow, never the change's source. A pull request runs them when it changes any file
+      # under .github or a test script; a push always does.
+      - name: Whether the broken builds run
+        id: gates
+        env:
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          run=1 why="a push runs them"
+          if [[ $GITHUB_EVENT_NAME == pull_request ]]; then
+            fork=$(git -C src merge-base "$COMMIT" "$PR_BASE")
+            # a diff that fails counts as a change
+            changed=$( { git -C src diff --no-renames --name-only "$fork" "$COMMIT" -- .github 'tests/gw2/*.zsh' || echo "a diff that failed"; } |
+              awk 'NR <= 3 { printf "%s%s", (NR > 1 ? " " : ""), $0 } END { if (NR > 3) printf " and %d more", NR - 3 }')
+            if [[ -n $changed ]]; then
+              why="changed: $changed"
+            else
+              run=0 why="nothing under .github and no test script changed"
+            fi
+          fi
+          echo "run=$run" >>"$GITHUB_OUTPUT"
+          echo "The broken builds: $run, $why" | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Restore Mach9
         id: mach9
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -421,7 +481,7 @@ jobs:
       # with another toolchain my base build) has to fail, and its listing has to name
       # NtYieldExecution and nothing outside sync.c, where NtDelayExecution may have it inlined.
       - name: The baseline compare fails on a broken build
-        if: ${{ !cancelled() && steps.base.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.base.outcome == 'success' && steps.gates.outputs.run == '1' }}
         run: |
           f=dlls/ntdll/unix/sync.c
           sed -i '' '/^NTSTATUS WINAPI NtYieldExecution/,/^}/s/^    sched_yield();$/    sched_yield(); sched_yield();/' "$SRC/$f"
@@ -441,7 +501,7 @@ jobs:
       # after it moves. The byte gate against $REFERENCE has to fail on winemac.so, and its listing
       # has to name the method and nothing outside cocoa_window.m.
       - name: The baseline compare fails on a broken Objective-C method
-        if: ${{ !cancelled() && steps.base.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.base.outcome == 'success' && steps.gates.outputs.run == '1' }}
         run: |
           f=dlls/winemac.drv/cocoa_window.m
           sed -i '' '/^    - (void) setColorImage:(CGImageRef)image$/,/^    }$/s/^        colorImage = CGImageRetain(image);$/        colorImage = CGImageRetain(CGImageRetain(image));/' "$SRC/$f"
@@ -490,6 +550,9 @@ jobs:
       - name: Compare
         id: compare
         if: ${{ !cancelled() && steps.head.outcome == 'success' }}
+        env:
+          # on a push, the branch's tip before it (all zeros for a new branch)
+          PUSH_BEFORE: ${{ github.event.before }}
         run: |
           touched=()
           while IFS= read -r f; do touched+=("$f"); done < <(git -C "$SRC" diff --name-only "$BASE_COMMIT" "$COMMIT")
@@ -517,55 +580,90 @@ jobs:
           # counts as changed when the fork report lists a function, or when the change touches a
           # path that can reach it (a data-only change has no changed function). TESTS says the
           # tests or the CI changed, and then everything runs: any file under tests/gw2 or .github
-          # but the Markdown ones, and of this workflow what is left without its comment lines and
-          # its lint and publish jobs, which reach no test (jdrly/gw2-on-mac#228). A push gets the
-          # first four set: its tests job decides by FULL alone. ENGINE_BUGS says whether mutexall's
+          # (jdrly/gw2-on-mac#323; from #228 to then, Markdown files and gw2.yml's comment lines and
+          # lint and publish jobs didn't count). HEAT says whether matrix.zsh's blocks 4, 5 and 6
+          # run (jdrly/gw2-on-mac#323), and fails open: it is 0 only when every changed file is
+          # clearly outside them. A push gets these five set. ENGINE_BUGS says whether mutexall's
           # and putback's runs under the engine's ntdll.so are owed (jdrly/gw2-on-mac#324): a new
           # MACH9_VERSION, or a change to msync.c, where both bugs are, to either program, or to
           # matrix.zsh or run.zsh, which decide what their runs mean. On a push it compares with the
-          # push's parent.
+          # branch's tip before the push, so a push of several commits counts them all. why.txt has
+          # each flag's reason, for the summary.
           mkdir -p "$RUNNER_TEMP/selection"
+          why=$RUNNER_TEMP/selection/why.txt
+          : >"$why"
+          # changed <since> <path>...: up to three of the paths that changed since <since>, on one
+          # line, a rename as a deletion and an addition. A diff that fails counts as a change.
+          changed() {
+            local since=$1
+            shift
+            { git -C "$SRC" diff --no-renames --name-only "$since" "$COMMIT" -- "$@" || echo "a diff that failed"; } |
+              awk 'NR <= 3 { printf "%s%s", (NR > 1 ? " " : ""), $0 } END { if (NR > 3) printf " and %d more", NR - 3 }'
+          }
+          # flag <name> <0|1> <reason>: a line of selection.env, and the same with its reason in why.txt
+          flag() { echo "$1=$2"; echo "$1=$2, $3" >>"$why"; }
           {
             for lib in ntdll winemac win32u; do
-              flag=1
-              if [[ -n ${FORK:-} ]]; then
-                flag=0
-                grep -qx "result: $lib.so moved=0 changed=0 new=0 gone=0" "$RUNNER_TEMP/fork-$lib.md" || flag=1
-                case $lib in
-                  ntdll) paths=(dlls/ntdll include server tools) ;;
-                  winemac) paths=(dlls/winemac.drv include) ;;
-                  win32u) paths=(dlls/win32u include) ;;
-                esac
-                git -C "$SRC" diff --quiet "$FORK" "$COMMIT" -- "${paths[@]}" || flag=1
+              name=$(echo "$lib" | tr '[:lower:]' '[:upper:]')
+              if [[ -z ${FORK:-} ]]; then
+                flag "$name" 1 "a push has no fork point"
+                continue
               fi
-              echo "$(echo "$lib" | tr '[:lower:]' '[:upper:]')=$flag"
+              case $lib in
+                ntdll) paths=(dlls/ntdll include server tools) ;;
+                winemac) paths=(dlls/winemac.drv include) ;;
+                win32u) paths=(dlls/win32u include) ;;
+              esac
+              names=$(changed "$FORK" "${paths[@]}")
+              if ! grep -qx "result: $lib.so moved=0 changed=0 new=0 gone=0" "$RUNNER_TEMP/fork-$lib.md"; then
+                flag "$name" 1 "the fork report lists a function of $lib.so"
+              elif [[ -n $names ]]; then
+                flag "$name" 1 "changed: $names"
+              else
+                flag "$name" 0 "no function of $lib.so and nothing under ${paths[*]} changed"
+              fi
             done
-            flag=1
-            if [[ -n ${FORK:-} ]]; then
-              flag=0
-              git -C "$SRC" diff --quiet "$FORK" "$COMMIT" -- tests/gw2 .github ':(exclude)*.md' \
-                ':(exclude).github/workflows/gw2.yml' || flag=1
-              # reach <commit>: its gw2.yml without comment lines and without the lint and publish jobs
-              reach() {
-                git -C "$SRC" show "$1:.github/workflows/gw2.yml" |
-                  awk '/^  (lint|publish):$/ { skip = 1; next } /^  [a-z][a-z0-9_-]*:$/ { skip = 0 } !skip && !/^[[:space:]]*#/'
-              }
-              [[ $(reach "$FORK") == "$(reach "$COMMIT")" ]] || flag=1
+            if [[ -z ${FORK:-} ]]; then
+              flag TESTS 1 "a push has no fork point"
+              flag HEAT 1 "a push has no fork point"
+            else
+              names=$(changed "$FORK" tests/gw2 .github)
+              if [[ -n $names ]]; then
+                flag TESTS 1 "changed: $names"
+              else
+                flag TESTS 0 "nothing under tests/gw2 or .github changed"
+              fi
+              # clearly outside blocks 4, 5 and 6: Markdown, the Mac driver, win32u, and the test
+              # programs of other blocks and steps (tests/gw2/*.c but spin.c, prof.c, requests.c and
+              # timers.c, tests/gw2/native, tests/gw2/addon)
+              names=$(changed "$FORK" . ':(exclude)*.md' ':(exclude)dlls/winemac.drv' ':(exclude)dlls/win32u' \
+                ':(exclude,glob)tests/gw2/*.c' ':(exclude)tests/gw2/native' ':(exclude)tests/gw2/addon')
+              theirs=$(changed "$FORK" tests/gw2/spin.c tests/gw2/prof.c tests/gw2/requests.c tests/gw2/timers.c)
+              if [[ -n $names || -n $theirs ]]; then
+                flag HEAT 1 "changed: ${names:-$theirs}"
+              else
+                flag HEAT 0 "only Markdown, dlls/winemac.drv, dlls/win32u or other blocks' tests changed"
+              fi
             fi
-            echo "TESTS=$flag"
-            # against the fork point, or on a push against its parent
-            flag=1
-            since=${FORK:-$(git -C "$SRC" rev-parse --verify -q "$COMMIT^" || true)}
-            if [[ -n $since ]]; then
-              flag=0
-              git -C "$SRC" diff --quiet "$since" "$COMMIT" -- dlls/ntdll/unix/msync.c tests/gw2/mutexall.c \
-                tests/gw2/putback.c tests/gw2/matrix.zsh tests/gw2/run.zsh || flag=1
+            # against the fork point, or on a push against the branch's tip before it
+            since=${FORK:-}
+            [[ -n $since ]] || since=$(git -C "$SRC" rev-parse --verify -q "${PUSH_BEFORE:-0}^{commit}" || true)
+            if [[ -z $since ]]; then
+              flag ENGINE_BUGS 1 "no commit to compare with"
+            else
               mach9() { git -C "$SRC" show "$1:.github/workflows/gw2.yml" | sed -n 's/^  MACH9_VERSION: *//p'; }
-              [[ $(mach9 "$since") == "$(mach9 "$COMMIT")" ]] || flag=1
+              names=$(changed "$since" dlls/ntdll/unix/msync.c tests/gw2/mutexall.c tests/gw2/putback.c \
+                tests/gw2/matrix.zsh tests/gw2/run.zsh)
+              if [[ -n $names ]]; then
+                flag ENGINE_BUGS 1 "changed since ${since:0:11}: $names"
+              elif [[ $(mach9 "$since") != "$(mach9 "$COMMIT")" ]]; then
+                flag ENGINE_BUGS 1 "MACH9_VERSION changed since ${since:0:11}"
+              else
+                flag ENGINE_BUGS 0 "MACH9_VERSION, msync.c, mutexall.c, putback.c, matrix.zsh and run.zsh as at ${since:0:11}"
+              fi
             fi
-            echo "ENGINE_BUGS=$flag"
           } >"$RUNNER_TEMP/selection/selection.env"
-          { echo "### What this run's tests cover"; echo '```'; cat "$RUNNER_TEMP/selection/selection.env"; echo '```'; } |
+          { echo "### What this run's tests cover"; echo '```'; cat "$why"; echo '```'; } |
             tee -a "$GITHUB_STEP_SUMMARY"
           exit "$status"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -578,70 +676,73 @@ jobs:
             ${{ env.BUILD }}/dlls/win32u/win32u.so
           retention-days: 7
 
-      # What the tests job owes, as this job's outputs. full: a pull request owes every test of
-      # what it changed; a push owes them too, unless a green pull request run tested the same
-      # tree: then the smoke test is enough (jdrly/gw2-on-mac#214). A pull request's run tests
-      # GitHub's merge of the head into gw2-on-mac, so the push's parent (gw2-on-mac before the
-      # push) also has to be an ancestor of the head: then every gw2-on-mac that run could have
-      # merged was already in the head. The tree alone isn't enough, because gw2-on-mac can gain a
-      # commit and revert it while the pull request waits (jdrly/gw2-on-mac#241). A lookup that
-      # fails counts as "not tested". run_<file>: full, and the file, the tests or the CI changed
-      # (jdrly/gw2-on-mac#217). lanes: the tests job's lanes that have a step to run, as a JSON
-      # list for its matrix (jdrly/gw2-on-mac#229): window for the steps with a window or a
+      # What the tests job owes, as this job's outputs. run_<file>: the file, the tests or the CI
+      # changed (jdrly/gw2-on-mac#217); a push sets all three. Up to jdrly/gw2-on-mac#323 a push
+      # whose tree a green pull request run had tested ran only the smoke test (#214, #241); now
+      # every push runs every test. lanes: the tests job's lanes that have a step to run, as a
+      # JSON list for its matrix (jdrly/gw2-on-mac#229): window for the steps with a window or a
       # program of their own and the matrix's block 7, matrix-a and matrix-b for its ntdll blocks,
-      # and smoke alone when nothing else is owed.
+      # and smoke alone when nothing else is owed. heat: HEAT, which "Run them" reads for blocks
+      # 4, 5 and 6 (jdrly/gw2-on-mac#323). The summary names each block's flag and its reason,
+      # from the Compare step's why.txt. Block 7 needs a win32u.so of mine, which Stage ships by
+      # the same test of compare-win32u.md.
       - name: Which tests this run owes
         id: owes
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
         run: |
-          full=1
-          if [[ $GITHUB_EVENT_NAME != pull_request ]]; then
-            tree=$(gh api "repos/$GH_REPO/commits/$COMMIT" -q .commit.tree.sha) || tree=""
-            parent=$(gh api "repos/$GH_REPO/commits/$COMMIT" -q '.parents[0].sha // empty') || parent=""
-            while read -r pr head; do
-              [[ -n $pr && -n $tree && -n $parent ]] || continue
-              [[ $(gh api "repos/$GH_REPO/commits/$head" -q .commit.tree.sha) == "$tree" ]] || continue
-              [[ $(gh api "repos/$GH_REPO/compare/$parent...$head" -q .status) == ahead ]] || continue
-              run=$(gh api "repos/$GH_REPO/actions/workflows/gw2.yml/runs?event=pull_request&status=success&head_sha=$head" \
-                -q '.workflow_runs[0].html_url // empty') || run=""
-              if [[ -n $run ]]; then
-                full=0
-                echo "pull request #$pr's green run tested this tree: $run" | tee -a "$GITHUB_STEP_SUMMARY"
-                break
-              fi
-            done < <(gh api "repos/$GH_REPO/commits/$COMMIT/pulls" -q '.[] | select(.merged_at != null) | "\(.number) \(.head.sha)"')
-            if (( full )); then
-              echo "::warning::no green pull request run tested the tree of $COMMIT, so this push runs every test" |
-                tee -a "$GITHUB_STEP_SUMMARY"
-            fi
-          fi
           f=$RUNNER_TEMP/selection/selection.env
-          [[ $(grep -cE '^(NTDLL|WINEMAC|WIN32U|TESTS|ENGINE_BUGS)=[01]$' "$f") == 5 && $(wc -l <"$f" | tr -d ' ') == 5 ]] ||
-            { echo "::error::selection.env isn't the five lines the Compare step writes"; cat "$f"; exit 1; }
-          # shellcheck disable=SC1090 # five checked lines of NAME=0 or NAME=1
+          [[ $(grep -cE '^(NTDLL|WINEMAC|WIN32U|TESTS|HEAT|ENGINE_BUGS)=[01]$' "$f") == 6 && $(wc -l <"$f" | tr -d ' ') == 6 ]] ||
+            { echo "::error::selection.env isn't the six lines the Compare step writes"; cat "$f"; exit 1; }
+          # shellcheck disable=SC1090 # six checked lines of NAME=0 or NAME=1
           . "$f"
           any=0
           for name in NTDLL WINEMAC WIN32U; do
             run=0
-            if [[ $full == 1 && ( ${!name} == 1 || $TESTS == 1 ) ]]; then run=1; any=1; fi
+            if [[ ${!name} == 1 || $TESTS == 1 ]]; then run=1; any=1; fi
             printf -v "RUN_$name" %s "$run"
             echo "run_$(echo "$name" | tr '[:upper:]' '[:lower:]')=$run" >>"$GITHUB_OUTPUT"
           done
-          echo "full=$full" >>"$GITHUB_OUTPUT"
-          echo "engine_bugs=$ENGINE_BUGS" >>"$GITHUB_OUTPUT"
+          { echo "heat=$HEAT"; echo "engine_bugs=$ENGINE_BUGS"; } >>"$GITHUB_OUTPUT"
           lanes=()
           (( any )) && lanes+=(window)
           [[ $RUN_NTDLL == 1 ]] && lanes+=(matrix-a matrix-b)
           (( ${#lanes[@]} )) || lanes=(smoke)
           json=$(printf '"%s",' "${lanes[@]}")
           echo "lanes=[${json%,}]" >>"$GITHUB_OUTPUT"
+          # why <name>: the Compare step's reason for <name>'s flag
+          why() { sed -n "s/^$1=[01], //p" "$RUNNER_TEMP/selection/why.txt"; }
+          if [[ $NTDLL == 1 ]]; then
+            ntdll="NTDLL=1, $(why NTDLL)"
+          elif [[ $TESTS == 1 ]]; then
+            ntdll="TESTS=1, $(why TESTS)"
+          else
+            ntdll="NTDLL=0 and TESTS=0: $(why NTDLL); $(why TESTS)"
+          fi
+          heat=0 bugs=0 b7=0 shipped=0
+          if [[ $RUN_NTDLL == 1 && $HEAT == 1 ]]; then heat=1; fi
+          if [[ $RUN_NTDLL == 1 && $ENGINE_BUGS == 1 ]]; then bugs=1; fi
+          # Stage's test for a win32u.so of mine
+          if grep -qE '^- (changed|new|removed): [1-9]' "$RUNNER_TEMP/compare-win32u.md"; then shipped=1; fi
+          if [[ $shipped == 1 && ( $RUN_NTDLL == 1 || $RUN_WIN32U == 1 ) ]]; then b7=1; fi
           {
             echo "### What the tests job owes"
             echo '```'
-            echo "FULL=$full RUN_NTDLL=$RUN_NTDLL RUN_WINEMAC=$RUN_WINEMAC RUN_WIN32U=$RUN_WIN32U ENGINE_BUGS=$ENGINE_BUGS"
+            echo "RUN_NTDLL=$RUN_NTDLL RUN_WINEMAC=$RUN_WINEMAC RUN_WIN32U=$RUN_WIN32U HEAT=$HEAT ENGINE_BUGS=$ENGINE_BUGS"
             echo "lanes: ${lanes[*]}"
+            echo
+            echo "matrix.zsh's blocks, 1 if they run:"
+            echo "1, 1b, 2, 3, 3b, 8: $RUN_NTDLL, $ntdll"
+            if [[ $RUN_NTDLL == 1 ]]; then
+              echo "4, 5, 6: $heat, HEAT=$HEAT, $(why HEAT)"
+              echo "3 and 3b's runs of mutexall and putback under the engine's ntdll.so: $bugs, ENGINE_BUGS=$ENGINE_BUGS, $(why ENGINE_BUGS)"
+            else
+              echo "4, 5, 6: 0, as block 1: HEAT=$HEAT only picks among the ntdll blocks a run owes"
+              echo "3 and 3b's runs of mutexall and putback under the engine's ntdll.so: 0, as block 1"
+            fi
+            if [[ $shipped == 1 ]]; then
+              echo "7: $b7, RUN_NTDLL=$RUN_NTDLL RUN_WIN32U=$RUN_WIN32U, with the win32u.so of mine this build ships"
+            else
+              echo "7: 0, this build ships no win32u.so of mine"
+            fi
             echo '```'
           } | tee -a "$GITHUB_STEP_SUMMARY"
       # The test programs, built once for every lane: tests/gw2/*.c for Win64 x86_64 with
@@ -650,7 +751,7 @@ jobs:
         run: |
           [[ $(git -C "$SRC" rev-parse HEAD) == "$COMMIT" ]] || { echo "::error::$SRC isn't at $COMMIT"; exit 1; }
           out=$RUNNER_TEMP/programs
-          mkdir -p "$out/tests/addon" "$out/attach"
+          mkdir -p "$out/tests/addon"
           for c in "$SRC"/tests/gw2/*.c; do
             # gdi32 for layered.exe's bitmap; mingw's default libraries don't have it
             "$MINGW_DIR/bin/x86_64-w64-mingw32-clang" -O2 -Wall -Werror -o "$out/tests/$(basename "$c" .c).exe" "$c" -lgdi32
@@ -659,11 +760,7 @@ jobs:
           "$MINGW_DIR/bin/x86_64-w64-mingw32-windres" -O coff -o "$RUNNER_TEMP/addon.res" "$SRC/tests/gw2/addon/d3d11.rc"
           "$MINGW_DIR/bin/x86_64-w64-mingw32-clang" -O2 -Wall -Werror -shared -o "$out/tests/addon/d3d11.dll" \
             "$SRC/tests/gw2/addon/d3d11.c" "$RUNNER_TEMP/addon.res"
-          # the debugger for arm64 and the process it attaches to for x86_64, in a folder of their
-          # own, which matrix.zsh doesn't run (jdrly/gw2-on-mac#174)
-          "$MINGW_DIR/bin/aarch64-w64-mingw32-clang" -O2 -Wall -Werror -o "$out/attach/attach.exe" "$SRC/tests/gw2/attach/attach.c"
-          "$MINGW_DIR/bin/x86_64-w64-mingw32-clang" -O2 -Wall -Werror -o "$out/attach/count.exe" "$SRC/tests/gw2/attach/count.c"
-          ls "$out/tests" "$out/tests/addon" "$out/attach"
+          ls "$out/tests" "$out/tests/addon"
 
       # dist/ntdll and dist/macdrv: each kind's files with one VERSION and the licences. win32u.so
       # goes with winemac.so (the app's macdrv) when the compare lists a function of it this commit
@@ -751,10 +848,10 @@ jobs:
       matrix:
         lane: ${{ fromJSON(needs.build.outputs.lanes) }}
     env:
-      FULL: ${{ needs.build.outputs.full }}
       RUN_NTDLL: ${{ needs.build.outputs.run_ntdll }}
       RUN_WINEMAC: ${{ needs.build.outputs.run_winemac }}
       RUN_WIN32U: ${{ needs.build.outputs.run_win32u }}
+      HEAT: ${{ needs.build.outputs.heat }}
       ENGINE_BUGS: ${{ needs.build.outputs.engine_bugs }}
       LANE: ${{ matrix.lane }}
     steps:
@@ -810,7 +907,7 @@ jobs:
         with:
           name: macdrv-arm64-${{ env.COMMIT }}
           path: ${{ runner.temp }}/macdrv-dist
-      # the test programs the build job built: tests/ and attach/, straight into $RUNNER_TEMP
+      # the test programs the build job built: tests/, straight into $RUNNER_TEMP
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: programs-${{ env.COMMIT }}
@@ -841,7 +938,7 @@ jobs:
             shasum -a 256 "$RUNNER_TEMP"/{engine,win32u}/wine/lib/wine/aarch64-unix/win32u.so
           fi
           "$RUNNER_TEMP/mine/wine/bin/wine" --version
-          ls "$RUNNER_TEMP/tests" "$RUNNER_TEMP/tests/addon" "$RUNNER_TEMP/attach"
+          ls "$RUNNER_TEMP/tests" "$RUNNER_TEMP/tests/addon"
       # One booted prefix for each engine tree this lane uses, side by side, with smoke.exe run in
       # each. run.zsh starts every later prefix as a clone of its tree's (GW2_TEST_TEMPLATES), so a
       # lane boots a new prefix once per tree and not once per run (jdrly/gw2-on-mac#239). The
@@ -1033,30 +1130,6 @@ jobs:
             (( status == 0 )) || { echo "::error::calls.exe failed with $mode"; exit 1; }
             (( events > 0 )) || { echo "::error::$mode: no event arrived, so calls.exe didn't stress the event path"; exit 1; }
           done
-      # jdrly/gw2-on-mac#159: modeset.exe with EmulateModeset Y at 192 DPI, under the engine with my
-      # ntdll.so and my win32u.so, where it has to pass a size whose ratio make_ratio() couldn't hold
-      # before (1366x768 first) or else a letterboxed mode. Up to Mach9 0.3.1 it also had to fail
-      # under the engine's win32u.so. Since 0.4.0 athei's commit has both fixes, so the engine's file
-      # passes as mine does, and that run is gone. Only where the Mac driver starts.
-      - name: A mode change to 1366x768
-        if: matrix.lane == 'window' && (env.RUN_WIN32U == '1' || env.RUN_NTDLL == '1')
-        run: |
-          if ! grep -qF 'gw2 test window: the Mac driver started' "$RUNNER_TEMP/window.txt"; then
-            echo "::warning::the Mac driver doesn't start on this runner, so modeset.exe needs the Mac run" |
-              tee -a "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
-          [[ -d $RUNNER_TEMP/win32u ]] || { echo "::error::the build shipped no win32u.so of mine"; exit 1; }
-          mine=0
-          tests/gw2/run.zsh "$RUNNER_TEMP/win32u/wine" "$RUNNER_TEMP/modeset-mine" "$RUNNER_TEMP/tests/modeset.exe" \
-            >"$RUNNER_TEMP/modeset-mine.txt" || mine=1
-          { echo "### modeset.exe, my win32u.so"; echo '```'; cat "$RUNNER_TEMP/modeset-mine.txt"; echo '```'; } |
-            tee -a "$GITHUB_STEP_SUMMARY"
-          (( mine == 0 )) || { echo "::error::modeset.exe failed under my win32u.so"; exit 1; }
-          if ! grep -qF 'gw2 test modeset: changing to ' "$RUNNER_TEMP/modeset-mine.txt"; then
-            echo "::warning::this runner's display offers no size whose DPI ratio make_ratio() couldn't hold before, so only ratio.c tests one" |
-              tee -a "$GITHUB_STEP_SUMMARY"
-          fi
       # jdrly/gw2-on-mac#160: restore.exe minimizes its window, makes the desktop the foreground
       # window and runs tests/gw2/native/reopen, which sends the process the reopen Apple event, as a
       # click on the Dock icon does. Under the engine with my winemac.so the window has to be the
@@ -1106,7 +1179,7 @@ jobs:
       # then waits until it is gone, with no time limit of its own: SIGKILL can't be caught, and
       # only a process stuck in the kernel would hold the job until its time limit.
       - name: A process left behind
-        if: matrix.lane == 'window' && env.FULL == '1'
+        if: matrix.lane == 'window'
         run: |
           status=0
           GW2_TEST_EXPECT_FAIL=processes tests/gw2/run.zsh "$RUNNER_TEMP/engine/wine" "$RUNNER_TEMP/leftover-prefix" \
@@ -1137,7 +1210,7 @@ jobs:
       # stand-in (native). compatdb.so reads that variable with getenv, so each run sets it for all
       # of Wine, as the app does.
       - name: rundll32 and an addon's d3d11.dll
-        if: matrix.lane == 'window' && env.FULL == '1'
+        if: matrix.lane == 'window'
         run: |
           prefix=$RUNNER_TEMP/rundll-prefix
           rules=$RUNNER_TEMP/rundll.rules
@@ -1170,26 +1243,11 @@ jobs:
               [[ $loaded == "native " ]] || { echo "::error::with the rule: rundll32's d3d11.dll was \"$loaded\", not the stand-in alone"; exit 1; }
             fi
           done
-      # jdrly/gw2-on-mac#174: a debugger attaches to a running x86_64 process. attach.exe, built for
-      # arm64 as the engine's winedbg is, starts count.exe, attaches with DebugActiveProcess,
-      # continues the break-in's breakpoint, detaches, and passes once count.exe has counted on and
-      # exited with 0. Under the engine with my ntdll.so it has to pass. Up to Mach9 0.3.1 count.exe
-      # also had to die with c0000005 under the engine's own. Since 0.4.0 athei's commit has the fix,
-      # so the engine's file passes as mine does, and that run is gone.
-      - name: A debugger attached to an x86_64 process
-        if: matrix.lane == 'window' && env.RUN_NTDLL == '1'
-        run: |
-          mine=0
-          tests/gw2/run.zsh "$RUNNER_TEMP/mine/wine" "$RUNNER_TEMP/attach-mine" "$RUNNER_TEMP/attach/attach.exe" \
-            >"$RUNNER_TEMP/attach-mine.txt" || mine=1
-          { echo "### attach.exe under my ntdll.so"; echo '```'; cat "$RUNNER_TEMP/attach-mine.txt"; echo '```'; } |
-            tee -a "$GITHUB_STEP_SUMMARY"
-          (( mine == 0 )) || { echo "::error::attach.exe failed under my ntdll.so"; exit 1; }
       # The lanes' blocks, cut so that the three lanes take about the same time (docs/gw2/adr/0016):
       # block 7 (win32u) goes after the window steps, so a pull request that changes only my
       # win32u.so needs one lane, and matrix-a and matrix-b, which only a change that reaches my
       # ntdll.so gets, share the rest. Block 1 is the longest, and block 6 goes with 5, whose clone
-      # of my tree it uses.
+      # of my tree it uses. Blocks 4, 5 and 6 run only with HEAT (jdrly/gw2-on-mac#323).
       - name: Run them
         if: matrix.lane != 'smoke' && (env.RUN_NTDLL == '1' || env.RUN_WIN32U == '1')
         run: |
@@ -1197,17 +1255,19 @@ jobs:
           [[ -d $RUNNER_TEMP/win32u ]] && win32u=("$RUNNER_TEMP/win32u/wine")
           case $LANE in
             window) blocks=(win32u) ;;
-            matrix-a) blocks=(1 3b 4) ;;
-            matrix-b) blocks=(1b 2 3 5 6 8) ;;
+            matrix-a) blocks=(1 3b) ;;
+            matrix-b) blocks=(1b 2 3 8) ;;
             *) echo "::error::no blocks for the lane $LANE"; exit 1 ;;
           esac
+          if [[ $LANE == matrix-a && $HEAT == 1 ]]; then blocks+=(4); fi
+          if [[ $LANE == matrix-b && $HEAT == 1 ]]; then blocks+=(5 6); fi
           status=0
           GW2_MATRIX_BLOCKS="${blocks[*]}" GW2_MATRIX_ENGINE_BUGS=$ENGINE_BUGS tests/gw2/matrix.zsh "$RUNNER_TEMP/engine/wine" "$RUNNER_TEMP/mine/wine" "$RUNNER_TEMP/tests" "$RUNNER_TEMP/matrix" "${win32u[@]}" || status=$?
           # the disk left after the matrix's prefixes: #219's second run ran out of it
           df -h "$RUNNER_TEMP"
           exit $status
-      # Whenever the matrix's ntdll blocks don't run, on a push or on a pull request that leaves
-      # ntdll.so alone: that the engine boots a prefix and runs a program with its ntdll.so and with
+      # Whenever the matrix's ntdll blocks don't run, on a pull request that leaves ntdll.so
+      # alone: that the engine boots a prefix and runs a program with its ntdll.so and with
       # mine, side by side.
       - name: Smoke
         if: env.RUN_NTDLL != '1' && (matrix.lane == 'window' || matrix.lane == 'smoke')
@@ -1290,9 +1350,6 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: write
-      # to find the pull request whose run tested a pushed tree
-      actions: read
-      pull-requests: read
     # Two pushes never upload at once: the workflow's concurrency group runs one push to gw2-on-mac
     # at a time and never cancels it. A group of this job's own would let a pull request's pending
     # job cancel a push's, as it did to run 43116636183's upload.
@@ -1355,35 +1412,3 @@ jobs:
           latest=$(gh api "repos/$GH_REPO/releases/latest" -q .tag_name 2>/dev/null || true)
           echo "releases/latest: ${latest:-none}"
           [[ $latest != "$RELEASE" ]]
-      # The push's run skips the matrix; the run of the pull request it merged ran it. That run counts
-      # if it was green and on a head whose tree is the pushed tree and that contains the push's
-      # parent (a head up to date with gw2-on-mac, squashed), the build job's check
-      # (jdrly/gw2-on-mac#241). Says which, or that none did; it fails nothing. A failed lookup
-      # (jdrly/gw2-on-mac#254) is a warning, and the pull request it was for doesn't count.
-      - name: Which pull request's run tested this tree
-        if: github.event_name == 'push' && github.ref == 'refs/heads/gw2-on-mac'
-        run: |
-          failed=""
-          # a failed gh api call prints the error's body on stdout, so the variable is emptied
-          tree=$(gh api "repos/$GH_REPO/commits/$COMMIT" -q .commit.tree.sha) || { failed+="${failed:+, }$COMMIT's tree"; tree=""; }
-          parent=$(gh api "repos/$GH_REPO/commits/$COMMIT" -q '.parents[0].sha // empty') ||
-            { failed+="${failed:+, }$COMMIT's parent"; parent=""; }
-          pulls=$(gh api "repos/$GH_REPO/commits/$COMMIT/pulls" -q '.[] | select(.merged_at != null) | "\(.number) \(.head.sha)"') ||
-            { failed+="${failed:+, }$COMMIT's pull requests"; pulls=""; }
-          found=""
-          while read -r pr head; do
-            [[ -n $pr && -n $tree && -n $parent ]] || continue
-            pr_tree=$(gh api "repos/$GH_REPO/commits/$head" -q .commit.tree.sha) || { failed+="${failed:+, }#$pr's tree"; continue; }
-            [[ $pr_tree == "$tree" ]] || continue
-            status=$(gh api "repos/$GH_REPO/compare/$parent...$head" -q .status) || { failed+="${failed:+, }#$pr's compare"; continue; }
-            [[ $status == ahead ]] || continue
-            run=$(gh api "repos/$GH_REPO/actions/workflows/gw2.yml/runs?event=pull_request&status=success&head_sha=$head" \
-              -q '.workflow_runs[0].html_url // empty') || { failed+="${failed:+, }#$pr's runs"; continue; }
-            [[ -n $run ]] && found="pull request #$pr, head $head, the same tree: $run" && break
-          done <<< "$pulls"
-          if [[ -z $found ]]; then
-            found="no green run of a pull request tested this tree"
-            [[ -z $failed ]] || found="no tested pull request found, a lookup failed"
-          fi
-          [[ -z $failed ]] || echo "::warning title=A lookup failed::the lookup of $failed failed, see gh's errors above"
-          echo "The matrix for $COMMIT (tree ${tree:-unknown}): $found" | tee -a "$GITHUB_STEP_SUMMARY"

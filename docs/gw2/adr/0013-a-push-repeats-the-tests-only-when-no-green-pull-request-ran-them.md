@@ -1,6 +1,7 @@
 # A push repeats the tests only when no green pull request ran them on its tree
 
-Decided 2026-11-12, guarded 2026-11-16. Status: accepted.
+Decided 2026-11-12, guarded 2026-11-16. Status: superseded on 2026-11-20 by jdrly/gw2-on-mac #323:
+every push runs every test (the last consequence).
 
 On 2026-11-12 GitHub disabled this fork's workflows for wasted compute, after a night of pushes that
 cancelled runs in progress, three test jobs at once and a matrix of busy producers. One of my rules
@@ -35,6 +36,12 @@ and runs every test when it finds none.
   head into `gw2-on-mac`, so a commit that came to `gw2-on-mac` and was reverted while the pull
   request waited could leave a squashed tree equal to the head's that no run tested. Publish's
   summary makes the same check.
+
+- Since jdrly/gw2-on-mac #323 (2026-11-20) every push to `gw2-on-mac` runs every test, and the
+  lookup is gone from the build job and from Publish. #323 lets a pull request that changes only
+  Markdown skip its build and tests, so its green run would have vouched for a tree it never
+  built, and the merge push of a change to the CI would have run only the smoke test. A push now
+  costs a pull request's full run, about 12 minutes of wall clock, each time something merges.
 
 ## Alternatives I rejected
 
