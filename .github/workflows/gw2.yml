@@ -81,7 +81,11 @@
 #   winemac.so and win32u.so the fork report or the changed paths reach, and a change to tests/gw2
 #   or .github runs everything (jdrly/gw2-on-mac#217), unless it changes only Markdown files,
 #   comment lines of this workflow or its lint and publish jobs (jdrly/gw2-on-mac#228). A new test
-#   step names the RUN_* of the files it tests in its if:.
+#   step names the RUN_* of the files it tests in its if:. mutexall's and putback's runs under the
+#   engine's ntdll.so, which have to lose a race to pass, run only when MACH9_VERSION, msync.c,
+#   either program, matrix.zsh or run.zsh changed, which sets ENGINE_BUGS (jdrly/gw2-on-mac#324,
+#   docs/gw2/adr/0009). A run that has to fail prints "expected", not "FAIL", so a green run's log
+#   has no line that starts with FAIL.
 #   The tests job runs as lanes side by side, one job each (jdrly/gw2-on-mac#229): window (every
 #   step but the matrix, then the matrix's block 7), matrix-a and matrix-b (matrix.zsh's other
 #   blocks, cut in "Run them"), or smoke alone. The build job's last steps say which lanes a run
@@ -159,6 +163,7 @@ jobs:
       run_ntdll: ${{ steps.owes.outputs.run_ntdll }}
       run_winemac: ${{ steps.owes.outputs.run_winemac }}
       run_win32u: ${{ steps.owes.outputs.run_win32u }}
+      engine_bugs: ${{ steps.owes.outputs.engine_bugs }}
       lanes: ${{ steps.owes.outputs.lanes }}
     env:
       MACOSX_DEPLOYMENT_TARGET: "26.4"
@@ -513,8 +518,12 @@ jobs:
           # path that can reach it (a data-only change has no changed function). TESTS says the
           # tests or the CI changed, and then everything runs: any file under tests/gw2 or .github
           # but the Markdown ones, and of this workflow what is left without its comment lines and
-          # its lint and publish jobs, which reach no test (jdrly/gw2-on-mac#228). A push gets all
-          # four set: its tests job decides by FULL alone.
+          # its lint and publish jobs, which reach no test (jdrly/gw2-on-mac#228). A push gets the
+          # first four set: its tests job decides by FULL alone. ENGINE_BUGS says whether mutexall's
+          # and putback's runs under the engine's ntdll.so are owed (jdrly/gw2-on-mac#324): a new
+          # MACH9_VERSION, or a change to msync.c, where both bugs are, to either program, or to
+          # matrix.zsh or run.zsh, which decide what their runs mean. On a push it compares with the
+          # push's parent.
           mkdir -p "$RUNNER_TEMP/selection"
           {
             for lib in ntdll winemac win32u; do
@@ -544,6 +553,17 @@ jobs:
               [[ $(reach "$FORK") == "$(reach "$COMMIT")" ]] || flag=1
             fi
             echo "TESTS=$flag"
+            # against the fork point, or on a push against its parent
+            flag=1
+            since=${FORK:-$(git -C "$SRC" rev-parse --verify -q "$COMMIT^" || true)}
+            if [[ -n $since ]]; then
+              flag=0
+              git -C "$SRC" diff --quiet "$since" "$COMMIT" -- dlls/ntdll/unix/msync.c tests/gw2/mutexall.c \
+                tests/gw2/putback.c tests/gw2/matrix.zsh tests/gw2/run.zsh || flag=1
+              mach9() { git -C "$SRC" show "$1:.github/workflows/gw2.yml" | sed -n 's/^  MACH9_VERSION: *//p'; }
+              [[ $(mach9 "$since") == "$(mach9 "$COMMIT")" ]] || flag=1
+            fi
+            echo "ENGINE_BUGS=$flag"
           } >"$RUNNER_TEMP/selection/selection.env"
           { echo "### What this run's tests cover"; echo '```'; cat "$RUNNER_TEMP/selection/selection.env"; echo '```'; } |
             tee -a "$GITHUB_STEP_SUMMARY"
@@ -598,9 +618,9 @@ jobs:
             fi
           fi
           f=$RUNNER_TEMP/selection/selection.env
-          [[ $(grep -cE '^(NTDLL|WINEMAC|WIN32U|TESTS)=[01]$' "$f") == 4 && $(wc -l <"$f" | tr -d ' ') == 4 ]] ||
-            { echo "::error::selection.env isn't the four lines the Compare step writes"; cat "$f"; exit 1; }
-          # shellcheck disable=SC1090 # four checked lines of NAME=0 or NAME=1
+          [[ $(grep -cE '^(NTDLL|WINEMAC|WIN32U|TESTS|ENGINE_BUGS)=[01]$' "$f") == 5 && $(wc -l <"$f" | tr -d ' ') == 5 ]] ||
+            { echo "::error::selection.env isn't the five lines the Compare step writes"; cat "$f"; exit 1; }
+          # shellcheck disable=SC1090 # five checked lines of NAME=0 or NAME=1
           . "$f"
           any=0
           for name in NTDLL WINEMAC WIN32U; do
@@ -610,6 +630,7 @@ jobs:
             echo "run_$(echo "$name" | tr '[:upper:]' '[:lower:]')=$run" >>"$GITHUB_OUTPUT"
           done
           echo "full=$full" >>"$GITHUB_OUTPUT"
+          echo "engine_bugs=$ENGINE_BUGS" >>"$GITHUB_OUTPUT"
           lanes=()
           (( any )) && lanes+=(window)
           [[ $RUN_NTDLL == 1 ]] && lanes+=(matrix-a matrix-b)
@@ -619,7 +640,7 @@ jobs:
           {
             echo "### What the tests job owes"
             echo '```'
-            echo "FULL=$full RUN_NTDLL=$RUN_NTDLL RUN_WINEMAC=$RUN_WINEMAC RUN_WIN32U=$RUN_WIN32U"
+            echo "FULL=$full RUN_NTDLL=$RUN_NTDLL RUN_WINEMAC=$RUN_WINEMAC RUN_WIN32U=$RUN_WIN32U ENGINE_BUGS=$ENGINE_BUGS"
             echo "lanes: ${lanes[*]}"
             echo '```'
           } | tee -a "$GITHUB_STEP_SUMMARY"
@@ -734,6 +755,7 @@ jobs:
       RUN_NTDLL: ${{ needs.build.outputs.run_ntdll }}
       RUN_WINEMAC: ${{ needs.build.outputs.run_winemac }}
       RUN_WIN32U: ${{ needs.build.outputs.run_win32u }}
+      ENGINE_BUGS: ${{ needs.build.outputs.engine_bugs }}
       LANE: ${{ matrix.lane }}
     steps:
       # the Xcode the build used, for the native test's clang
@@ -1079,15 +1101,16 @@ jobs:
       # jdrly/gw2-on-mac#128: run.zsh's check for processes left behind. leftover.exe starts a Unix
       # process the wineserver doesn't know, without run.zsh's variable in its environment, and
       # exits. The run has to fail, name the process, and kill it. If run.zsh didn't, the step kills
-      # it and fails at once. kill -9 returns before the kernel has ended the process, so the step
+      # it and fails at once. The step marks that failure as expected, so run.zsh has to print
+      # "expected" for it, not "FAIL" (jdrly/gw2-on-mac#324). kill -9 returns before the kernel has ended the process, so the step
       # then waits until it is gone, with no time limit of its own: SIGKILL can't be caught, and
       # only a process stuck in the kernel would hold the job until its time limit.
       - name: A process left behind
         if: matrix.lane == 'window' && env.FULL == '1'
         run: |
           status=0
-          tests/gw2/run.zsh "$RUNNER_TEMP/engine/wine" "$RUNNER_TEMP/leftover-prefix" "$RUNNER_TEMP/tests/leftover.exe" \
-            >"$RUNNER_TEMP/leftover.txt" || status=$?
+          GW2_TEST_EXPECT_FAIL=processes tests/gw2/run.zsh "$RUNNER_TEMP/engine/wine" "$RUNNER_TEMP/leftover-prefix" \
+            "$RUNNER_TEMP/tests/leftover.exe" >"$RUNNER_TEMP/leftover.txt" || status=$?
           cat "$RUNNER_TEMP/leftover.txt"
           why=
           if ! grep -qxF 'ok    leftover' "$RUNNER_TEMP/leftover.txt"; then
@@ -1096,6 +1119,8 @@ jobs:
             why="run.zsh didn't name the process leftover.exe left"
           elif (( status != 1 )); then
             why="run.zsh exited $status for a run that left a process, not 1"
+          elif ! grep -qxF 'expected  processes of this run left behind:' "$RUNNER_TEMP/leftover.txt"; then
+            why="run.zsh didn't print \"expected\" for the process it was told to expect"
           fi
           if [[ -n $why ]]; then
             pkill -9 -f gw2-test-leftover || true
@@ -1107,9 +1132,10 @@ jobs:
       # jdrly/gw2-on-mac#155: arcdps's crash window. rundll.exe has rundll32 call
       # c_exceptionerrormsg in a stand-in for arcdps's d3d11.dll, under the engine with my ntdll.so.
       # Without a rule the run has to fail on the missing entry point, with rundll32's d3d11 Wine's
-      # own (loaddll: builtin). With the app's rule for rundll32.exe in WINE_COMPATDB_FILE it has to
-      # pass, with rundll32's d3d11 the stand-in (native). compatdb.so reads that variable with
-      # getenv, so each run sets it for all of Wine, as the app does.
+      # own (loaddll: builtin), and is marked as expected (jdrly/gw2-on-mac#324). With the app's
+      # rule for rundll32.exe in WINE_COMPATDB_FILE it has to pass, with rundll32's d3d11 the
+      # stand-in (native). compatdb.so reads that variable with getenv, so each run sets it for all
+      # of Wine, as the app does.
       - name: rundll32 and an addon's d3d11.dll
         if: matrix.lane == 'window' && env.FULL == '1'
         run: |
@@ -1120,8 +1146,8 @@ jobs:
           d3d11_loaded() { tr -d '\r' <"$1" | sed -nE 's/.*loaddll:.*d3d11\.dll" at [0-9A-Fa-f]+: (builtin|native)$/\1/p' | sort -u | tr '\n' ' '; }
           for mode in without with; do
             status=0
-            if [[ $mode == with ]]; then export WINE_COMPATDB_FILE=$rules; else unset WINE_COMPATDB_FILE; fi
-            GW2_TEST_WINEDEBUG=-all,+loaddll,err+rundll32 tests/gw2/run.zsh "$RUNNER_TEMP/mine/wine" "$prefix" "$RUNNER_TEMP/tests/rundll.exe" \
+            if [[ $mode == with ]]; then export WINE_COMPATDB_FILE=$rules; expect=; else unset WINE_COMPATDB_FILE; expect=programs; fi
+            GW2_TEST_EXPECT_FAIL=$expect GW2_TEST_WINEDEBUG=-all,+loaddll,err+rundll32 tests/gw2/run.zsh "$RUNNER_TEMP/mine/wine" "$prefix" "$RUNNER_TEMP/tests/rundll.exe" \
               >"$RUNNER_TEMP/rundll-$mode.txt" || status=$?
             cp "$prefix/rundll.log" "$RUNNER_TEMP/rundll-$mode.log"
             loaded=$(d3d11_loaded "$RUNNER_TEMP/rundll-$mode.log")
@@ -1136,6 +1162,8 @@ jobs:
               tr -d '\r' <"$RUNNER_TEMP/rundll-$mode.log" | grep "^gw2 test rundll: the entry point didn't run (" >/dev/null ||
                 { echo "::error::without the rule: rundll.exe didn't fail on the missing entry point"; exit 1; }
               (( status == 1 )) || { echo "::error::without the rule: run.zsh exited $status, not 1"; exit 1; }
+              # the program's failure prints "expected"; a FAIL is the prefix boot's or a process left behind
+              ! grep -q '^FAIL' "$RUNNER_TEMP/rundll-$mode.txt" || { echo "::error::without the rule: run.zsh printed FAIL"; exit 1; }
               [[ $loaded == "builtin " ]] || { echo "::error::without the rule: rundll32's d3d11.dll was \"$loaded\", not Wine's own alone"; exit 1; }
             else
               (( status == 0 )) || { echo "::error::with the rule: rundll.exe failed"; exit 1; }
@@ -1174,7 +1202,7 @@ jobs:
             *) echo "::error::no blocks for the lane $LANE"; exit 1 ;;
           esac
           status=0
-          GW2_MATRIX_BLOCKS="${blocks[*]}" tests/gw2/matrix.zsh "$RUNNER_TEMP/engine/wine" "$RUNNER_TEMP/mine/wine" "$RUNNER_TEMP/tests" "$RUNNER_TEMP/matrix" "${win32u[@]}" || status=$?
+          GW2_MATRIX_BLOCKS="${blocks[*]}" GW2_MATRIX_ENGINE_BUGS=$ENGINE_BUGS tests/gw2/matrix.zsh "$RUNNER_TEMP/engine/wine" "$RUNNER_TEMP/mine/wine" "$RUNNER_TEMP/tests" "$RUNNER_TEMP/matrix" "${win32u[@]}" || status=$?
           # the disk left after the matrix's prefixes: #219's second run ran out of it
           df -h "$RUNNER_TEMP"
           exit $status

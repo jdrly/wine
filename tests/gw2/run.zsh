@@ -17,10 +17,21 @@
 # The groups also keep the runs matrix.zsh starts side by side under one engine apart. Ends what
 # is left by pid. Prints one line per program, with the seconds it took on a line of its own, and
 # the log of each that failed; exits 1 if any did.
+# $GW2_TEST_EXPECT_FAIL marks the failures the caller expects (jdrly/gw2-on-mac#324): "programs"
+# for the programs' runs, "processes" for the check for processes left behind, or both. Such a
+# failure prints "expected" where it would print "FAIL", and still counts: the exit status is the
+# same, and the caller decides what it means. A green run then has no line that starts with FAIL.
+# The prefix boot always prints FAIL.
 emulate -L zsh
 setopt err_exit pipe_fail no_unset extended_glob
 
 (( $# >= 3 )) || { print -u2 "usage: run.zsh <wine> <prefix> <exe>..."; exit 2 }
+expect=(${=GW2_TEST_EXPECT_FAIL:-})
+for w in $expect; do
+  [[ $w == (programs|processes) ]] || { print -u2 "run.zsh: GW2_TEST_EXPECT_FAIL takes programs and processes, not $w"; exit 2 }
+done
+# verdict <what>: "expected" when the caller expects <what> to fail, "FAIL" otherwise
+verdict() { (( ${expect[(Ie)$1]} )) && print expected || print FAIL }
 wine=${1:A} prefix=${2:A}
 shift 2
 integer failed=0
@@ -102,7 +113,7 @@ for exe in "$@"; do
     # what the program said on the way, the counters it read for instance
     tr -d '\r' <"$log" | grep "^gw2 test $name: " | grep -vxF "gw2 test $name: passed" | sed 's/^/      /' || true
   else
-    print "FAIL  $name (exit $rc$( (( rc == 142 )) && print ', the time limit' ))"
+    print "$(verdict programs)  $name (exit $rc$( (( rc == 142 )) && print ', the time limit' ))"
     sed 's/^/      /' "$log"
     failed+=1
   fi
@@ -112,7 +123,7 @@ done
 stop
 left=(${(u)${(f)"$(ours)"}})
 if (( ${#left} )); then
-  print "FAIL  processes of this run left behind:"
+  print "$(verdict processes)  processes of this run left behind:"
   ps -ww -o pid=,command= -p ${(j:,:)left} | sed 's/^/      /' || true
   kill -9 $left 2>/dev/null || true
   failed+=1
