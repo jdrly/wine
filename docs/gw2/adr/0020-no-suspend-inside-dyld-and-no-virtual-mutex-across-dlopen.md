@@ -49,7 +49,7 @@ Both are fixes to Wine's own code, so they have no switch (ADR 0006).
 - A thread's unix lib constructors now run with the server's signals blocked when the lib loads by
   name, as they already did when `load_builtin_unixlib` loaded it under the mutex. A suspend
   waits until `dlopen` returns.
-- `tests/gw2/dlsuspend.c` runs the three roles: one thread loads `netapi32.so` by name and unloads
+- `tests/gw2/dlsuspend.c` runs the three roles: one thread loads `ws2_32.so` by name and unloads
   it, one maps `dnsapi.dll` and loads its unix lib, and one suspends the first, reads memory and
   resumes it. matrix.zsh's block 3b runs it three times under mine, which have to pass, and three
   times under the engine's own `ntdll.so`, where it only reports how many runs deadlocked. Whether

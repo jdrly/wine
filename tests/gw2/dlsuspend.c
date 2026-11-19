@@ -6,8 +6,9 @@
  * virtual_mutex and then waited for dyld's lock. The sampler's next memory query waited for
  * virtual_mutex, so it never got to resume the first thread. Here:
  *
- * - L loads netapi32.so by name and unloads it, in a loop (MemoryWineLoadUnixLibByName,
- *   MemoryWineUnloadUnixLib), so most of its time is inside dyld's lock.
+ * - L loads ws2_32.so by name and unloads it, in a loop (MemoryWineLoadUnixLibByName,
+ *   MemoryWineUnloadUnixLib), so most of its time is inside dyld's lock. ws2_32.so always has its
+ *   call table. Mach9 builds netapi32.so without libnetapi, so it has none, and the load fails.
  * - B maps dnsapi.dll without its imports or DllMain, asks for its unix lib (MemoryWineLoadUnixLib)
  *   and unmaps it, in a loop. Each pass loads dnsapi.so and unloads it again. DllMain is skipped
  *   because it resolves the host name.
@@ -51,11 +52,11 @@ static volatile LONG loader_status, unload_status, builtin_status, builtin_staye
 static volatile DWORD builtin_error, sampler_error;
 static volatile LONG64 loads, builtins, samples;
 
-/* L: netapi32.so by name, loaded and unloaded */
+/* L: ws2_32.so by name, loaded and unloaded */
 static DWORD WINAPI loader( void *arg )
 {
-    static WCHAR netapi32[] = L"netapi32";
-    struct name_string name = { sizeof(netapi32) - sizeof(WCHAR), sizeof(netapi32), netapi32 };
+    static WCHAR ws2_32[] = L"ws2_32";
+    struct name_string name = { sizeof(ws2_32) - sizeof(WCHAR), sizeof(ws2_32), ws2_32 };
     UINT64 res[2];
     LONG status;
 
@@ -215,12 +216,12 @@ int main(void)
     if (stalled) return 1;
     if (loader_status)
     {
-        printf( "gw2 test dlsuspend: failed: loading netapi32.so by name failed (status %#lx)\n", loader_status );
+        printf( "gw2 test dlsuspend: failed: loading ws2_32.so by name failed (status %#lx)\n", loader_status );
         return 1;
     }
     if (unload_status)
     {
-        printf( "gw2 test dlsuspend: failed: unloading netapi32.so failed (status %#lx)\n", unload_status );
+        printf( "gw2 test dlsuspend: failed: unloading ws2_32.so failed (status %#lx)\n", unload_status );
         return 1;
     }
     if (builtin_error)
