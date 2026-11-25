@@ -16,7 +16,8 @@ puts the engine's own file back with every other change of mine gone.
   that puts an object back wakes its waiters (#219, ADR 0007), two win32u fixes of athei's that
   I took ahead of an engine move (#159), athei's fix that gives a remote break-in on ARM64 the
   target's own `DbgUiRemoteBreakin` (#174), and WineHQ's fix that makes a restored window the
-  foreground window before it is activated (#160).
+  foreground window before it is activated (#160). Since 2026-11-26 also four upstream picks ahead
+  of the engine: athei's AutoFill fix and WineHQ's yield, sleep and Rosetta changes (#342, ADR 0021).
 - The unregister started behind `WINE_HEAT_MSYNC_UNREG=1`, set by the app for the game only. So its
   off path ran only where nobody chose it, in Steam, the launcher's helpers and every other process
   of the bottle, which are the processes that wait on several objects alertably. On 2026-11-13 it
