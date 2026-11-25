@@ -31,7 +31,7 @@ without its `WINE_HEAT_`, `WINE_MACDRV_` or `WINE_` prefix.
 | `dlls/ntdll/unix/sync.c` | `heat_inproc_sync_idle` (new) | Says whether no thread of this process holds the handle's in-process sync | `EVPOOL` | #42 |
 | `dlls/ntdll/unix/sync.c` | `NtCreateEvent` | Takes a parked event, offers a new one to the pool, counts creations | `EVPOOL`, `COUNT` | #40, #42 |
 | `dlls/ntdll/unix/sync.c` | `NtPulseEvent` | The pool forgets an event that may keep an untaken pulse | `EVPOOL` | #42 |
-| `dlls/ntdll/unix/sync.c` | `NtYieldExecution` | Times the yield | `COUNT` | #40 |
+| `dlls/ntdll/unix/sync.c` | `NtYieldExecution` | Times the yield, the `swtch()` call of WineHQ's `53ba24d` (ADR 0022) | `COUNT` | #40, #342 |
 | `dlls/ntdll/unix/sync.c` | `NtQueryPerformanceCounter` | Counts calls | `COUNT` | #40 |
 | `dlls/ntdll/unix/sync.c` | `NtAlertThreadByThreadId` | Counts alerts and times the wake call | `COUNT` | #99 |
 | `dlls/ntdll/unix/sync.c` | `NtWaitForAlertByThreadId` | Spins before the first sleep, outside the emulator, and times the sleeps | `SPIN=lock`, `COUNT` | #45, #99 |
@@ -77,3 +77,7 @@ fixes of #159 and the break-in of #174.
 | `dlls/ntdll/unix/loader.c`, `load_unixlib_by_name`; `dlls/ntdll/unix/virtual.c`, `get_unixlib_funcs`, `NtQueryVirtualMemory` | `dlopen`, `dlsym` and `dlclose` of the unix libs run with the server's signals blocked (`heatdl.h`), so no thread is suspended inside dyld's lock (ADR 0020) | #304 | at merge | athei: no. WineHQ: no, master on 2026-11-19 |
 | `dlls/ntdll/unix/virtual.c`, `load_builtin_unixlib` | Drops `virtual_mutex` for `dlopen` and takes it again to store the handle, keeping one another thread stored meanwhile (ADR 0020) | #304 | at merge | athei: no. WineHQ: no, master on 2026-11-19 |
 | `dlls/winemac.drv/window.c`, `macdrv_window_did_unminimize` | A restored window becomes the foreground window before it is activated | #160 | `8384433b856` | WineHQ `ede017e2b24`. athei: no |
+| `dlls/winemac.drv/cocoa_app.m`, `+[WineApplicationController initialize]` | `NSEnableTextInputContextBasedAutoFill` is registered as `NO`, so AppKit starts no AutoFill helper per process (ADR 0021) | #342 | at merge | athei `5466044bde5`, after 0.4.0's commit |
+| `dlls/ntdll/unix/virtual.c`, `virtual_handle_fault` | Rosetta's workaround, a read fault in a readable page taken as a write fault, only on x86_64 (ADR 0021) | #342 | at merge | WineHQ `dedead43f26`, after `wine-11.22`. athei: no |
+| `dlls/ntdll/unix/sync.c`, `NtYieldExecution` | On macOS `swtch()`, and `STATUS_NO_YIELD_PERFORMED` when it returns false (ADR 0021) | #342 | at merge | WineHQ `53ba24da06b`, after `wine-11.22`. athei: no |
+| `dlls/ntdll/unix/sync.c`, `NtDelayExecution` | A sleep that isn't alertable: a zero timeout is only the yield, a relative one a `nanosleep`, again with the rest after `EINTR` (ADR 0021) | #342 | at merge | WineHQ `48d67d33670`, after `wine-11.22`. athei: no |

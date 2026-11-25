@@ -22,6 +22,12 @@
  *    wait_ buckets add up to wait_sleep, and its row's name is "-".
  * 5. name: a thread calls SetThreadDescription( L"gw2 timers name" ): its row ends in
  *    "start <its start routine> name gw2_timers_name".
+ * 6. yield (jdrly/gw2-on-mac#342): a thread calls NtYieldExecution 1,000 times and
+ *    NtDelayExecution with a zero timeout 100 times, each of which has to return STATUS_SUCCESS or
+ *    STATUS_NO_YIELD_PERFORMED, then Sleep( 1 ) 500 times. Its row: yield at least 1,100, its five
+ *    yield_ buckets add up to it, yield_ms above 0, and fewer than 500 yields more than 1,100.
+ *    Since WineHQ's 48d67d3 a sleep with a timeout above 0 doesn't yield, and before it each
+ *    Sleep( 1 ) yielded once.
  *
  * Then it waits for two more blocks in heat-requests-*.log, so that the second dump began after
  * the cases ended, and reads both files. Nothing a program can see says that a thread is asleep,
@@ -36,6 +42,14 @@
 #include <stdlib.h>
 #include <string.h>
 #include <windows.h>
+#include <winternl.h>
+
+#ifndef STATUS_SUCCESS
+#define STATUS_SUCCESS ((NTSTATUS)0x00000000)
+#endif
+#ifndef STATUS_NO_YIELD_PERFORMED
+#define STATUS_NO_YIELD_PERFORMED ((NTSTATUS)0x40000024)
+#endif
 
 #define RELEASES     20000
 #define REQ_GAME     1000
@@ -49,6 +63,9 @@
 #define TIMED        100
 #define NAME         L"gw2 timers name"
 #define NAME_IN_LOG  "gw2_timers_name"
+#define YIELD_CALLS  1000
+#define ZERO_SLEEPS  100
+#define SLEEPS       500
 #define LIMIT_MS     10000
 #define BATCHES      4
 
@@ -286,6 +303,59 @@ static void test_name(void)
     join( thread( named, NULL, &name_tid ), "the named thread" );
 }
 
+/* 6: yield */
+
+static NTSTATUS (WINAPI *pNtYieldExecution)(void);
+static NTSTATUS (WINAPI *pNtDelayExecution)( BOOLEAN, const LARGE_INTEGER * );
+static DWORD yielder_tid;
+static int yields_done, yields_none;  /* STATUS_SUCCESS and STATUS_NO_YIELD_PERFORMED */
+static NTSTATUS yield_other;          /* the first status that is neither */
+
+static BOOL yield_status( NTSTATUS status )
+{
+    if (status == STATUS_SUCCESS) yields_done++;
+    else if (status == STATUS_NO_YIELD_PERFORMED) yields_none++;
+    else
+    {
+        yield_other = status;
+        return FALSE;
+    }
+    return TRUE;
+}
+
+static DWORD WINAPI yielder( void *arg )
+{
+    LARGE_INTEGER zero;
+    int i;
+
+    zero.QuadPart = 0;
+    for (i = 0; i < YIELD_CALLS; i++) if (!yield_status( pNtYieldExecution() )) return 2;
+    for (i = 0; i < ZERO_SLEEPS; i++) if (!yield_status( pNtDelayExecution( FALSE, &zero ) )) return 3;
+    for (i = 0; i < SLEEPS; i++) Sleep( 1 );
+    return 0;
+}
+
+static void test_yield(void)
+{
+    HMODULE ntdll = GetModuleHandleA( "ntdll.dll" );
+    HANDLE h;
+    DWORD code;
+
+    pNtYieldExecution = (void *)GetProcAddress( ntdll, "NtYieldExecution" );
+    pNtDelayExecution = (void *)GetProcAddress( ntdll, "NtDelayExecution" );
+    if (!pNtYieldExecution || !pNtDelayExecution) FAIL( "ntdll has no NtYieldExecution or NtDelayExecution" );
+    h = thread( yielder, NULL, &yielder_tid );
+    if (WaitForSingleObject( h, 30000 ) != WAIT_OBJECT_0) FAIL( "the yielder didn't end in 30 s" );
+    if (!GetExitCodeThread( h, &code )) FAIL( "GetExitCodeThread: error %lu", GetLastError() );
+    CloseHandle( h );
+    printf( "gw2 test timers: yield: %d of %d calls returned STATUS_SUCCESS, %d STATUS_NO_YIELD_PERFORMED\n",
+            yields_done, YIELD_CALLS + ZERO_SLEEPS, yields_none );
+    if (code == 2 || code == 3)
+        FAIL( "%s returned %#lx", code == 2 ? "NtYieldExecution" : "NtDelayExecution with a zero timeout",
+              (unsigned long)yield_other );
+    if (code) FAIL( "the yielder ended with %lu", code );
+}
+
 /* the logs */
 
 static char heat_text[1 << 20];
@@ -468,7 +538,7 @@ static void start_and_name( DWORD tid, ULONG_PTR *start, char *name, size_t size
 /* every case's checks, on the counters file as load_heat() read it last */
 static void check_heat(void)
 {
-    long long sleeps, alerts, woke, set, wake, none;
+    long long sleeps, alerts, woke, set, wake, none, n;
     char name[64];
     ULONG_PTR start;
 
@@ -520,6 +590,16 @@ static void check_heat(void)
     printf( "gw2 test timers: name: start %#llx (named() is at %p) name %s\n", (unsigned long long)start, named, name );
     if (strcmp( name, NAME_IN_LOG )) FAIL( "the named thread's name is %s, not " NAME_IN_LOG, name );
     if (start != (ULONG_PTR)named) FAIL( "the named thread's start is %#llx, not %p", (unsigned long long)start, named );
+
+    /* 6 */
+    n = counter( yielder_tid, "yield" );
+    printf( "gw2 test timers: yield: yield %lld buckets %lld yield_ms %.3f, after %d calls and %d sleeps of 1 ms\n", n,
+            buckets( yielder_tid, "yield" ), timer( yielder_tid, "yield_ms" ), YIELD_CALLS + ZERO_SLEEPS, SLEEPS );
+    if (n < YIELD_CALLS + ZERO_SLEEPS) FAIL( "%lld yields counted, not %d or more", n, YIELD_CALLS + ZERO_SLEEPS );
+    if (buckets( yielder_tid, "yield" ) != n) FAIL( "the yield buckets don't add up to yield" );
+    if (timer( yielder_tid, "yield_ms" ) <= 0) FAIL( "no yield_ms" );
+    if (n - (YIELD_CALLS + ZERO_SLEEPS) >= SLEEPS)
+        FAIL( "%lld yields more than the calls: the sleeps of 1 ms yielded", n - (YIELD_CALLS + ZERO_SLEEPS) );
 }
 
 /* the number after " <name> " in a counters line, or 0 */
@@ -602,6 +682,7 @@ int main(void)
     lock_batch();
     wake_batch();
     wait_batch();
+    test_yield();
     printf( "gw2 test timers: the cases ran\n" );
 
     if (counting)
