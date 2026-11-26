@@ -56,59 +56,63 @@ C_ASSERT( HEAT_BITS <= 32 );  /* heat_mode is an unsigned int */
 /* jdrly/gw2-on-mac#43 */
 #define HEAT_PROF       (1u << HEAT_BIT_PROF)  /* heatprof.c */
 
-enum heat_counter
-{
-    HC_RELEASE,      /* semaphore releases */
-    HC_WAKE_SKIPPED, /* releases of a private semaphore with no waiter here: no wake call */
-    HC_WAKE_ONE,     /* wake-one calls of WINE_HEAT_WAKE=one that woke a thread */
-    HC_WAKE_NONE,    /* wake calls on a semaphore or mutex that found no waiter (events: HC_EVENT_WAKE_NONE) */
-    HC_WOKEN,        /* single waits woken */
-    HC_SPURIOUS,     /* ... that found nothing to take and slept again */
-    HC_EVENT_CREATE, /* NtCreateEvent */
-    HC_EVENT_CLOSE,  /* NtClose of a handle NtCreateEvent made */
-    HC_CLOSE,        /* NtClose, of any object */
-    HC_SERVER,       /* server calls, with HT_SERVER */
-    HC_LOCK_SLEEP,   /* sleeps in NtWaitForAlertByThreadId: contended locks, WaitOnAddress */
-    HC_QPC,          /* NtQueryPerformanceCounter */
-    HC_YIELD,        /* NtYieldExecution, with HT_YIELD and by how long the yield took: */
-    HC_YIELD_5US, HC_YIELD_20US, HC_YIELD_100US, HC_YIELD_1MS, HC_YIELD_LONG,
-    /* jdrly/gw2-on-mac#44 */
-    HC_UNREG,        /* multiple-object waits that unregistered after finding an object signaled */
-    /* WINE_HEAT_EVPOOL */
-    HC_EVPOOL_HIT,          /* NtCreateEvent served by the pool */
-    HC_EVPOOL_PUT,          /* NtClose that parked the handle */
-    HC_EVPOOL_EVICTED,      /* parked handles closed for real because the pool was full */
-    HC_EVPOOL_FORGOTTEN,    /* handles that stopped being eligible: duplicated, handed to the server... */
-    HC_EVPOOL_BUSY,         /* parked handles a thread still used when their turn came: closed for real */
-    HC_EVPOOL_DOUBLE_CLOSE, /* a close or a duplicate of a parked handle: STATUS_INVALID_HANDLE */
-    /* jdrly/gw2-on-mac#45, a spin ends in a hit when what it waits for came while it spun */
-    HC_LSPIN_HIT, HC_LSPIN_MISS,  /* WINE_HEAT_SPIN=lock */
-    HC_ESPIN_HIT, HC_ESPIN_MISS,  /* WINE_HEAT_SPIN=event */
-    HC_SSPIN_HIT, HC_SSPIN_MISS,  /* WINE_HEAT_SPIN=sem */
-    HC_SPIN_OFF,     /* waits that didn't spin: the thread's spins of that kind missed 4 times in a row */
-    HC_SPIN_SCOPED,  /* waits that didn't spin: the scope leaves out the thread's priority */
-    /* jdrly/gw2-on-mac#99 */
-    HC_WAIT_SLEEP,   /* sleeps in msync_wait_single and msync_wait_multiple, with HT_WAIT */
-    HC_ALERT,        /* NtAlertThreadByThreadId */
-    HC_ALERT_WAKE,   /* ... that made the wake call, with HT_ALERT */
-    HC_LOCK_5US, HC_LOCK_20US, HC_LOCK_100US, HC_LOCK_1MS, HC_LOCK_LONG,  /* lock sleeps by length */
-    HC_WAIT_5US, HC_WAIT_20US, HC_WAIT_100US, HC_WAIT_1MS, HC_WAIT_LONG,  /* wait sleeps by length */
-    HC_EVENT_SET,       /* msync_set_event_obj */
-    HC_EVENT_WAKE,      /* wake calls on an event, a set's or a pulse's, that woke a thread */
-    HC_EVENT_WAKE_NONE, /* ... that found none */
-    HC_WAIT,         /* msync_wait_objs */
-    HC_WAIT_TIMED,   /* ... with a timeout that is neither infinite nor zero */
-    HC_WAIT_POLL,    /* ... with a zero timeout */
-    HC_NB
-};
+/* The counters and the timers, each as one list: C(<enum name without its prefix>, <the name in
+ * the log>). The enum and the names (heat_private.h) both come from it, so they can't fall out of
+ * step. A new one goes at the end of its group. */
+#define HEAT_COUNTERS(C) \
+    C(RELEASE, release) /* semaphore releases */ \
+    C(WAKE_SKIPPED, wake_skipped) /* releases of a semaphore only this process holds, with no waiter here: no wake call */ \
+    C(WAKE_ONE, wake_one) /* wake-one calls of WINE_HEAT_WAKE=one that woke a thread */ \
+    C(WAKE_NONE, wake_none) /* wake calls on a semaphore or mutex that found no waiter (events: HC_EVENT_WAKE_NONE) */ \
+    C(WOKEN, woken) /* single waits woken */ \
+    C(SPURIOUS, spurious) /* ... that found nothing to take and slept again */ \
+    C(EVENT_CREATE, event_create) /* NtCreateEvent */ \
+    C(EVENT_CLOSE, event_close) /* NtClose of a handle NtCreateEvent made */ \
+    C(CLOSE, close) /* NtClose, of any object */ \
+    C(SERVER, server) /* server calls, with HT_SERVER */ \
+    C(LOCK_SLEEP, lock_sleep) /* sleeps in NtWaitForAlertByThreadId: contended locks, WaitOnAddress */ \
+    C(QPC, qpc) /* NtQueryPerformanceCounter */ \
+    C(YIELD, yield) /* NtYieldExecution, with HT_YIELD and by how long the yield took: */ \
+    C(YIELD_5US, yield_5us) C(YIELD_20US, yield_20us) C(YIELD_100US, yield_100us) C(YIELD_1MS, yield_1ms) C(YIELD_LONG, yield_long) \
+    /* jdrly/gw2-on-mac#44 */ \
+    C(UNREG, unreg) /* multiple-object waits that unregistered after finding an object signaled */ \
+    /* WINE_HEAT_EVPOOL */ \
+    C(EVPOOL_HIT, evpool_hit) /* NtCreateEvent served by the pool */ \
+    C(EVPOOL_PUT, evpool_put) /* NtClose that parked the handle */ \
+    C(EVPOOL_EVICTED, evpool_evicted) /* parked handles closed for real because the pool was full */ \
+    C(EVPOOL_FORGOTTEN, evpool_forgotten) /* handles that stopped being eligible: duplicated, handed to the server... */ \
+    C(EVPOOL_BUSY, evpool_busy) /* parked handles a thread still used when their turn came: closed for real */ \
+    C(EVPOOL_DOUBLE_CLOSE, evpool_double_close) /* a close or a duplicate of a parked handle: STATUS_INVALID_HANDLE */ \
+    /* jdrly/gw2-on-mac#45, a spin ends in a hit when what it waits for came while it spun */ \
+    C(LSPIN_HIT, lspin_hit) C(LSPIN_MISS, lspin_miss) /* WINE_HEAT_SPIN=lock */ \
+    C(ESPIN_HIT, espin_hit) C(ESPIN_MISS, espin_miss) /* WINE_HEAT_SPIN=event */ \
+    C(SSPIN_HIT, sspin_hit) C(SSPIN_MISS, sspin_miss) /* WINE_HEAT_SPIN=sem */ \
+    C(SPIN_OFF, spin_off) /* waits that didn't spin: the thread's spins of that kind missed 4 times in a row */ \
+    C(SPIN_SCOPED, spin_scoped) /* waits that didn't spin: the scope leaves out the thread's priority */ \
+    /* jdrly/gw2-on-mac#99 */ \
+    C(WAIT_SLEEP, wait_sleep) /* sleeps in msync_wait_single and msync_wait_multiple, with HT_WAIT */ \
+    C(ALERT, alert) /* NtAlertThreadByThreadId */ \
+    C(ALERT_WAKE, alert_wake) /* ... that made the wake call, with HT_ALERT */ \
+    C(LOCK_5US, lock_5us) C(LOCK_20US, lock_20us) C(LOCK_100US, lock_100us) C(LOCK_1MS, lock_1ms) C(LOCK_LONG, lock_long) /* lock sleeps by length */ \
+    C(WAIT_5US, wait_5us) C(WAIT_20US, wait_20us) C(WAIT_100US, wait_100us) C(WAIT_1MS, wait_1ms) C(WAIT_LONG, wait_long) /* wait sleeps by length */ \
+    C(EVENT_SET, event_set) /* msync_set_event_obj */ \
+    C(EVENT_WAKE, event_wake) /* wake calls on an event, a set's or a pulse's, that woke a thread */ \
+    C(EVENT_WAKE_NONE, event_wake_none) /* ... that found none */ \
+    C(WAIT, wait) /* msync_wait_objs */ \
+    C(WAIT_TIMED, wait_timed) /* ... with a timeout that is neither infinite nor zero */ \
+    C(WAIT_POLL, wait_poll) /* ... with a zero timeout */ \
+    /* jdrly/gw2-on-mac#249 */ \
+    C(WAKE_SHARED, wake_shared) /* releases the skip refused: msync counts another holder of the semaphore */
 
-enum heat_timer
-{
-    HT_SERVER, HT_YIELD,
-    HT_SPIN,  /* jdrly/gw2-on-mac#45 */
-    HT_LOCK, HT_WAIT, HT_WAKE, HT_ALERT,  /* jdrly/gw2-on-mac#99 */
-    HT_NB
-};
+#define HEAT_TIMERS(C) \
+    C(SERVER, server_ms) C(YIELD, yield_ms) \
+    C(SPIN, spin_ms) /* jdrly/gw2-on-mac#45 */ \
+    C(LOCK, lock_ms) C(WAIT, wait_ms) C(WAKE, wake_ms) C(ALERT, alert_ms) /* jdrly/gw2-on-mac#99 */
+
+#define HEAT_COUNTER_ID(id, name) HC_##id,
+enum heat_counter { HEAT_COUNTERS(HEAT_COUNTER_ID) HC_NB };
+#define HEAT_TIMER_ID(id, name) HT_##id,
+enum heat_timer { HEAT_TIMERS(HEAT_TIMER_ID) HT_NB };
 
 /* Decided once per process by heat_init(), before any PE code runs, and never changed. In every
  * process that isn't WINE_HEAT_EXE it stays 0, and each probe below is that one load and a
@@ -132,7 +136,6 @@ extern void heat_unmark( HANDLE handle, unsigned char flags );
 extern void heat_sleep_on( unsigned int obj );
 extern void heat_woke_on( unsigned int obj );
 extern BOOL heat_skip_wake_slow( unsigned int obj, const unsigned short *refcount );
-extern __thread HANDLE heat_releasing;
 
 /* jdrly/gw2-on-mac#60: a server call ended, <status> from the reply. Counts it as HC_SERVER with
  * HT_SERVER, and by its request code. <sent> is the request as it was before the reply overwrote it. */
@@ -164,16 +167,6 @@ static inline void heat_thread_named( const char *name )
     if (heat_mode & HEAT_COUNT) heat_named( name );
 }
 
-/* NtCreateSemaphore made it: private if unnamed, without a root directory and not inheritable */
-static inline void heat_semaphore_created( HANDLE handle, const OBJECT_ATTRIBUTES *attr )
-{
-    if (!(heat_mode & HEAT_WAKE_SKIP)) return;
-    if (attr && (attr->RootDirectory || (attr->ObjectName && attr->ObjectName->Length) ||
-                 (attr->Attributes & OBJ_INHERIT)))
-        return;
-    heat_mark( handle, 1 /* HEAT_H_PRIVATE */ );
-}
-
 static inline void heat_event_created( HANDLE handle )
 {
     if (!(heat_mode & HEAT_COUNT)) return;
@@ -181,29 +174,23 @@ static inline void heat_event_created( HANDLE handle )
     heat_mark( handle, 2 /* HEAT_H_EVENT */ );
 }
 
-/* duplicated or given new handle flags: a semaphore is no longer private */
-static inline void heat_handle_shared( HANDLE handle )
-{
-    if (heat_mode & HEAT_WAKE_SKIP) heat_unmark( handle, 1 );
-}
-
 /* before the server closes it, and can give its value to a new object */
 static inline void heat_handle_closed( HANDLE handle )
 {
     if (!heat_mode) return;
     heat_count( HC_CLOSE );
-    heat_unmark( handle, 1 | 2 );
+    heat_unmark( handle, 2 /* HEAT_H_EVENT */ );
 }
 
 /* signal_all, after the count changed: TRUE when the release may make no wake call. <refcount>
  * is the semaphore's reference count in msync's shared memory. */
 static inline BOOL heat_skip_wake( unsigned int obj, const unsigned short *refcount )
 {
-    return (heat_mode & HEAT_WAKE_SKIP) && heat_releasing && heat_skip_wake_slow( obj, refcount );
+    return (heat_mode & HEAT_WAKE_SKIP) && heat_skip_wake_slow( obj, refcount );
 }
 
 /***********************************************************************
- *  the event pool (WINE_HEAT_EVPOOL), heat.c has the rules
+ *  the event pool (WINE_HEAT_EVPOOL), heatpool.c has the rules
  */
 extern BOOL heat_evpool_get_slow( HANDLE *handle, ACCESS_MASK access, const OBJECT_ATTRIBUTES *attr,
                                   EVENT_TYPE type, BOOLEAN state );
@@ -252,7 +239,7 @@ static inline void heat_evpool_forget( HANDLE handle )
 }
 
 /***********************************************************************
- *  the spins (WINE_HEAT_SPIN, jdrly/gw2-on-mac#45), heat.c has the rules
+ *  the spins (WINE_HEAT_SPIN, jdrly/gw2-on-mac#45), heatspin.c has the rules
  */
 enum heat_spin_kind { HEAT_SPIN_KIND_LOCK, HEAT_SPIN_KIND_EVENT, HEAT_SPIN_KIND_SEM, HEAT_SPIN_KINDS };
 /* a kind's switch is HEAT_SPIN_LOCK << kind */
