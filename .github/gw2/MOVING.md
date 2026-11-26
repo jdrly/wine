@@ -93,8 +93,9 @@ git rev-list --reverse --no-merges 501796b0ed1..gw2-on-mac ^4e55fb228c0
 this kind adds its own old tip to the `^` list.
 
 Since 2026-11-26 the series replaces this command: [`docs/gw2/SERIES.md`](../../docs/gw2/SERIES.md)
-gives each of these commits a topic, and the next move replays the `series/…` branch it names onto
-the new commit, topic by topic.
+gives each of these commits a topic. The next move builds the series again from that file against
+the current `gw2-on-mac`, stops unless its tree is the head's, and replays it onto the new commit,
+topic by topic. A `series/…` branch from an earlier date can lack the commits merged after it.
 
 ## 4. Outside this repository
 
