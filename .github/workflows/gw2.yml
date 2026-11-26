@@ -1,0 +1,1389 @@
+# gw2 (jdrly/gw2-on-mac#40, #57, #61, #124): my ntdll.so, winemac.so and win32u.so for Mach9
+# $MACH9_VERSION's engine, built on GitHub's runner the way Mach9's CI built the engine's, and
+# checked against the engine's files. Nothing here runs on my Mac.
+#
+# The toolchain and the gate (jdrly/gw2-on-mac#124). The build and test jobs run on $RUNNER with
+# Xcode $XCODE_VERSION. With the engine's own, $ENGINE_RUNNER and Xcode $ENGINE_XCODE_VERSION, my
+# build of the engine's commit is held to the strict gate, byte for byte; with any other it is held
+# to the structural gate: the engine's exports and where each points, imports, libraries, install
+# name, rpaths, minos, segments, sections and functions by name, with the functions and sections
+# whose bytes differ only a report (.github/gw2/compare.py). Going back is one edit: RUNNER and
+# XCODE_VERSION below to the engine's values. Why my build runs on another runner than the
+# engine's, and what that costs the gate, is in .github/gw2/MOVING.md. The flags stay the
+# engine's: Mach9 builds its unix side with -g -O2, and my build's compile commands are those of
+# Mach9's release run (-O0 was the CrossOver engine's).
+#
+# build: one Wine tree configured as Mach9 configures its own (.github/gw2/wine.zsh), in the
+#   engine's paths, with Xcode $XCODE_VERSION, macOS $MACOSX_DEPLOYMENT_TARGET, llvm-mingw
+#   $LLVM_MINGW_VERSION and Homebrew's FreeType headers. Each build makes dlls/ntdll/ntdll.so,
+#   dlls/winemac.drv/winemac.so and dlls/win32u/win32u.so. On a pull request whose merge commit has
+#   another tree than its head, as it has when the head is behind gw2-on-mac, the job stops before
+#   it builds anything (jdrly/gw2-on-mac#228). In the tree, one after the other:
+#   - $BASE_COMMIT, the commit the engine was built from, each file compared with the engine's by
+#     .github/gw2/compare.py baseline with the gate above. The strict one wants the same exports
+#     and imports, and the header, every section, the load commands and the link edit data byte
+#     for byte.
+#   - the same with one line of NtYieldExecution changed, and then with one line of an
+#     Objective-C method of the Mac driver changed: the strict gate has to fail on the file and name
+#     the function. It holds the broken file to the engine's with the strict gate, and to my base
+#     build of the engine's commit with the structural one, so it runs whatever the toolchain.
+#   - this commit, every object of the three files compiled again, compared by compare.py patched: each
+#     object none of whose inputs (makedep's rule for it: its .c or .m and every header it
+#     includes) the commit changes is the base build's, by its compile command, code, data,
+#     relocations and symbols, and the summary lists the other objects' changed functions and the
+#     changed inputs that touched them
+#   - on a pull request, before that, the commit its branch forked from, every object compiled
+#     again, and compare.py fork reports every function of the three files against this commit's
+#     by name, whichever object it is in: the same in place, moved with the same bytes and
+#     relocations, changed, new or gone (jdrly/gw2-on-mac#106). A report, never a gate.
+#   The per-function listing with masked addresses that follows a failed byte gate only names
+#   what differs; it is not the gate and never passes or fails a build.
+#   Artifacts ntdll-arm64-<commit> and macdrv-arm64-<commit>: ntdll.so or winemac.so, VERSION,
+#   COPYING.LIB, LICENSE, kept 7 days. macdrv-arm64-<commit> also has win32u.so when the compare
+#   lists a changed, new or removed function of it, and its VERSION then names both files. VERSION's
+#   lines "baseline: <file> <gate>", one for each file, say which gate held, and its toolchain line
+#   names the runner. Its line "switches: …" names every WINE_HEAT_* (ntdll.so), WINE_MACDRV_*
+#   (winemac.so) and WINE_WIN32U_* (win32u.so) variable the files read, from the sources, and the
+#   step fails unless those are exactly that kind of string in each file (.github/gw2/switches.zsh).
+# tests: tests/gw2/*.c built for Win64 x86_64 with llvm-mingw. On a pull request, window.exe under
+#   the engine with my winemac.so says whether the Mac driver starts on the runner;
+#   tests/gw2/native/frames.c and mouse_scale.c, built natively, test the driver's frame decision
+#   and its mouse speed factor (WINE_MACDRV_MOUSE_SCALE), and fexstats.c the reader of FEX's
+#   counters (jdrly/gw2-on-mac#111) and their tick rate (jdrly/gw2-on-mac#156), and ratio.c win32u's
+#   make_ratio(), cut out of dlls/win32u/sysparams.c (jdrly/gw2-on-mac#159); modeset.exe changes the
+#   display mode with EmulateModeset Y at 192 DPI under the engine with my ntdll.so and my win32u.so;
+#   layered.exe under the engine
+#   with my winemac.so counts the frames WINE_MACDRV_SURFACE skips, where the driver starts; and
+#   tests/gw2/matrix.zsh runs them all under the engine from the release tarball: with its own
+#   ntdll.so, and with mine in each WINE_HEAT_WAKE mode, with no WINE_HEAT_* variable and with
+#   them set for another program, and, when the build ships my win32u.so, SetCursor and the empty
+#   PeekMessage's yield under the engine's win32u.so and mine, with WINE_WIN32U_SETCURSOR and
+#   WINE_WIN32U_PEEK_YIELD unset and set. Test 9 of jdrly/gw2-on-mac#62: tests/gw2/native/pipe.c,
+#   built natively, tests the event pipe functions of WINE_MACDRV_DRAIN and WINE_MACDRV_CALL; and
+#   clip.exe under the engine with my ntdll.so and my winemac.so, counting its requests, calls
+#   ClipCursor 1,000 times with one rectangle in each of four settings of the Mac driver's
+#   switches; calls.exe under the engine with my winemac.so makes synchronous calls to the main
+#   thread from four threads while events arrive, unset and with WINE_MACDRV_CALL=quiet.
+#   restore.exe minimizes its window and has tests/gw2/native/reopen bring it back with the reopen
+#   Apple event, as a click on the Dock icon does, under the engine with my winemac.so and under
+#   the engine's own, and checks which WM_NCACTIVATE each sends (jdrly/gw2-on-mac#160).
+#   tests/gw2/attach/attach.c, built for arm64 as the engine's winedbg is, attaches to the x86_64
+#   count.exe and detaches: count.exe has to run on under the engine with my ntdll.so
+#   (jdrly/gw2-on-mac#174).
+#   leftover.exe leaves a process behind, and tests/gw2/run.zsh has to fail its run, name the
+#   process and end it (jdrly/gw2-on-mac#128). rundll.exe has rundll32 call the entry point of a
+#   stand-in for arcdps's d3d11.dll: it has to fail with Wine's default order and pass with the app's
+#   compatdb rule for rundll32.exe (jdrly/gw2-on-mac#155). A push to gw2-on-mac runs only the
+#   prefix boot and smoke.exe, under the engine's ntdll.so and under mine, when a green pull
+#   request run tested the same tree on a head that contains the push's parent, which Publish
+#   names (jdrly/gw2-on-mac#241). Any other push runs every test. A pull request runs only the
+#   tests of the files it can have changed: the build job's selection.env says which of ntdll.so,
+#   winemac.so and win32u.so the fork report or the changed paths reach, and a change to tests/gw2
+#   or .github runs everything (jdrly/gw2-on-mac#217), unless it changes only Markdown files,
+#   comment lines of this workflow or its lint and publish jobs (jdrly/gw2-on-mac#228). A new test
+#   step names the RUN_* of the files it tests in its if:. mutexall's and putback's runs under the
+#   engine's ntdll.so, which have to lose a race to pass, run only when MACH9_VERSION, msync.c,
+#   either program, matrix.zsh or run.zsh changed, which sets ENGINE_BUGS (jdrly/gw2-on-mac#324,
+#   docs/gw2/adr/0009). A run that has to fail prints "expected", not "FAIL", so a green run's log
+#   has no line that starts with FAIL.
+#   The tests job runs as lanes side by side, one job each (jdrly/gw2-on-mac#229): window (every
+#   step but the matrix, then the matrix's block 7), matrix-a and matrix-b (matrix.zsh's other
+#   blocks, cut in "Run them"), or smoke alone. The build job's last steps say which lanes a run
+#   owes, and build the test programs once for all of them. A new test step names its lane in its
+#   if: as well, and a new matrix block goes into one lane's list in "Run them". Each lane but
+#   smoke first boots one prefix for each engine tree it uses, and run.zsh starts every later
+#   prefix as an APFS clone of its tree's (jdrly/gw2-on-mac#239).
+# lint: actionlint (.github/actionlint.yaml names the xcode-27 label), the Python scripts compile,
+#   compare.py's self-test on the engine's files (every address-bearing instruction changed in turn),
+#   .github/gw2/SWITCHES.md names exactly the switches the sources read, and heatreq.h's request
+#   list is enum request's (.github/gw2/heatreq.py).
+# publish: after the others are green, packs ntdll-arm64-<commit>.tar.xz and
+#   macdrv-arm64-<commit>.tar.xz and prints their sha256. For a push to gw2-on-mac it adds both to
+#   the pre-release arm64-builds, the one release this workflow makes, never marked latest, keeps
+#   the 30 newest of each kind, and says which pull request's green run tested the same tree with
+#   the push's parent in its head, or that none did. The pre-release this workflow filled before jdrly/gw2-on-mac#121 keeps the
+#   archives of earlier commits under the names they had, and gets nothing more.
+name: GW2
+
+on:
+  pull_request:
+    branches: [gw2-on-mac]
+  push:
+    branches: [gw2-on-mac]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gw2-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # The PR's own commit, not GitHub's merge commit, so VERSION and the file's version string name it
+  COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+  # The build's scripts, from the commit this workflow file is from: on a pull request that is
+  # GitHub's merge commit (github.sha), so the workflow and the scripts it calls always agree,
+  # whether or not the PR's head is behind gw2-on-mac. The source under test stays $COMMIT.
+  GW2: ${{ github.workspace }}/gw2-ci/.github/gw2
+  # athei/wine's commit Mach9 0.4.0 was built from (wine-11.21-54-g501796b0ed), where gw2-on-mac starts
+  BASE_COMMIT: 501796b0ed15759127c2a5f415d31570cdee34f3
+  # The runner and Xcode my build and tests use; their runs-on read the anchor, since runs-on can't
+  # read env. With the engine's two below, my build of the engine's commit gets the strict gate; with
+  # any other, the structural one. xcode-27 has Xcode 27.0 and 27.1 (macOS SDK 27.0) and 27.2 (SDK
+  # 27.2; actions/runner-images, images/macos/xcode-27-arm64-Readme.md). 27.2 is the one my app and
+  # my DXMT fork build with.
+  RUNNER: &runner xcode-27
+  XCODE_VERSION: "27.2"
+  # What Mach9's release run of v0.4.0 used (athei/mach9 run 44031759609): Xcode 26.6 (SDK 26.5,
+  # clang-2100.1.1.101) on the macos-26 image (macos-26-arm64 20261102.0473.1), and its
+  # pins/redist.env and bin/lib/profile.sh. v0.3.1's run 42769825957 had the same.
+  ENGINE_RUNNER: macos-26
+  ENGINE_XCODE_VERSION: "26.6"
+  LLVM_MINGW_VERSION: "20261104"
+  LLVM_MINGW_SHA256: 66cbd5178c4a71b0d473e68ede172f8eb7d15d023e67f39201d0a69e21f6bf3c
+  MACH9_VERSION: v0.4.0
+  MACH9_SHA256: 3b81aac9b93d5652872673b400769ec525f3bc2f1f7e2ec82c9f851d0a0db05d
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    name: Build ntdll.so, winemac.so and win32u.so
+    runs-on: *runner
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      # to find the pull request whose run tested a pushed tree
+      actions: read
+      pull-requests: read
+    outputs:
+      full: ${{ steps.owes.outputs.full }}
+      run_ntdll: ${{ steps.owes.outputs.run_ntdll }}
+      run_winemac: ${{ steps.owes.outputs.run_winemac }}
+      run_win32u: ${{ steps.owes.outputs.run_win32u }}
+      engine_bugs: ${{ steps.owes.outputs.engine_bugs }}
+      lanes: ${{ steps.owes.outputs.lanes }}
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "26.4"
+      SRC: /Users/runner/work/mach9/mach9/src
+      BUILD: /Users/runner/work/mach9/mach9/build/wine
+      MINGW_DIR: ${{ github.workspace }}/toolchains/llvm-mingw
+      HOMEBREW_NO_AUTO_UPDATE: 1
+      HOMEBREW_NO_INSTALL_CLEANUP: 1
+    steps:
+      # first, so a missing Xcode stops the job within a minute
+      - name: Select Xcode
+        run: |
+          {
+            echo "### Runner"
+            echo '```'
+            echo "image $ImageOS $ImageVersion, macOS $(sw_vers -productVersion) ($(sw_vers -buildVersion))"
+            ls -d /Applications/Xcode_*.app
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          app=/Applications/Xcode_$XCODE_VERSION.app
+          if [[ ! -d $app ]]; then
+            echo "::error::Xcode $XCODE_VERSION isn't on this runner's image ($ImageOS $ImageVersion). Pick one it has in XCODE_VERSION, or the engine's $ENGINE_XCODE_VERSION on $ENGINE_RUNNER."
+            exit 1
+          fi
+          sudo xcode-select -s "$app"
+          # the gate for my build of the engine's commit: strict only with the engine's runner and Xcode
+          gate=structural
+          [[ $RUNNER == "$ENGINE_RUNNER" && $XCODE_VERSION == "$ENGINE_XCODE_VERSION" ]] && gate=strict
+          echo "GATE=$gate" >>"$GITHUB_ENV"
+          echo "runner $RUNNER, Xcode $XCODE_VERSION (the engine's: $ENGINE_RUNNER, Xcode $ENGINE_XCODE_VERSION): the $gate gate" |
+            tee -a "$GITHUB_STEP_SUMMARY"
+          {
+            echo "### Toolchain"
+            echo '```'
+            xcodebuild -version | sed -n 1p
+            echo "macOS SDK $(xcrun -sdk macosx --show-sdk-version)"
+            clang --version | sed -n 1p
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+      # (no checkout of the whole tree at the workspace's root: the source is the one in src below)
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          path: gw2-ci
+          sparse-checkout: .github/gw2
+          persist-credentials: false
+      - name: The scripts are this workflow's
+        run: |
+          [[ $(git -C gw2-ci rev-parse HEAD) == "$GITHUB_SHA" && -f $GW2/wine.zsh && -f $GW2/compare.py ]] ||
+            { echo "::error::the scripts of $GITHUB_SHA, the commit this workflow file is from, aren't there"; exit 1; }
+          echo "scripts from $GITHUB_SHA, source from $COMMIT"
+      # The source to build, with the whole history for git describe, without the file contents
+      # until a checkout needs them, as Mach9's CI checks it out
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.COMMIT }}
+          path: src
+          fetch-depth: 0
+          filter: blob:none
+          persist-credentials: false
+      # A pull request's run builds and tests its head with the workflow of GitHub's merge commit.
+      # With a head that is behind gw2-on-mac the two disagree: new steps run against old tests
+      # (jdrly/gw2-on-mac#149, run 43370004985), and the merge will have another tree than the
+      # head, so the push runs every test again whatever this run shows (jdrly/gw2-on-mac#214).
+      # Such a run stops here, in its first minute.
+      - name: The head has gw2-on-mac's tip
+        if: github.event_name == 'pull_request'
+        run: |
+          merged=$(git -C gw2-ci rev-parse 'HEAD^{tree}')
+          head=$(git -C src rev-parse "$COMMIT^{tree}")
+          if [[ $merged != "$head" ]]; then
+            echo "::error::the head $COMMIT is behind $GITHUB_BASE_REF: merged, its tree is $merged, not the head's $head. Rebase the branch onto $GITHUB_BASE_REF and push."
+            exit 1
+          fi
+          echo "the merge commit's tree is the head's, $head"
+      - name: Restore Mach9
+        id: mach9
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          key: mach9-tarball-${{ env.MACH9_VERSION }}
+          path: toolchains/mach9.tar.xz
+      - name: Download Mach9
+        if: steps.mach9.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p toolchains
+          curl -fsSL --retry 3 -o toolchains/mach9.tar.xz \
+            "https://github.com/athei/mach9/releases/download/$MACH9_VERSION/wine-$MACH9_VERSION-macos-arm64.tar.xz"
+      - name: Save Mach9
+        if: steps.mach9.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          key: mach9-tarball-${{ env.MACH9_VERSION }}
+          path: toolchains/mach9.tar.xz
+      - name: Unpack the engine's unix modules
+        run: |
+          echo "$MACH9_SHA256  toolchains/mach9.tar.xz" | shasum -a 256 -c
+          mkdir -p toolchains/engine
+          tar -xf toolchains/mach9.tar.xz -C toolchains/engine --strip-components 1 wine/lib/wine/aarch64-unix
+
+      - name: Restore llvm-mingw
+        id: mingw
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          key: llvm-mingw-${{ env.LLVM_MINGW_VERSION }}
+          path: toolchains/llvm-mingw
+      - name: Download llvm-mingw
+        if: steps.mingw.outputs.cache-hit != 'true'
+        run: |
+          f="llvm-mingw-$LLVM_MINGW_VERSION-ucrt-macos-universal.tar.xz"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/$f" "https://github.com/mstorsjo/llvm-mingw/releases/download/$LLVM_MINGW_VERSION/$f"
+          echo "$LLVM_MINGW_SHA256  $RUNNER_TEMP/$f" | shasum -a 256 -c
+          mkdir -p toolchains/llvm-mingw
+          tar -xf "$RUNNER_TEMP/$f" -C toolchains/llvm-mingw --strip-components 1
+      - name: Save llvm-mingw
+        if: steps.mingw.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          key: llvm-mingw-${{ env.LLVM_MINGW_VERSION }}
+          path: toolchains/llvm-mingw
+
+      # Mach9's pins/brew-formulae, as far as Wine's configure looks for them
+      - name: Install Homebrew's bison, freetype, gnutls and SDL
+        run: |
+          brew install bison freetype gnutls sdl2-compat pkgconf
+          # win32u.so's freetype.c is compiled against these headers; Mach9's v0.4.0 release run had 2.15.0
+          FREETYPE_VERSION=$(brew list --versions freetype | cut -d' ' -f2)
+          echo "FREETYPE_VERSION=$FREETYPE_VERSION" >>"$GITHUB_ENV"
+          echo "Homebrew's FreeType: $FREETYPE_VERSION" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      # jdrly/gw2-on-mac#253: configure's answers (config.cache, autoconf's own file for them),
+      # kept under a key that names everything they depend on: the image, Xcode and its SDK,
+      # Homebrew's packages, llvm-mingw, the deployment target, the engine's commit and wine.zsh.
+      # A pull request's configure starts from them and skips its compile checks. A push never
+      # does: its configure asks everything again, its answers have to be the kept ones, and a
+      # push is what fills the cache: a pull request can read the branch's entries, and never
+      # another pull request's.
+      - name: The key of configure's answers
+        run: |
+          # each input on its own line at the top level, so a probe that fails stops the step
+          # instead of leaving its line out of the key
+          inputs=$RUNNER_TEMP/configure-key.txt
+          macos=$(sw_vers -buildVersion)
+          {
+            echo "$ImageOS $ImageVersion $macos"
+            xcodebuild -version
+            xcrun -sdk macosx --show-sdk-version
+            clang --version
+            brew list --versions bison freetype gnutls sdl2-compat pkgconf
+            echo "$LLVM_MINGW_VERSION $MACOSX_DEPLOYMENT_TARGET $BASE_COMMIT"
+            shasum -a 256 <"$GW2/wine.zsh"
+          } >"$inputs"
+          cat "$inputs"
+          key=$(shasum -a 256 <"$inputs" | cut -d' ' -f1)
+          echo "CONFIG_KEY=wine-configure-answers-$key" >>"$GITHUB_ENV"
+      - name: Restore configure's answers
+        id: answers
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          key: ${{ env.CONFIG_KEY }}
+          path: ${{ runner.temp }}/config.cache
+      - name: Configure
+        run: |
+          mkdir -p "${SRC%/*}"
+          mv src "$SRC"
+          "$GW2/wine.zsh" prepare "$BASE_COMMIT"
+          kept=$RUNNER_TEMP/config.cache
+          if [[ $GITHUB_EVENT_NAME == pull_request && -f $kept ]]; then
+            mkdir -p "$BUILD"
+            cp "$kept" "$BUILD/config.cache"
+            echo "configure starts from the answers kept under $CONFIG_KEY" | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+          "$GW2/wine.zsh" configure
+          if [[ $GITHUB_EVENT_NAME != pull_request && -f $kept ]]; then
+            diff "$kept" "$BUILD/config.cache" ||
+              { echo "::error::configure's answers aren't the ones kept under $CONFIG_KEY: something the key doesn't name changed them"; exit 1; }
+            echo "configure's answers are the ones kept under $CONFIG_KEY" | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+          [[ -f $kept ]] || cp "$BUILD/config.cache" "$kept"
+      - name: Save configure's answers
+        if: steps.answers.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          key: ${{ env.CONFIG_KEY }}
+          path: ${{ runner.temp }}/config.cache
+
+      - name: Build the engine's commit
+        id: base
+        run: |
+          "$GW2/wine.zsh" build | tee "$RUNNER_TEMP/base-build.log"
+          cp -p "$BUILD/dlls/ntdll/ntdll.so" "$RUNNER_TEMP/baseline-ntdll.so"
+          cp -p "$BUILD/dlls/winemac.drv/winemac.so" "$RUNNER_TEMP/baseline-winemac.so"
+          cp -p "$BUILD/dlls/win32u/win32u.so" "$RUNNER_TEMP/baseline-win32u.so"
+          # what the patched build's objects are compared with, with the times its link saw. A PE
+          # object of the Mac driver or win32u is in a subdirectory of its own (aarch64-windows/), so
+          # the globs take the unix ones only; win32u's dibdrv/ holds unix objects.
+          mkdir -p "$RUNNER_TEMP/base-objects/ntdll" "$RUNNER_TEMP/base-objects/winemac" "$RUNNER_TEMP/base-objects/win32u/dibdrv"
+          cp -p "$BUILD"/dlls/ntdll/unix/*.o "$RUNNER_TEMP/base-objects/ntdll/"
+          cp -p "$BUILD"/dlls/winemac.drv/*.o "$RUNNER_TEMP/base-objects/winemac/"
+          cp -p "$BUILD"/dlls/win32u/*.o "$RUNNER_TEMP/base-objects/win32u/"
+          cp -p "$BUILD"/dlls/win32u/dibdrv/*.o "$RUNNER_TEMP/base-objects/win32u/dibdrv/"
+          # makedep's rules: each object's inputs, which decide whether a commit touched it
+          cp "$BUILD/Makefile" "$RUNNER_TEMP/base-Makefile"
+          # config.h and the generated headers, which reach an object besides its source
+          (cd "$BUILD" && find include -type f -print0 | sort -z | xargs -0 shasum -a 256) >"$RUNNER_TEMP/base-headers.txt"
+          # what the broken builds below are held to with the strict gate: the engine's files, or with
+          # the structural gate my base build of them in a copy of the engine's unix directory (the
+          # compare reads the engine's other modules there)
+          reference=toolchains/engine/lib/wine/aarch64-unix
+          if [[ $GATE != strict ]]; then
+            reference=$RUNNER_TEMP/reference
+            cp -R toolchains/engine/lib/wine/aarch64-unix "$reference"
+            cp "$RUNNER_TEMP/baseline-ntdll.so" "$reference/ntdll.so"
+            cp "$RUNNER_TEMP/baseline-winemac.so" "$reference/winemac.so"
+          fi
+          echo "REFERENCE=$reference" >>"$GITHUB_ENV"
+      - name: Baseline compare
+        id: baseline
+        run: |
+          status=0
+          for lib in ntdll winemac win32u; do
+            python3 -I "$GW2/compare.py" baseline "$lib.so" "$RUNNER_TEMP/baseline-$lib.so" toolchains/engine/lib/wine/aarch64-unix \
+              "$GATE" >"$RUNNER_TEMP/baseline-$lib.md" || status=1
+            tee -a "$GITHUB_STEP_SUMMARY" <"$RUNNER_TEMP/baseline-$lib.md"
+          done
+          exit "$status"
+      # what differs, for the first functions the compare's listing names (the listing is not the gate)
+      - name: Disassemble what differs
+        if: failure() && steps.baseline.outcome == 'failure'
+        run: |
+          for lib in ntdll winemac win32u; do
+            engine=toolchains/engine/lib/wine/aarch64-unix/$lib.so
+            # (a source in a subdirectory is named with it: dibdrv/bitblt.c)
+            # shellcheck disable=SC2016 # the backticks are the report's
+            sed -n 's/^  - `[A-Za-z0-9_/]*\.[cm]: \(.*\)`$/\1/p' "$RUNNER_TEMP/baseline-$lib.md" | sed -n 1,5p | while IFS= read -r f; do
+              f=${f% (only in one)}
+              # a C function's symbol has an underscore before its name, an Objective-C method's doesn't
+              case $f in [-+]\[*) sym=$f ;; *) sym=_$f ;; esac
+              echo "== $lib.so: $f (< the engine's, > mine)"
+              diff <(xcrun objdump -d --no-show-raw-insn --no-leading-addr --disassemble-symbols="$sym" "$engine" | tail -n +5) \
+                <(xcrun objdump -d --no-show-raw-insn --no-leading-addr --disassemble-symbols="$sym" "$RUNNER_TEMP/baseline-$lib.so" | tail -n +5) || true
+            done
+          done
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: failure() && steps.baseline.outcome == 'failure'
+        with:
+          name: baseline-${{ env.COMMIT }}
+          path: |
+            ${{ runner.temp }}/baseline-ntdll.so
+            ${{ runner.temp }}/baseline-winemac.so
+            ${{ runner.temp }}/baseline-win32u.so
+          retention-days: 7
+
+      # One line of NtYieldExecution changed: a second sched_yield call, which also moves every
+      # function the linker puts after it. The byte gate against $REFERENCE (the engine's file, or
+      # with another toolchain my base build) has to fail, and its listing has to name
+      # NtYieldExecution and nothing outside sync.c, where NtDelayExecution may have it inlined.
+      - name: The baseline compare fails on a broken build
+        if: ${{ !cancelled() && steps.base.outcome == 'success' }}
+        run: |
+          f=dlls/ntdll/unix/sync.c
+          sed -i '' '/^NTSTATUS WINAPI NtYieldExecution/,/^}/s/^    sched_yield();$/    sched_yield(); sched_yield();/' "$SRC/$f"
+          # with "|| exit": macOS's bash 3.2 doesn't stop at a failed [[ ]] under -e
+          [[ $(git -C "$SRC" diff --numstat) == $'1\t1\t'"$f" ]] || { echo "::error::the line to change isn't in $f"; exit 1; }
+          "$GW2/wine.zsh" build
+          status=0
+          python3 -I "$GW2/compare.py" baseline ntdll.so "$BUILD/dlls/ntdll/ntdll.so" "$REFERENCE" strict \
+            >"$RUNNER_TEMP/broken.md" || status=$?
+          git -C "$SRC" checkout -- "$f"
+          cat "$RUNNER_TEMP/broken.md"
+          # shellcheck disable=SC2016 # the backticks are the report's
+          [[ $status == 1 ]] && grep -qF '`sync.c: NtYieldExecution`' "$RUNNER_TEMP/broken.md" &&
+            ! grep '^  - `' "$RUNNER_TEMP/broken.md" | grep -v '^  - `sync\.c: '
+      # One line of an Objective-C method changed: -[WineContentView setColorImage:] retains the
+      # image twice. No selector or string is added, so only __text changes, and every function
+      # after it moves. The byte gate against $REFERENCE has to fail on winemac.so, and its listing
+      # has to name the method and nothing outside cocoa_window.m.
+      - name: The baseline compare fails on a broken Objective-C method
+        if: ${{ !cancelled() && steps.base.outcome == 'success' }}
+        run: |
+          f=dlls/winemac.drv/cocoa_window.m
+          sed -i '' '/^    - (void) setColorImage:(CGImageRef)image$/,/^    }$/s/^        colorImage = CGImageRetain(image);$/        colorImage = CGImageRetain(CGImageRetain(image));/' "$SRC/$f"
+          [[ $(git -C "$SRC" diff --numstat) == $'1\t1\t'"$f" ]] || { echo "::error::the line to change isn't in $f"; exit 1; }
+          "$GW2/wine.zsh" build
+          status=0
+          python3 -I "$GW2/compare.py" baseline winemac.so "$BUILD/dlls/winemac.drv/winemac.so" "$REFERENCE" strict \
+            >"$RUNNER_TEMP/broken-winemac.md" || status=$?
+          git -C "$SRC" checkout -- "$f"
+          cat "$RUNNER_TEMP/broken-winemac.md"
+          # shellcheck disable=SC2016 # the backticks are the report's
+          [[ $status == 1 ]] && grep -qF '`cocoa_window.m: -[WineContentView setColorImage:]`' "$RUNNER_TEMP/broken-winemac.md" &&
+            ! grep '^  - `' "$RUNNER_TEMP/broken-winemac.md" | grep -v '^  - `cocoa_window\.m: '
+
+      # My build of the commit this branch forked from, for compare.py fork (jdrly/gw2-on-mac#106):
+      # the patched compare's base is the engine's commit, where my files don't exist, so it can't
+      # say whether a function moved to another file unchanged
+      - name: Build the commit this branch forked from
+        id: fork
+        if: ${{ !cancelled() && steps.base.outcome == 'success' && github.event_name == 'pull_request' }}
+        env:
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          fork=$(git -C "$SRC" merge-base "$COMMIT" "$PR_BASE")
+          "$GW2/wine.zsh" checkout "$fork"
+          rm -f "$BUILD"/dlls/ntdll/unix/*.o "$BUILD"/dlls/winemac.drv/*.o "$BUILD"/dlls/win32u/*.o "$BUILD"/dlls/win32u/dibdrv/*.o
+          "$GW2/wine.zsh" build
+          mkdir -p "$RUNNER_TEMP/fork-objects/ntdll" "$RUNNER_TEMP/fork-objects/winemac" "$RUNNER_TEMP/fork-objects/win32u/dibdrv"
+          cp -p "$BUILD"/dlls/ntdll/unix/*.o "$RUNNER_TEMP/fork-objects/ntdll/"
+          cp -p "$BUILD"/dlls/winemac.drv/*.o "$RUNNER_TEMP/fork-objects/winemac/"
+          cp -p "$BUILD"/dlls/win32u/*.o "$RUNNER_TEMP/fork-objects/win32u/"
+          cp -p "$BUILD"/dlls/win32u/dibdrv/*.o "$RUNNER_TEMP/fork-objects/win32u/dibdrv/"
+          echo "FORK=$fork" >>"$GITHUB_ENV"
+      - name: Build this commit
+        id: head
+        if: ${{ !cancelled() && steps.base.outcome == 'success' }}
+        run: |
+          "$GW2/wine.zsh" checkout "$COMMIT"
+          # every object compiled again, so none compared is one the base build left behind
+          date +%s >"$RUNNER_TEMP/checkout-time"
+          rm -f "$BUILD"/dlls/ntdll/unix/*.o "$BUILD"/dlls/winemac.drv/*.o "$BUILD"/dlls/win32u/*.o "$BUILD"/dlls/win32u/dibdrv/*.o
+          "$GW2/wine.zsh" build | tee "$RUNNER_TEMP/head-build.log"
+          (cd "$BUILD" && find include -type f -print0 | sort -z | xargs -0 shasum -a 256) >"$RUNNER_TEMP/head-headers.txt"
+          diff "$RUNNER_TEMP/base-headers.txt" "$RUNNER_TEMP/head-headers.txt" ||
+            { echo "::error::config.h or a generated header isn't the base build's"; exit 1; }
+      - name: Compare
+        id: compare
+        if: ${{ !cancelled() && steps.head.outcome == 'success' }}
+        run: |
+          touched=()
+          while IFS= read -r f; do touched+=("$f"); done < <(git -C "$SRC" diff --name-only "$BASE_COMMIT" "$COMMIT")
+          status=0
+          for lib in ntdll winemac win32u; do
+            case $lib in
+              ntdll) file=$BUILD/dlls/ntdll/ntdll.so ;;
+              winemac) file=$BUILD/dlls/winemac.drv/winemac.so ;;
+              win32u) file=$BUILD/dlls/win32u/win32u.so ;;
+            esac
+            python3 -I "$GW2/compare.py" patched "$lib.so" "$file" toolchains/engine/lib/wine/aarch64-unix \
+              "$SRC" "$BUILD" "$RUNNER_TEMP/baseline-$lib.so" "$RUNNER_TEMP/base-objects/$lib" \
+              "$RUNNER_TEMP/base-build.log" "$RUNNER_TEMP/head-build.log" "$RUNNER_TEMP/base-Makefile" "$BUILD/Makefile" \
+              "$(cat "$RUNNER_TEMP/checkout-time")" \
+              "${touched[@]}" >"$RUNNER_TEMP/compare-$lib.md" || status=1
+            tee -a "$GITHUB_STEP_SUMMARY" <"$RUNNER_TEMP/compare-$lib.md"
+            # a report of its own file, so the Stage step's reading of compare-win32u.md stays the patched compare's
+            if [[ -n ${FORK:-} ]]; then
+              python3 -I "$GW2/compare.py" fork "$lib.so" "$RUNNER_TEMP/fork-objects/$lib" "$BUILD" "$FORK" \
+                >"$RUNNER_TEMP/fork-$lib.md" || status=1
+              tee -a "$GITHUB_STEP_SUMMARY" <"$RUNNER_TEMP/fork-$lib.md"
+            fi
+          done
+          # Which of my three files this pull request can have changed, for the tests job: a file
+          # counts as changed when the fork report lists a function, or when the change touches a
+          # path that can reach it (a data-only change has no changed function). TESTS says the
+          # tests or the CI changed, and then everything runs: any file under tests/gw2 or .github
+          # but the Markdown ones, and of this workflow what is left without its comment lines and
+          # its lint and publish jobs, which reach no test (jdrly/gw2-on-mac#228). A push gets the
+          # first four set: its tests job decides by FULL alone. ENGINE_BUGS says whether mutexall's
+          # and putback's runs under the engine's ntdll.so are owed (jdrly/gw2-on-mac#324): a new
+          # MACH9_VERSION, or a change to msync.c, where both bugs are, to either program, or to
+          # matrix.zsh or run.zsh, which decide what their runs mean. On a push it compares with the
+          # push's parent.
+          mkdir -p "$RUNNER_TEMP/selection"
+          {
+            for lib in ntdll winemac win32u; do
+              flag=1
+              if [[ -n ${FORK:-} ]]; then
+                flag=0
+                grep -qx "result: $lib.so moved=0 changed=0 new=0 gone=0" "$RUNNER_TEMP/fork-$lib.md" || flag=1
+                case $lib in
+                  ntdll) paths=(dlls/ntdll include server tools) ;;
+                  winemac) paths=(dlls/winemac.drv include) ;;
+                  win32u) paths=(dlls/win32u include) ;;
+                esac
+                git -C "$SRC" diff --quiet "$FORK" "$COMMIT" -- "${paths[@]}" || flag=1
+              fi
+              echo "$(echo "$lib" | tr '[:lower:]' '[:upper:]')=$flag"
+            done
+            flag=1
+            if [[ -n ${FORK:-} ]]; then
+              flag=0
+              git -C "$SRC" diff --quiet "$FORK" "$COMMIT" -- tests/gw2 .github ':(exclude)*.md' \
+                ':(exclude).github/workflows/gw2.yml' || flag=1
+              # reach <commit>: its gw2.yml without comment lines and without the lint and publish jobs
+              reach() {
+                git -C "$SRC" show "$1:.github/workflows/gw2.yml" |
+                  awk '/^  (lint|publish):$/ { skip = 1; next } /^  [a-z][a-z0-9_-]*:$/ { skip = 0 } !skip && !/^[[:space:]]*#/'
+              }
+              [[ $(reach "$FORK") == "$(reach "$COMMIT")" ]] || flag=1
+            fi
+            echo "TESTS=$flag"
+            # against the fork point, or on a push against its parent
+            flag=1
+            since=${FORK:-$(git -C "$SRC" rev-parse --verify -q "$COMMIT^" || true)}
+            if [[ -n $since ]]; then
+              flag=0
+              git -C "$SRC" diff --quiet "$since" "$COMMIT" -- dlls/ntdll/unix/msync.c tests/gw2/mutexall.c \
+                tests/gw2/putback.c tests/gw2/matrix.zsh tests/gw2/run.zsh || flag=1
+              mach9() { git -C "$SRC" show "$1:.github/workflows/gw2.yml" | sed -n 's/^  MACH9_VERSION: *//p'; }
+              [[ $(mach9 "$since") == "$(mach9 "$COMMIT")" ]] || flag=1
+            fi
+            echo "ENGINE_BUGS=$flag"
+          } >"$RUNNER_TEMP/selection/selection.env"
+          { echo "### What this run's tests cover"; echo '```'; cat "$RUNNER_TEMP/selection/selection.env"; echo '```'; } |
+            tee -a "$GITHUB_STEP_SUMMARY"
+          exit "$status"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: failure() && steps.compare.outcome == 'failure'
+        with:
+          name: compared-${{ env.COMMIT }}
+          path: |
+            ${{ env.BUILD }}/dlls/ntdll/ntdll.so
+            ${{ env.BUILD }}/dlls/winemac.drv/winemac.so
+            ${{ env.BUILD }}/dlls/win32u/win32u.so
+          retention-days: 7
+
+      # What the tests job owes, as this job's outputs. full: a pull request owes every test of
+      # what it changed; a push owes them too, unless a green pull request run tested the same
+      # tree: then the smoke test is enough (jdrly/gw2-on-mac#214). A pull request's run tests
+      # GitHub's merge of the head into gw2-on-mac, so the push's parent (gw2-on-mac before the
+      # push) also has to be an ancestor of the head: then every gw2-on-mac that run could have
+      # merged was already in the head. The tree alone isn't enough, because gw2-on-mac can gain a
+      # commit and revert it while the pull request waits (jdrly/gw2-on-mac#241). A lookup that
+      # fails counts as "not tested". run_<file>: full, and the file, the tests or the CI changed
+      # (jdrly/gw2-on-mac#217). lanes: the tests job's lanes that have a step to run, as a JSON
+      # list for its matrix (jdrly/gw2-on-mac#229): window for the steps with a window or a
+      # program of their own and the matrix's block 7, matrix-a and matrix-b for its ntdll blocks,
+      # and smoke alone when nothing else is owed.
+      - name: Which tests this run owes
+        id: owes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          full=1
+          if [[ $GITHUB_EVENT_NAME != pull_request ]]; then
+            tree=$(gh api "repos/$GH_REPO/commits/$COMMIT" -q .commit.tree.sha) || tree=""
+            parent=$(gh api "repos/$GH_REPO/commits/$COMMIT" -q '.parents[0].sha // empty') || parent=""
+            while read -r pr head; do
+              [[ -n $pr && -n $tree && -n $parent ]] || continue
+              [[ $(gh api "repos/$GH_REPO/commits/$head" -q .commit.tree.sha) == "$tree" ]] || continue
+              [[ $(gh api "repos/$GH_REPO/compare/$parent...$head" -q .status) == ahead ]] || continue
+              run=$(gh api "repos/$GH_REPO/actions/workflows/gw2.yml/runs?event=pull_request&status=success&head_sha=$head" \
+                -q '.workflow_runs[0].html_url // empty') || run=""
+              if [[ -n $run ]]; then
+                full=0
+                echo "pull request #$pr's green run tested this tree: $run" | tee -a "$GITHUB_STEP_SUMMARY"
+                break
+              fi
+            done < <(gh api "repos/$GH_REPO/commits/$COMMIT/pulls" -q '.[] | select(.merged_at != null) | "\(.number) \(.head.sha)"')
+            if (( full )); then
+              echo "::warning::no green pull request run tested the tree of $COMMIT, so this push runs every test" |
+                tee -a "$GITHUB_STEP_SUMMARY"
+            fi
+          fi
+          f=$RUNNER_TEMP/selection/selection.env
+          [[ $(grep -cE '^(NTDLL|WINEMAC|WIN32U|TESTS|ENGINE_BUGS)=[01]$' "$f") == 5 && $(wc -l <"$f" | tr -d ' ') == 5 ]] ||
+            { echo "::error::selection.env isn't the five lines the Compare step writes"; cat "$f"; exit 1; }
+          # shellcheck disable=SC1090 # five checked lines of NAME=0 or NAME=1
+          . "$f"
+          any=0
+          for name in NTDLL WINEMAC WIN32U; do
+            run=0
+            if [[ $full == 1 && ( ${!name} == 1 || $TESTS == 1 ) ]]; then run=1; any=1; fi
+            printf -v "RUN_$name" %s "$run"
+            echo "run_$(echo "$name" | tr '[:upper:]' '[:lower:]')=$run" >>"$GITHUB_OUTPUT"
+          done
+          echo "full=$full" >>"$GITHUB_OUTPUT"
+          echo "engine_bugs=$ENGINE_BUGS" >>"$GITHUB_OUTPUT"
+          lanes=()
+          (( any )) && lanes+=(window)
+          [[ $RUN_NTDLL == 1 ]] && lanes+=(matrix-a matrix-b)
+          (( ${#lanes[@]} )) || lanes=(smoke)
+          json=$(printf '"%s",' "${lanes[@]}")
+          echo "lanes=[${json%,}]" >>"$GITHUB_OUTPUT"
+          {
+            echo "### What the tests job owes"
+            echo '```'
+            echo "FULL=$full RUN_NTDLL=$RUN_NTDLL RUN_WINEMAC=$RUN_WINEMAC RUN_WIN32U=$RUN_WIN32U ENGINE_BUGS=$ENGINE_BUGS"
+            echo "lanes: ${lanes[*]}"
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+      # The test programs, built once for every lane: tests/gw2/*.c for Win64 x86_64 with
+      # llvm-mingw, from this commit's tree, which "Build this commit" left in $SRC
+      - name: Build the test programs
+        run: |
+          [[ $(git -C "$SRC" rev-parse HEAD) == "$COMMIT" ]] || { echo "::error::$SRC isn't at $COMMIT"; exit 1; }
+          out=$RUNNER_TEMP/programs
+          mkdir -p "$out/tests/addon" "$out/attach"
+          for c in "$SRC"/tests/gw2/*.c; do
+            # gdi32 for layered.exe's bitmap; mingw's default libraries don't have it
+            "$MINGW_DIR/bin/x86_64-w64-mingw32-clang" -O2 -Wall -Werror -o "$out/tests/$(basename "$c" .c).exe" "$c" -lgdi32
+          done
+          # rundll.exe's stand-in for arcdps, in a folder of its own next to it (jdrly/gw2-on-mac#155)
+          "$MINGW_DIR/bin/x86_64-w64-mingw32-windres" -O coff -o "$RUNNER_TEMP/addon.res" "$SRC/tests/gw2/addon/d3d11.rc"
+          "$MINGW_DIR/bin/x86_64-w64-mingw32-clang" -O2 -Wall -Werror -shared -o "$out/tests/addon/d3d11.dll" \
+            "$SRC/tests/gw2/addon/d3d11.c" "$RUNNER_TEMP/addon.res"
+          # the debugger for arm64 and the process it attaches to for x86_64, in a folder of their
+          # own, which matrix.zsh doesn't run (jdrly/gw2-on-mac#174)
+          "$MINGW_DIR/bin/aarch64-w64-mingw32-clang" -O2 -Wall -Werror -o "$out/attach/attach.exe" "$SRC/tests/gw2/attach/attach.c"
+          "$MINGW_DIR/bin/x86_64-w64-mingw32-clang" -O2 -Wall -Werror -o "$out/attach/count.exe" "$SRC/tests/gw2/attach/count.c"
+          ls "$out/tests" "$out/tests/addon" "$out/attach"
+
+      # dist/ntdll and dist/macdrv: each kind's files with one VERSION and the licences. win32u.so
+      # goes with winemac.so (the app's macdrv) when the compare lists a function of it this commit
+      # changed, added or removed; otherwise the engine's own stays in place.
+      - name: Stage
+        run: |
+          mkdir -p dist/ntdll dist/macdrv
+          cp "$BUILD/dlls/ntdll/ntdll.so" "$SRC/COPYING.LIB" "$SRC/LICENSE" dist/ntdll/
+          cp "$BUILD/dlls/winemac.drv/winemac.so" "$SRC/COPYING.LIB" "$SRC/LICENSE" dist/macdrv/
+          macdrv=(winemac)
+          if grep -qE '^- (changed|new|removed): [1-9]' "$RUNNER_TEMP/compare-win32u.md"; then
+            cp "$BUILD/dlls/win32u/win32u.so" dist/macdrv/
+            macdrv+=(win32u)
+          fi
+          for kind in ntdll macdrv; do
+            dir=dist/$kind
+            libs=(ntdll)
+            [[ $kind == ntdll ]] || libs=("${macdrv[@]}")
+            # "switches: …": the variables of each file's prefix that this commit's sources read,
+            # which have to be the file's strings with it (the app reads ntdll.so's line,
+            # jdrly/gw2-on-mac#80)
+            switches=()
+            for lib in "${libs[@]}"; do
+              case $lib in
+                ntdll) prefix=WINE_HEAT; sources=("$SRC"/dlls/ntdll/unix/*.[ch]) ;;
+                winemac) prefix=WINE_MACDRV; sources=("$SRC"/dlls/winemac.drv/*.[chm]) ;;
+                win32u) prefix=WINE_WIN32U; sources=("$SRC"/dlls/win32u/*.[ch] "$SRC"/dlls/win32u/dibdrv/*.[ch]) ;;
+              esac
+              line=$("$GW2/switches.zsh" "$prefix" "$dir/$lib.so" "${sources[@]}") || exit 1
+              # shellcheck disable=SC2206 # the names have no spaces, and the line is split on purpose
+              switches+=(${line#switches: })
+            done
+            {
+              strings -a dist/ntdll/ntdll.so | grep -oE 'wine-[0-9]+\.[0-9]+-[0-9]+-g[0-9a-f]+'
+              echo "commit: $COMMIT"
+              echo "switches: ${switches[*]}"
+              for lib in "${libs[@]}"; do
+                grep '^baseline: ' "$RUNNER_TEMP/baseline-$lib.md"
+              done
+              echo "base: $BASE_COMMIT ($(git -C "$SRC" describe "$BASE_COMMIT"))"
+              echo "engine: Mach9 $MACH9_VERSION (wine-$MACH9_VERSION-macos-arm64.tar.xz, sha256 $MACH9_SHA256)"
+              echo "toolchain: $RUNNER ($ImageOS $ImageVersion), Xcode $(xcodebuild -version | sed -n 's/^Xcode //p') (macOS SDK $(xcrun -sdk macosx --show-sdk-version)), $(clang --version | sed -n 1p), llvm-mingw $LLVM_MINGW_VERSION, macOS $MACOSX_DEPLOYMENT_TARGET, Homebrew's FreeType $FREETYPE_VERSION"
+              for lib in "${libs[@]}"; do
+                echo "$lib.so: sha256 $(shasum -a 256 "$dir/$lib.so" | cut -d' ' -f1)"
+              done
+              for lib in "${libs[@]}"; do
+                echo
+                cat "$RUNNER_TEMP/baseline-$lib.md"
+                echo
+                cat "$RUNNER_TEMP/compare-$lib.md"
+              done
+            } >"$dir/VERSION"
+            cat "$dir/VERSION"
+            ls -l "$dir"
+          done
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ntdll-arm64-${{ env.COMMIT }}
+          path: dist/ntdll
+          retention-days: 7
+          if-no-files-found: error
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: macdrv-arm64-${{ env.COMMIT }}
+          path: dist/macdrv
+          retention-days: 7
+          if-no-files-found: error
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: programs-${{ env.COMMIT }}
+          path: ${{ runner.temp }}/programs
+          retention-days: 1
+          if-no-files-found: error
+
+  tests:
+    name: Tests on the engine (${{ matrix.lane }})
+    needs: build
+    runs-on: *runner
+    # One job per lane the build job names, side by side: each lane came to about 7.5 minutes in
+    # the runs the lanes were cut from (jdrly/gw2-on-mac#229, docs/gw2/adr/0016). A red lane
+    # doesn't stop the others.
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: ${{ fromJSON(needs.build.outputs.lanes) }}
+    env:
+      FULL: ${{ needs.build.outputs.full }}
+      RUN_NTDLL: ${{ needs.build.outputs.run_ntdll }}
+      RUN_WINEMAC: ${{ needs.build.outputs.run_winemac }}
+      RUN_WIN32U: ${{ needs.build.outputs.run_win32u }}
+      ENGINE_BUGS: ${{ needs.build.outputs.engine_bugs }}
+      LANE: ${{ matrix.lane }}
+    steps:
+      # the Xcode the build used, for the native test's clang
+      - name: Select Xcode
+        run: |
+          app=/Applications/Xcode_$XCODE_VERSION.app
+          [[ -d $app ]] || { echo "::error::Xcode $XCODE_VERSION isn't on this runner's image ($ImageOS $ImageVersion)"; exit 1; }
+          sudo xcode-select -s "$app"
+          {
+            echo "### Toolchain"
+            echo '```'
+            echo "$RUNNER, image $ImageOS $ImageVersion, macOS $(sw_vers -productVersion)"
+            echo "$(sysctl -n hw.ncpu) CPUs, $(( $(sysctl -n hw.memsize) / 1073741824 )) GB of memory"
+            xcodebuild -version | sed -n 1p
+            echo "macOS SDK $(xcrun -sdk macosx --show-sdk-version)"
+            clang --version | sed -n 1p
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+      # only the scripts and the test programs, not the whole Wine tree; the Mac driver's sources for
+      # the headers tests/gw2/native/*.c build, ntdll's unix side for fexstats.c's, and win32u for
+      # ratio.c's make_ratio()
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.COMMIT }}
+          sparse-checkout: |
+            .github/gw2
+            tests/gw2
+            dlls/winemac.drv
+            dlls/ntdll/unix
+            dlls/win32u
+          persist-credentials: false
+      - name: zsh syntax
+        run: for f in .github/gw2/*.zsh tests/gw2/*.zsh; do zsh -n "$f"; echo "ok $f"; done
+
+      - name: Restore Mach9
+        id: mach9
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          key: mach9-tarball-${{ env.MACH9_VERSION }}
+          path: toolchains/mach9.tar.xz
+      - name: Download Mach9
+        if: steps.mach9.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p toolchains
+          curl -fsSL --retry 3 -o toolchains/mach9.tar.xz \
+            "https://github.com/athei/mach9/releases/download/$MACH9_VERSION/wine-$MACH9_VERSION-macos-arm64.tar.xz"
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ntdll-arm64-${{ env.COMMIT }}
+          path: ${{ runner.temp }}/dist
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: macdrv-arm64-${{ env.COMMIT }}
+          path: ${{ runner.temp }}/macdrv-dist
+      # the test programs the build job built: tests/ and attach/, straight into $RUNNER_TEMP
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: programs-${{ env.COMMIT }}
+          path: ${{ runner.temp }}
+
+      # Four copies of the engine: its own, one with my ntdll.so, one with my winemac.so, one with
+      # both (jdrly/gw2-on-mac#62's clip.exe, for the request counts); a fifth with my ntdll.so (for
+      # its request counts) and my win32u.so when the build ships one. APFS clones, so the copies
+      # are free.
+      - name: Unpack the engine
+        run: |
+          echo "$MACH9_SHA256  toolchains/mach9.tar.xz" | shasum -a 256 -c
+          mkdir "$RUNNER_TEMP/engine"
+          tar -xf toolchains/mach9.tar.xz -C "$RUNNER_TEMP/engine"
+          cp -Rc "$RUNNER_TEMP/engine" "$RUNNER_TEMP/mine"
+          cp -Rc "$RUNNER_TEMP/engine" "$RUNNER_TEMP/macdrv"
+          cp -Rc "$RUNNER_TEMP/engine" "$RUNNER_TEMP/both"
+          install -m 755 "$RUNNER_TEMP/dist/ntdll.so" "$RUNNER_TEMP/mine/wine/lib/wine/aarch64-unix/ntdll.so"
+          install -m 755 "$RUNNER_TEMP/macdrv-dist/winemac.so" "$RUNNER_TEMP/macdrv/wine/lib/wine/aarch64-unix/winemac.so"
+          install -m 755 "$RUNNER_TEMP/dist/ntdll.so" "$RUNNER_TEMP/both/wine/lib/wine/aarch64-unix/ntdll.so"
+          install -m 755 "$RUNNER_TEMP/macdrv-dist/winemac.so" "$RUNNER_TEMP/both/wine/lib/wine/aarch64-unix/winemac.so"
+          xattr -drs com.apple.quarantine "$RUNNER_TEMP/engine" "$RUNNER_TEMP/mine" "$RUNNER_TEMP/macdrv" "$RUNNER_TEMP/both"
+          shasum -a 256 "$RUNNER_TEMP"/{engine,mine}/wine/lib/wine/aarch64-unix/ntdll.so \
+            "$RUNNER_TEMP"/{engine,macdrv}/wine/lib/wine/aarch64-unix/winemac.so
+          if [[ -f $RUNNER_TEMP/macdrv-dist/win32u.so ]]; then
+            cp -Rc "$RUNNER_TEMP/mine" "$RUNNER_TEMP/win32u"
+            install -m 755 "$RUNNER_TEMP/macdrv-dist/win32u.so" "$RUNNER_TEMP/win32u/wine/lib/wine/aarch64-unix/win32u.so"
+            shasum -a 256 "$RUNNER_TEMP"/{engine,win32u}/wine/lib/wine/aarch64-unix/win32u.so
+          fi
+          "$RUNNER_TEMP/mine/wine/bin/wine" --version
+          ls "$RUNNER_TEMP/tests" "$RUNNER_TEMP/tests/addon" "$RUNNER_TEMP/attach"
+      # One booted prefix for each engine tree this lane uses, side by side, with smoke.exe run in
+      # each. run.zsh starts every later prefix as a clone of its tree's (GW2_TEST_TEMPLATES), so a
+      # lane boots a new prefix once per tree and not once per run (jdrly/gw2-on-mac#239). The
+      # matrix lanes use engine and mine; window, with block 7, all five. The smoke lane boots its
+      # own two.
+      - name: A booted prefix for each engine tree
+        if: matrix.lane != 'smoke'
+        run: |
+          trees=(engine mine)
+          [[ $LANE == window ]] && trees+=(macdrv both)
+          [[ $LANE == window && -d $RUNNER_TEMP/win32u ]] && trees+=(win32u)
+          pids=()
+          for tree in "${trees[@]}"; do
+            tests/gw2/run.zsh "$RUNNER_TEMP/$tree/wine" "$RUNNER_TEMP/templates/$tree" "$RUNNER_TEMP/tests/smoke.exe" \
+              >"$RUNNER_TEMP/template-$tree.txt" 2>&1 &
+            pids+=($!)
+          done
+          status=0
+          for i in "${!pids[@]}"; do
+            wait "${pids[$i]}" || status=1
+            echo "== ${trees[$i]}"
+            cat "$RUNNER_TEMP/template-${trees[$i]}.txt"
+          done
+          echo "GW2_TEST_TEMPLATES=$RUNNER_TEMP/templates" >>"$GITHUB_ENV"
+          exit "$status"
+      # whether the Mac driver starts on this runner, with my winemac.so in the engine (matrix.zsh
+      # runs window.exe under the engine's own as well)
+      - name: The Mac driver on the runner
+        if: matrix.lane == 'window' && (env.RUN_WINEMAC == '1' || env.RUN_NTDLL == '1' || env.RUN_WIN32U == '1')
+        run: |
+          tests/gw2/run.zsh "$RUNNER_TEMP/macdrv/wine" "$RUNNER_TEMP/macdrv-prefix" "$RUNNER_TEMP/tests/window.exe" |
+            tee "$RUNNER_TEMP/window.txt"
+          { echo "### The Mac driver on the runner"; echo '```'; cat "$RUNNER_TEMP/window.txt"; echo '```'; } >>"$GITHUB_STEP_SUMMARY"
+      # test 11 of jdrly/gw2-on-mac#57: the driver's "is this frame the one Cocoa has", built
+      # natively from dlls/winemac.drv/surface_frame.h and run without Wine
+      - name: The frame decision, natively
+        if: matrix.lane == 'window' && env.RUN_WINEMAC == '1'
+        run: |
+          clang -std=gnu23 -O2 -Wall -Werror -o "$RUNNER_TEMP/frames" tests/gw2/native/frames.c
+          "$RUNNER_TEMP/frames"
+      # test 5 of jdrly/gw2-on-mac#59: WINE_MACDRV_MOUSE_SCALE's arithmetic, built natively from
+      # dlls/winemac.drv/gcmouse_scale.h. 1,000 reports of 0.3 at 1.5 post 450 counts, the sums at 1
+      # are the engine's, and the parse takes only a number above 0 and up to 100
+      - name: The mouse's speed factor, natively
+        if: matrix.lane == 'window' && env.RUN_WINEMAC == '1'
+        run: |
+          clang -std=gnu23 -O2 -Wall -Werror -o "$RUNNER_TEMP/mouse_scale" tests/gw2/native/mouse_scale.c
+          "$RUNNER_TEMP/mouse_scale"
+      # jdrly/gw2-on-mac#111: the requests log's fex line, built natively from
+      # dlls/ntdll/unix/heatfex.h and run on stats objects of FEX's versions 2 and 3; and
+      # jdrly/gw2-on-mac#156: the rate of FEX's counter on this runner, which it prints, and a
+      # 100 ms sleep timed as FEX times a scope, read back within 10%
+      - name: FEX's counters, natively
+        if: matrix.lane == 'window' && env.RUN_NTDLL == '1'
+        run: |
+          clang -std=gnu23 -O2 -Wall -Werror -o "$RUNNER_TEMP/fexstats" tests/gw2/native/fexstats.c
+          "$RUNNER_TEMP/fexstats"
+      # jdrly/gw2-on-mac#159: make_ratio() and what comes before it (ratio_error(), or the engine's
+      # gcd()) cut out of dlls/win32u/sysparams.c as they are, built natively and run without Wine
+      - name: The DPI ratio, natively
+        if: matrix.lane == 'window' && env.RUN_WIN32U == '1'
+        run: |
+          mkdir "$RUNNER_TEMP/ratio-src"
+          awk '/^static (UINT64 ratio_error|UINT gcd)\(/ { on = 1 } on { print } /^static struct ratio make_ratio\(/ { seen = 1 }
+            on && seen && /^}/ { exit }' dlls/win32u/sysparams.c >"$RUNNER_TEMP/ratio-src/make_ratio.c"
+          grep -q '^static struct ratio make_ratio(' "$RUNNER_TEMP/ratio-src/make_ratio.c" ||
+            { echo "::error::make_ratio() isn't where ratio.c's cut looks for it in dlls/win32u/sysparams.c"; exit 1; }
+          clang -std=gnu23 -O2 -Wall -Werror -I"$RUNNER_TEMP/ratio-src" -o "$RUNNER_TEMP/ratio" tests/gw2/native/ratio.c
+          "$RUNNER_TEMP/ratio"
+      # test 9 of jdrly/gw2-on-mac#62, natively: WINE_MACDRV_DRAIN's FIONREAD against poll, and
+      # WINE_MACDRV_CALL's rule for the byte a synchronous call leaves (dlls/winemac.drv/cocoa_calls.h)
+      - name: The event pipe, natively
+        if: matrix.lane == 'window' && env.RUN_WINEMAC == '1'
+        run: |
+          clang -std=gnu23 -O2 -Wall -Werror -o "$RUNNER_TEMP/pipe" tests/gw2/native/pipe.c
+          "$RUNNER_TEMP/pipe"
+      # test 12: layered.exe's 600 frames, every third new, under the engine with my winemac.so and
+      # the macsurface channel on. The driver's line at the 600th flush has to say 400 skipped with
+      # WINE_MACDRV_SURFACE=copy,skip, and 0 with copy and unset. Only where the Mac driver starts,
+      # as window.exe found in the step before; otherwise it is the Mac run's (the pull request's
+      # description has the command).
+      - name: The launcher's frames
+        if: matrix.lane == 'window' && env.RUN_WINEMAC == '1'
+        run: |
+          if ! grep -qF 'gw2 test window: the Mac driver started' "$RUNNER_TEMP/window.txt"; then
+            echo "::warning::the Mac driver doesn't start on this runner, so test 12 needs the Mac run" |
+              tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          for mode in copy,skip copy unset; do
+            want="600 flushes, 0 skipped,"
+            if [[ $mode == unset ]]; then
+              unset WINE_MACDRV_SURFACE
+            else
+              export WINE_MACDRV_SURFACE=$mode
+              [[ $mode == copy,skip ]] && want="600 flushes, 400 skipped,"
+            fi
+            prefix=$RUNNER_TEMP/layered-${mode/,/-}
+            GW2_TEST_WINEDEBUG=-all,+macsurface tests/gw2/run.zsh "$RUNNER_TEMP/macdrv/wine" "$prefix" "$RUNNER_TEMP/tests/layered.exe"
+            line=$(tr -d '\r' <"$prefix/layered.log" | grep -E 'macsurface:.*: 600 flushes' || true)
+            echo "WINE_MACDRV_SURFACE=$mode: ${line:-no macsurface line at the 600th flush}" | tee -a "$GITHUB_STEP_SUMMARY"
+            [[ $line == *"$want"* ]] || { echo "::error::WINE_MACDRV_SURFACE=$mode: expected \"$want\""; exit 1; }
+          done
+      # test 9 of jdrly/gw2-on-mac#62: clip.exe under the engine with my ntdll.so (its request
+      # counts) and my winemac.so, unset, with WINE_MACDRV_CALL=quiet, with WINE_MACDRV_CLIP=changes
+      # and with all four switches. clip.exe checks the counts itself. Here the driver's
+      # "unchanged, not sent" lines: at least 995 of the 1,000 calls with CLIP=changes, none without.
+      # With CLIP=changes the driver also warns "not applied" for a clip the main thread refused,
+      # which says that this runner can't confine the cursor, not that the record is wrong. Only
+      # where the Mac driver starts. WINE_HEAT_DUMP_MS=500: clip.exe waits for seven of the dumper's
+      # blocks a run and adds up however many its rounds take, so the blocks' length doesn't matter
+      # to it, and at 5 s a block the waits were 30 of each run's 39 s.
+      - name: The cursor clip and the call's byte
+        if: matrix.lane == 'window' && (env.RUN_WINEMAC == '1' || env.RUN_NTDLL == '1')
+        run: |
+          if ! grep -qF 'gw2 test window: the Mac driver started' "$RUNNER_TEMP/window.txt"; then
+            echo "::warning::the Mac driver doesn't start on this runner, so test 9's clip.exe needs the Mac run" |
+              tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          prefix=$RUNNER_TEMP/clip-prefix
+          for mode in unset quiet changes all; do
+            unset WINE_MACDRV_VIEW WINE_MACDRV_CLIP WINE_MACDRV_CALL WINE_MACDRV_DRAIN
+            case $mode in
+              quiet) export WINE_MACDRV_CALL=quiet ;;
+              changes) export WINE_MACDRV_CLIP=changes ;;
+              all) export WINE_MACDRV_VIEW=changes WINE_MACDRV_CLIP=changes WINE_MACDRV_CALL=quiet WINE_MACDRV_DRAIN=fionread ;;
+            esac
+            log=$RUNNER_TEMP/clip-log-$mode
+            mkdir -p "$log"
+            status=0
+            WINE_HEAT_EXE=clip.exe WINE_HEAT_COUNT=1 WINE_HEAT_DUMP_MS=500 WINE_HEAT_LOG=$log GW2_TEST_WINEDEBUG=-all,+cursor GW2_TEST_SECONDS=300 \
+              tests/gw2/run.zsh "$RUNNER_TEMP/both/wine" "$prefix" "$RUNNER_TEMP/tests/clip.exe" >"$RUNNER_TEMP/clip-$mode.txt" || status=1
+            skipped=$(tr -d '\r' <"$prefix/clip.log" | grep -c 'macdrv_ClipCursor unchanged, not sent' || true)
+            refused=$(tr -d '\r' <"$prefix/clip.log" | grep -c 'macdrv_ClipCursor .* not applied' || true)
+            {
+              echo "### clip.exe, $mode"
+              echo '```'
+              cat "$RUNNER_TEMP/clip-$mode.txt"
+              echo "the driver's \"unchanged, not sent\": $skipped, \"not applied\": $refused"
+              echo '```'
+            } | tee -a "$GITHUB_STEP_SUMMARY"
+            if (( refused )); then
+              echo "::error::$mode: the main thread refused $refused clips: this runner doesn't confine the cursor, so CLIP=changes can't be tested here and needs the Mac run"
+              exit 1
+            fi
+            (( status == 0 )) || { echo "::error::clip.exe failed with $mode"; exit 1; }
+            if grep -qF 'gw2 test clip: inconclusive' "$RUNNER_TEMP/clip-$mode.txt"; then
+              echo "::warning::$mode: clip.exe's baseline didn't show the byte on this runner, so its other settings prove less" |
+                tee -a "$GITHUB_STEP_SUMMARY"
+            fi
+            if [[ $mode == changes || $mode == all ]]; then
+              (( skipped >= 995 )) || { echo "::error::$mode: $skipped calls not sent, expected at least 995"; exit 1; }
+            else
+              (( skipped == 0 )) || { echo "::error::$mode: $skipped calls not sent, expected none"; exit 1; }
+            fi
+          done
+      # jdrly/gw2-on-mac#62: calls.exe under the engine with my winemac.so, unset and with
+      # WINE_MACDRV_CALL=quiet: four threads make 2,000 synchronous calls to the main thread each
+      # while focus and frame events arrive. A lost wakeup stops a thread, and the program's watchdog
+      # fails it after 10 s without a call from a running thread, or 120 s in all. The driver's events
+      # handled between the program's "workers start" and "workers done" (channel event) are counted
+      # here: none means the test didn't stress the event path. Only where the Mac driver starts.
+      - name: Calls from several threads
+        if: matrix.lane == 'window' && env.RUN_WINEMAC == '1'
+        run: |
+          if ! grep -qF 'gw2 test window: the Mac driver started' "$RUNNER_TEMP/window.txt"; then
+            echo "::warning::the Mac driver doesn't start on this runner, so calls.exe needs the Mac run" |
+              tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          prefix=$RUNNER_TEMP/calls-prefix
+          for mode in unset quiet; do
+            unset WINE_MACDRV_CALL
+            [[ $mode == quiet ]] && export WINE_MACDRV_CALL=quiet
+            status=0
+            GW2_TEST_CALLS=1 GW2_TEST_WINEDEBUG=-all,+event GW2_TEST_SECONDS=300 \
+              tests/gw2/run.zsh "$RUNNER_TEMP/macdrv/wine" "$prefix" "$RUNNER_TEMP/tests/calls.exe" >"$RUNNER_TEMP/calls-$mode.txt" || status=1
+            # only the events handled while the threads made their calls
+            events=$(tr -d '\r' <"$prefix/calls.log" | awk '/gw2 test calls: workers start/ { on = 1 }
+              /gw2 test calls: workers done/ { on = 0 } on && /macdrv_handle_event [A-Z_]* for hwnd/ { n++ } END { print n + 0 }')
+            {
+              echo "### calls.exe, $mode"
+              echo '```'
+              grep -v ':trace:event:' "$RUNNER_TEMP/calls-$mode.txt" | head -40
+              echo "the driver handled $events events"
+              echo '```'
+            } | tee -a "$GITHUB_STEP_SUMMARY"
+            (( status == 0 )) || { echo "::error::calls.exe failed with $mode"; exit 1; }
+            (( events > 0 )) || { echo "::error::$mode: no event arrived, so calls.exe didn't stress the event path"; exit 1; }
+          done
+      # jdrly/gw2-on-mac#159: modeset.exe with EmulateModeset Y at 192 DPI, under the engine with my
+      # ntdll.so and my win32u.so, where it has to pass a size whose ratio make_ratio() couldn't hold
+      # before (1366x768 first) or else a letterboxed mode. Up to Mach9 0.3.1 it also had to fail
+      # under the engine's win32u.so. Since 0.4.0 athei's commit has both fixes, so the engine's file
+      # passes as mine does, and that run is gone. Only where the Mac driver starts.
+      - name: A mode change to 1366x768
+        if: matrix.lane == 'window' && (env.RUN_WIN32U == '1' || env.RUN_NTDLL == '1')
+        run: |
+          if ! grep -qF 'gw2 test window: the Mac driver started' "$RUNNER_TEMP/window.txt"; then
+            echo "::warning::the Mac driver doesn't start on this runner, so modeset.exe needs the Mac run" |
+              tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          [[ -d $RUNNER_TEMP/win32u ]] || { echo "::error::the build shipped no win32u.so of mine"; exit 1; }
+          mine=0
+          tests/gw2/run.zsh "$RUNNER_TEMP/win32u/wine" "$RUNNER_TEMP/modeset-mine" "$RUNNER_TEMP/tests/modeset.exe" \
+            >"$RUNNER_TEMP/modeset-mine.txt" || mine=1
+          { echo "### modeset.exe, my win32u.so"; echo '```'; cat "$RUNNER_TEMP/modeset-mine.txt"; echo '```'; } |
+            tee -a "$GITHUB_STEP_SUMMARY"
+          (( mine == 0 )) || { echo "::error::modeset.exe failed under my win32u.so"; exit 1; }
+          if ! grep -qF 'gw2 test modeset: changing to ' "$RUNNER_TEMP/modeset-mine.txt"; then
+            echo "::warning::this runner's display offers no size whose DPI ratio make_ratio() couldn't hold before, so only ratio.c tests one" |
+              tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+      # jdrly/gw2-on-mac#160: restore.exe minimizes its window, makes the desktop the foreground
+      # window and runs tests/gw2/native/reopen, which sends the process the reopen Apple event, as a
+      # click on the Dock icon does. Under the engine with my winemac.so the window has to be the
+      # foreground window, with a nonzero WM_NCACTIVATE, before SC_RESTORE. Under the engine's own,
+      # without WineHQ's ede017e2b24, it has to get 0 while it isn't: the bug, so the test sees it.
+      # Only where the Mac driver starts and the Dock runs, which AppKit needs to minimize a window.
+      # If the system refuses the Apple event, restore.exe says inconclusive and the step warns.
+      - name: The restore from the Dock
+        if: matrix.lane == 'window' && env.RUN_WINEMAC == '1'
+        run: |
+          if ! grep -qF 'gw2 test window: the Mac driver started' "$RUNNER_TEMP/window.txt"; then
+            echo "::warning::the Mac driver doesn't start on this runner, so restore.exe needs the Mac run" |
+              tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          if ! pgrep -x Dock >/dev/null; then
+            echo "::warning::no Dock runs on this runner, so restore.exe needs the Mac run" | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          # a later SDK may deprecate CGWindowListCopyWindowInfo; that warns and doesn't fail the step
+          clang -O2 -Wall -Werror -Wno-error=deprecated-declarations -o "$RUNNER_TEMP/reopen" tests/gw2/native/reopen.c \
+            -framework CoreServices -framework CoreGraphics
+          for wine in macdrv engine; do
+            want=foreground who="my winemac.so"
+            [[ $wine == engine ]] && want=background who="the engine's winemac.so"
+            status=0
+            GW2_TEST_REOPEN=$RUNNER_TEMP/reopen GW2_TEST_RESTORE=$want GW2_TEST_SECONDS=300 \
+              tests/gw2/run.zsh "$RUNNER_TEMP/$wine/wine" "$RUNNER_TEMP/restore-$wine" "$RUNNER_TEMP/tests/restore.exe" \
+              >"$RUNNER_TEMP/restore-$wine.txt" || status=1
+            {
+              echo "### restore.exe under $who, expecting $want"
+              echo '```'
+              cat "$RUNNER_TEMP/restore-$wine.txt"
+              echo '```'
+            } | tee -a "$GITHUB_STEP_SUMMARY"
+            (( status == 0 )) || { echo "::error::restore.exe failed under $who"; exit 1; }
+            if grep -qF 'gw2 test restore: inconclusive' "$RUNNER_TEMP/restore-$wine.txt"; then
+              echo "::warning::$who: the system refused reopen's Apple event, so restore.exe needs the Mac run" |
+                tee -a "$GITHUB_STEP_SUMMARY"
+            fi
+          done
+      # jdrly/gw2-on-mac#128: run.zsh's check for processes left behind. leftover.exe starts a Unix
+      # process the wineserver doesn't know, without run.zsh's variable in its environment, and
+      # exits. The run has to fail, name the process, and kill it. If run.zsh didn't, the step kills
+      # it and fails at once. The step marks that failure as expected, so run.zsh has to print
+      # "expected" for it, not "FAIL" (jdrly/gw2-on-mac#324). kill -9 returns before the kernel has ended the process, so the step
+      # then waits until it is gone, with no time limit of its own: SIGKILL can't be caught, and
+      # only a process stuck in the kernel would hold the job until its time limit.
+      - name: A process left behind
+        if: matrix.lane == 'window' && env.FULL == '1'
+        run: |
+          status=0
+          GW2_TEST_EXPECT_FAIL=processes tests/gw2/run.zsh "$RUNNER_TEMP/engine/wine" "$RUNNER_TEMP/leftover-prefix" \
+            "$RUNNER_TEMP/tests/leftover.exe" >"$RUNNER_TEMP/leftover.txt" || status=$?
+          cat "$RUNNER_TEMP/leftover.txt"
+          why=
+          if ! grep -qxF 'ok    leftover' "$RUNNER_TEMP/leftover.txt"; then
+            why="leftover.exe itself failed"
+          elif ! grep -qE '^ +[0-9]+ .*perl.* gw2-test-leftover$' "$RUNNER_TEMP/leftover.txt"; then
+            why="run.zsh didn't name the process leftover.exe left"
+          elif (( status != 1 )); then
+            why="run.zsh exited $status for a run that left a process, not 1"
+          elif ! grep -qxF 'expected  processes of this run left behind:' "$RUNNER_TEMP/leftover.txt"; then
+            why="run.zsh didn't print \"expected\" for the process it was told to expect"
+          fi
+          if [[ -n $why ]]; then
+            pkill -9 -f gw2-test-leftover || true
+            echo "::error::$why"
+            exit 1
+          fi
+          while pgrep -f gw2-test-leftover >/dev/null; do sleep 0.2; done
+          echo "ok    the process is gone"
+      # jdrly/gw2-on-mac#155: arcdps's crash window. rundll.exe has rundll32 call
+      # c_exceptionerrormsg in a stand-in for arcdps's d3d11.dll, under the engine with my ntdll.so.
+      # Without a rule the run has to fail on the missing entry point, with rundll32's d3d11 Wine's
+      # own (loaddll: builtin), and is marked as expected (jdrly/gw2-on-mac#324). With the app's
+      # rule for rundll32.exe in WINE_COMPATDB_FILE it has to pass, with rundll32's d3d11 the
+      # stand-in (native). compatdb.so reads that variable with getenv, so each run sets it for all
+      # of Wine, as the app does.
+      - name: rundll32 and an addon's d3d11.dll
+        if: matrix.lane == 'window' && env.FULL == '1'
+        run: |
+          prefix=$RUNNER_TEMP/rundll-prefix
+          rules=$RUNNER_TEMP/rundll.rules
+          echo 'exe=rundll32.exe;dll_overrides=d3d11,dxgi=n,b' >"$rules"
+          # d3d11_loaded <log>: how rundll32 loaded d3d11.dll (builtin or native), from loaddll's lines
+          d3d11_loaded() { tr -d '\r' <"$1" | sed -nE 's/.*loaddll:.*d3d11\.dll" at [0-9A-Fa-f]+: (builtin|native)$/\1/p' | sort -u | tr '\n' ' '; }
+          for mode in without with; do
+            status=0
+            if [[ $mode == with ]]; then export WINE_COMPATDB_FILE=$rules; expect=; else unset WINE_COMPATDB_FILE; expect=programs; fi
+            GW2_TEST_EXPECT_FAIL=$expect GW2_TEST_WINEDEBUG=-all,+loaddll,err+rundll32 tests/gw2/run.zsh "$RUNNER_TEMP/mine/wine" "$prefix" "$RUNNER_TEMP/tests/rundll.exe" \
+              >"$RUNNER_TEMP/rundll-$mode.txt" || status=$?
+            cp "$prefix/rundll.log" "$RUNNER_TEMP/rundll-$mode.log"
+            loaded=$(d3d11_loaded "$RUNNER_TEMP/rundll-$mode.log")
+            {
+              echo "### rundll.exe, $mode the rule for rundll32.exe"
+              echo '```'
+              grep -v 'loaddll:' "$RUNNER_TEMP/rundll-$mode.txt" || true
+              echo "rundll32's d3d11.dll: ${loaded:-no loaddll line}"
+              echo '```'
+            } | tee -a "$GITHUB_STEP_SUMMARY"
+            if [[ $mode == without ]]; then
+              tr -d '\r' <"$RUNNER_TEMP/rundll-$mode.log" | grep "^gw2 test rundll: the entry point didn't run (" >/dev/null ||
+                { echo "::error::without the rule: rundll.exe didn't fail on the missing entry point"; exit 1; }
+              (( status == 1 )) || { echo "::error::without the rule: run.zsh exited $status, not 1"; exit 1; }
+              # the program's failure prints "expected"; a FAIL is the prefix boot's or a process left behind
+              ! grep -q '^FAIL' "$RUNNER_TEMP/rundll-$mode.txt" || { echo "::error::without the rule: run.zsh printed FAIL"; exit 1; }
+              [[ $loaded == "builtin " ]] || { echo "::error::without the rule: rundll32's d3d11.dll was \"$loaded\", not Wine's own alone"; exit 1; }
+            else
+              (( status == 0 )) || { echo "::error::with the rule: rundll.exe failed"; exit 1; }
+              [[ $loaded == "native " ]] || { echo "::error::with the rule: rundll32's d3d11.dll was \"$loaded\", not the stand-in alone"; exit 1; }
+            fi
+          done
+      # jdrly/gw2-on-mac#174: a debugger attaches to a running x86_64 process. attach.exe, built for
+      # arm64 as the engine's winedbg is, starts count.exe, attaches with DebugActiveProcess,
+      # continues the break-in's breakpoint, detaches, and passes once count.exe has counted on and
+      # exited with 0. Under the engine with my ntdll.so it has to pass. Up to Mach9 0.3.1 count.exe
+      # also had to die with c0000005 under the engine's own. Since 0.4.0 athei's commit has the fix,
+      # so the engine's file passes as mine does, and that run is gone.
+      - name: A debugger attached to an x86_64 process
+        if: matrix.lane == 'window' && env.RUN_NTDLL == '1'
+        run: |
+          mine=0
+          tests/gw2/run.zsh "$RUNNER_TEMP/mine/wine" "$RUNNER_TEMP/attach-mine" "$RUNNER_TEMP/attach/attach.exe" \
+            >"$RUNNER_TEMP/attach-mine.txt" || mine=1
+          { echo "### attach.exe under my ntdll.so"; echo '```'; cat "$RUNNER_TEMP/attach-mine.txt"; echo '```'; } |
+            tee -a "$GITHUB_STEP_SUMMARY"
+          (( mine == 0 )) || { echo "::error::attach.exe failed under my ntdll.so"; exit 1; }
+      # The lanes' blocks, cut so that the three lanes take about the same time (docs/gw2/adr/0016):
+      # block 7 (win32u) goes after the window steps, so a pull request that changes only my
+      # win32u.so needs one lane, and matrix-a and matrix-b, which only a change that reaches my
+      # ntdll.so gets, share the rest. Block 1 is the longest, and block 6 goes with 5, whose clone
+      # of my tree it uses.
+      - name: Run them
+        if: matrix.lane != 'smoke' && (env.RUN_NTDLL == '1' || env.RUN_WIN32U == '1')
+        run: |
+          win32u=()
+          [[ -d $RUNNER_TEMP/win32u ]] && win32u=("$RUNNER_TEMP/win32u/wine")
+          case $LANE in
+            window) blocks=(win32u) ;;
+            matrix-a) blocks=(1 3b 4) ;;
+            matrix-b) blocks=(1b 2 3 5 6 8) ;;
+            *) echo "::error::no blocks for the lane $LANE"; exit 1 ;;
+          esac
+          status=0
+          GW2_MATRIX_BLOCKS="${blocks[*]}" GW2_MATRIX_ENGINE_BUGS=$ENGINE_BUGS tests/gw2/matrix.zsh "$RUNNER_TEMP/engine/wine" "$RUNNER_TEMP/mine/wine" "$RUNNER_TEMP/tests" "$RUNNER_TEMP/matrix" "${win32u[@]}" || status=$?
+          # the disk left after the matrix's prefixes: #219's second run ran out of it
+          df -h "$RUNNER_TEMP"
+          exit $status
+      # Whenever the matrix's ntdll blocks don't run, on a push or on a pull request that leaves
+      # ntdll.so alone: that the engine boots a prefix and runs a program with its ntdll.so and with
+      # mine, side by side.
+      - name: Smoke
+        if: env.RUN_NTDLL != '1' && (matrix.lane == 'window' || matrix.lane == 'smoke')
+        run: |
+          tests/gw2/run.zsh "$RUNNER_TEMP/engine/wine" "$RUNNER_TEMP/smoke-engine" "$RUNNER_TEMP/tests/smoke.exe" \
+            >"$RUNNER_TEMP/smoke-engine.txt" 2>&1 &
+          engine=$!
+          tests/gw2/run.zsh "$RUNNER_TEMP/mine/wine" "$RUNNER_TEMP/smoke-mine" "$RUNNER_TEMP/tests/smoke.exe" \
+            >"$RUNNER_TEMP/smoke-mine.txt" 2>&1 &
+          mine=$!
+          status=0
+          wait "$engine" || status=1
+          wait "$mine" || status=1
+          echo "== the engine's ntdll.so"; cat "$RUNNER_TEMP/smoke-engine.txt"
+          echo "== mine"; cat "$RUNNER_TEMP/smoke-mine.txt"
+          exit "$status"
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.COMMIT }}
+          sparse-checkout: |
+            .github
+            include/wine
+            dlls/ntdll/unix
+            dlls/winemac.drv
+            dlls/win32u
+          persist-credentials: false
+      - name: actionlint
+        env:
+          ACTIONLINT_VERSION: 1.7.12
+          ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+        run: |
+          f="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/$f" "https://github.com/rhysd/actionlint/releases/download/v$ACTIONLINT_VERSION/$f"
+          echo "$ACTIONLINT_SHA256  $RUNNER_TEMP/$f" | sha256sum -c
+          tar -xzf "$RUNNER_TEMP/$f" -C "$RUNNER_TEMP" actionlint
+          "$RUNNER_TEMP/actionlint" -color .github/workflows/gw2.yml
+      - name: Python
+        run: python3 -I -m py_compile .github/gw2/compare.py .github/gw2/heatreq.py
+      # .github/gw2/SWITCHES.md names every switch the sources read, and no other. The sources are
+      # the Stage step's, so the index covers what VERSION's "switches:" line can name.
+      - name: The switch index
+        run: |
+          # shellcheck disable=SC2016 # the backticks are the table's, not a command
+          diff <(grep -ohE 'getenv\( *"WINE_(HEAT|MACDRV|WIN32U)_[A-Z0-9_]+" *\)' dlls/ntdll/unix/*.[ch] dlls/winemac.drv/*.[chm] dlls/win32u/*.[ch] dlls/win32u/dibdrv/*.[ch] | grep -oE 'WINE_[A-Z0-9_]+' | sort -u) \
+               <(grep -oE '^\| `WINE_[A-Z0-9_]+`' .github/gw2/SWITCHES.md | grep -oE 'WINE_[A-Z0-9_]+' | sort -u)
+      # compare.py's self-test: every address-bearing instruction of the engine's file changed in
+      # turn has to show. Here and not in the build job (jdrly/gw2-on-mac#234): compare.py reads
+      # files and runs nothing, so it needs no Mac, and the build job's 31 s of it held up the
+      # tests. The engine's tarball is the cache's, or Mach9's release.
+      - name: Restore Mach9
+        id: mach9
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          key: mach9-tarball-${{ env.MACH9_VERSION }}
+          path: toolchains/mach9.tar.xz
+      - name: Download Mach9
+        if: steps.mach9.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p toolchains
+          curl -fsSL --retry 3 -o toolchains/mach9.tar.xz \
+            "https://github.com/athei/mach9/releases/download/$MACH9_VERSION/wine-$MACH9_VERSION-macos-arm64.tar.xz"
+      - name: The compare's self-test
+        run: |
+          echo "$MACH9_SHA256  toolchains/mach9.tar.xz" | sha256sum -c
+          mkdir -p toolchains/engine
+          tar -xf toolchains/mach9.tar.xz -C toolchains/engine --strip-components 1 wine/lib/wine/aarch64-unix
+          python3 -I .github/gw2/compare.py selftest toolchains/engine/lib/wine/aarch64-unix
+      # my ntdll.so's list of the server's requests is the enum's (jdrly/gw2-on-mac#218)
+      - name: heatreq.h
+        run: python3 -I .github/gw2/heatreq.py check include/wine/server_protocol.h dlls/ntdll/unix/heatreq.h
+
+  publish:
+    name: Publish
+    needs: [build, tests, lint]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      # to find the pull request whose run tested a pushed tree
+      actions: read
+      pull-requests: read
+    # Two pushes never upload at once: the workflow's concurrency group runs one push to gw2-on-mac
+    # at a time and never cancels it. A group of this job's own would let a pull request's pending
+    # job cancel a push's, as it did to run 43116636183's upload.
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RELEASE: arm64-builds
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ntdll-arm64-${{ env.COMMIT }}
+          path: dist/ntdll
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: macdrv-arm64-${{ env.COMMIT }}
+          path: dist/macdrv
+      - name: Pack
+        run: |
+          for kind in ntdll macdrv; do
+            files=(ntdll.so)
+            [[ $kind == ntdll ]] || files=(winemac.so)
+            # win32u.so, when Build staged it beside winemac.so
+            [[ ! -f dist/$kind/win32u.so ]] || files+=(win32u.so)
+            name="$kind-arm64-$COMMIT.tar.xz"
+            (cd "dist/$kind" && chmod 755 "${files[@]}")
+            chmod 644 "dist/$kind/VERSION" "dist/$kind/COPYING.LIB" "dist/$kind/LICENSE"
+            tar --sort=name --owner=0 --group=0 --numeric-owner -C "dist/$kind" -cJf "$name" "${files[@]}" VERSION COPYING.LIB LICENSE
+            tar -tvJf "$name"
+            sha256sum "$name" | tee -a "$GITHUB_STEP_SUMMARY"
+          done
+      - name: Upload to the pre-release ${{ env.RELEASE }}
+        if: github.event_name == 'push' && github.ref == 'refs/heads/gw2-on-mac'
+        run: |
+          if ! gh release view "$RELEASE" >/dev/null 2>&1; then
+            gh release create "$RELEASE" --prerelease --latest=false --target "$COMMIT" --title "arm64 builds of my ntdll.so, winemac.so and win32u.so" \
+              --notes "CI output for GW2 on Mac's arm64 line, not a release of Wine: my ntdll.so, winemac.so and win32u.so for Mach9 $MACH9_VERSION's engine, built and checked by .github/workflows/gw2.yml for each push to gw2-on-mac. One asset of each kind per commit, ntdll-arm64-<full sha>.tar.xz and macdrv-arm64-<full sha>.tar.xz (with win32u.so when the commit changed it); the 30 newest of each kind stay."
+          fi
+          id=$(gh api "repos/$GH_REPO/releases/tags/$RELEASE" -q .id)
+          for kind in ntdll macdrv; do
+            name="$kind-arm64-$COMMIT.tar.xz"
+            uploaded=0
+            # grep without -q, which would end the pipe early and fail it under pipefail
+            if gh release view "$RELEASE" --json assets -q '.assets[].name' | grep -xF "$name" >/dev/null; then
+              echo "$name is there already, and a published file is never replaced"
+            else
+              gh release upload "$RELEASE" "$name"
+              uploaded=1
+            fi
+            # the 30 newest assets of this kind stay
+            gh api --paginate "repos/$GH_REPO/releases/$id/assets?per_page=100" -q '.[] | [.created_at, .id, .name] | @tsv' |
+              grep -P "\t$kind-arm64-[0-9a-f]{40}\\.tar\\.xz\$" | sort -r | tail -n +31 | while IFS=$'\t' read -r _ asset old; do
+                echo "deleting $old"
+                gh api -X DELETE "repos/$GH_REPO/releases/assets/$asset"
+              done
+            digest=$(gh api "repos/$GH_REPO/releases/tags/$RELEASE" -q ".assets[] | select(.name == \"$name\") | .digest")
+            echo "$RELEASE has $name, $digest" | tee -a "$GITHUB_STEP_SUMMARY"
+            [[ $digest == sha256:* ]]
+            (( !uploaded )) || [[ $digest == "sha256:$(sha256sum "$name" | cut -d' ' -f1)" ]]
+          done
+          latest=$(gh api "repos/$GH_REPO/releases/latest" -q .tag_name 2>/dev/null || true)
+          echo "releases/latest: ${latest:-none}"
+          [[ $latest != "$RELEASE" ]]
+      # The push's run skips the matrix; the run of the pull request it merged ran it. That run counts
+      # if it was green and on a head whose tree is the pushed tree and that contains the push's
+      # parent (a head up to date with gw2-on-mac, squashed), the build job's check
+      # (jdrly/gw2-on-mac#241). Says which, or that none did; it fails nothing. A failed lookup
+      # (jdrly/gw2-on-mac#254) is a warning, and the pull request it was for doesn't count.
+      - name: Which pull request's run tested this tree
+        if: github.event_name == 'push' && github.ref == 'refs/heads/gw2-on-mac'
+        run: |
+          failed=""
+          # a failed gh api call prints the error's body on stdout, so the variable is emptied
+          tree=$(gh api "repos/$GH_REPO/commits/$COMMIT" -q .commit.tree.sha) || { failed+="${failed:+, }$COMMIT's tree"; tree=""; }
+          parent=$(gh api "repos/$GH_REPO/commits/$COMMIT" -q '.parents[0].sha // empty') ||
+            { failed+="${failed:+, }$COMMIT's parent"; parent=""; }
+          pulls=$(gh api "repos/$GH_REPO/commits/$COMMIT/pulls" -q '.[] | select(.merged_at != null) | "\(.number) \(.head.sha)"') ||
+            { failed+="${failed:+, }$COMMIT's pull requests"; pulls=""; }
+          found=""
+          while read -r pr head; do
+            [[ -n $pr && -n $tree && -n $parent ]] || continue
+            pr_tree=$(gh api "repos/$GH_REPO/commits/$head" -q .commit.tree.sha) || { failed+="${failed:+, }#$pr's tree"; continue; }
+            [[ $pr_tree == "$tree" ]] || continue
+            status=$(gh api "repos/$GH_REPO/compare/$parent...$head" -q .status) || { failed+="${failed:+, }#$pr's compare"; continue; }
+            [[ $status == ahead ]] || continue
+            run=$(gh api "repos/$GH_REPO/actions/workflows/gw2.yml/runs?event=pull_request&status=success&head_sha=$head" \
+              -q '.workflow_runs[0].html_url // empty') || { failed+="${failed:+, }#$pr's runs"; continue; }
+            [[ -n $run ]] && found="pull request #$pr, head $head, the same tree: $run" && break
+          done <<< "$pulls"
+          if [[ -z $found ]]; then
+            found="no green run of a pull request tested this tree"
+            [[ -z $failed ]] || found="no tested pull request found, a lookup failed"
+          fi
+          [[ -z $failed ]] || echo "::warning title=A lookup failed::the lookup of $failed failed, see gh's errors above"
+          echo "The matrix for $COMMIT (tree ${tree:-unknown}): $found" | tee -a "$GITHUB_STEP_SUMMARY"
