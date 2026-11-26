@@ -86,6 +86,7 @@
 #include "winioctl.h"
 #include "winternl.h"
 #include "unix_private.h"
+#include "heatdl.h"  /* jdrly/gw2-on-mac#304: load_unixlib_by_name */
 #include "msync.h"
 #include "wine/list.h"
 #include "wine/debug.h"
@@ -1546,7 +1547,7 @@ NTSTATUS load_unixlib_by_name( const UNICODE_STRING *nt_name, void **handle_ret 
 
         InitializeObjectAttributes( &attr, (UNICODE_STRING *)nt_name, 0, 0, NULL );
         if (!get_nt_and_unix_names( &attr, &true_nt_name, &file, FILE_OPEN, FALSE ))
-            handle = dlopen( file, RTLD_NOW );
+            handle = heat_dlopen( file, RTLD_NOW );
         free( true_nt_name.Buffer );
         goto done;
     }
@@ -1573,7 +1574,7 @@ NTSTATUS load_unixlib_by_name( const UNICODE_STRING *nt_name, void **handle_ret 
     {
         ptr = prepend_build_dir_path( file + pos, ".so", "", "/dlls", build_dir );
         strcpy( ext, ".so" );
-        if ((handle = dlopen( ptr, RTLD_NOW ))) goto done;
+        if ((handle = heat_dlopen( ptr, RTLD_NOW ))) goto done;
     }
 
     strcpy( ext, ".so" );
@@ -1581,10 +1582,10 @@ NTSTATUS load_unixlib_by_name( const UNICODE_STRING *nt_name, void **handle_ret 
     {
         ptr = prepend( file + pos, so_dir, strlen(so_dir) );
         ptr = prepend( ptr, dll_paths[i], strlen(dll_paths[i]) );
-        if ((handle = dlopen( ptr, RTLD_NOW ))) goto done;
+        if ((handle = heat_dlopen( ptr, RTLD_NOW ))) goto done;
 
         ptr = prepend( file + pos, dll_paths[i], strlen(dll_paths[i]) );
-        if ((handle = dlopen( ptr, RTLD_NOW ))) goto done;
+        if ((handle = heat_dlopen( ptr, RTLD_NOW ))) goto done;
     }
 
  done:
