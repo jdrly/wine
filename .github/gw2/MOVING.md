@@ -92,6 +92,10 @@ git rev-list --reverse --no-merges 501796b0ed1..gw2-on-mac ^4e55fb228c0
 `501796b0ed1` is the base of 0.4.0 and `4e55fb228c0` the tip of the 0.3.1 line. A later move of
 this kind adds its own old tip to the `^` list.
 
+Since 2026-11-26 the series replaces this command: [`docs/gw2/SERIES.md`](../../docs/gw2/SERIES.md)
+gives each of these commits a topic, and the next move replays the `series/…` branch it names onto
+the new commit, topic by topic.
+
 ## 4. Outside this repository
 
 My DXMT fork keeps the same list for its side, with my app's items too, in
