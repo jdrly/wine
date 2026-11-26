@@ -70,18 +70,20 @@
  *
  *   lock_wait    NtWaitForAlertByThreadId calls outside the x86 emulator, with or without a sleep
  *   alert_wake_none  alerts whose wake call returned ENOENT: no thread waited on the alert
- *   lock_sleep_guest  the lock_wait calls that slept, once a call. lock_guest_ms is all their sleep,
- *                and lock_guest_5us to lock_guest_long the length of each call's first sleep: a
- *                call sleeps again after EINTR. lock_sleep stays every sleep, FEX's own waits and
- *                the second sleeps included, as the logs before had it. lock_wait minus
- *                lock_sleep_guest is the calls that took their alert without a sleep
+ *   lock_sleep_guest  the lock_wait calls that went to futex_wait, once a call: one whose alert
+ *                came before the kernel compared the word returns at once and still counts.
+ *                lock_guest_ms is all their time in futex_wait, and lock_guest_5us to
+ *                lock_guest_long the length of each call's first one: a call goes again after
+ *                EINTR. lock_sleep stays every futex_wait, FEX's own and the second ones included,
+ *                as the logs before had it. lock_wait minus lock_sleep_guest is the calls that
+ *                took their alert before futex_wait
  *   cpu_user_ms cpu_sys_ms  the thread's CPU time, from thread_info() at the dump. A thread that
  *                ended keeps what it had at the dump before it ended.
  *
  * and after the "total" line, the 16 busiest call sites of each kind, one line each:
  *
- *   lock_site <hex> <n>   a lock sleep outside the emulator: the return address of the call in the
- *                         image's code below it (heat_site())
+ *   lock_site <hex> <n>   a lock_sleep_guest call, at its first futex_wait: the return address
+ *                         of the call in the image's code below it (heat_site())
  *   wake_site <hex> <n>   an alert's wake call outside the emulator, the same way
  *
  * This library is free software; you can redistribute it and/or

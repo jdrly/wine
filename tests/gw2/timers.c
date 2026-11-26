@@ -122,13 +122,14 @@ static BOOL until( volatile LONG *value, LONG want )
 /* jdrly/gw2-on-mac#365: <f>_starts[], a start routine per batch for the cases that may run again.
  * Their threads then don't pile up on one start, and case 2's are the only ones that share a
  * start: the request log's workers row follows them. Each routine stores its batch's number
- * before it calls <f>, so no two have the same code and a linker can't fold them into one. */
+ * before it calls <f>, so no two have the same code and a linker can't fold them into one. The
+ * store is interlocked: a case's two threads may make theirs at once. */
 static volatile LONG batch_started;
 #define BATCH_STARTS(f) \
-    static DWORD WINAPI f##_1( void *arg ) { batch_started = 1; return f( arg ); } \
-    static DWORD WINAPI f##_2( void *arg ) { batch_started = 2; return f( arg ); } \
-    static DWORD WINAPI f##_3( void *arg ) { batch_started = 3; return f( arg ); } \
-    static DWORD WINAPI f##_4( void *arg ) { batch_started = 4; return f( arg ); } \
+    static DWORD WINAPI f##_1( void *arg ) { InterlockedExchange( &batch_started, 1 ); return f( arg ); } \
+    static DWORD WINAPI f##_2( void *arg ) { InterlockedExchange( &batch_started, 2 ); return f( arg ); } \
+    static DWORD WINAPI f##_3( void *arg ) { InterlockedExchange( &batch_started, 3 ); return f( arg ); } \
+    static DWORD WINAPI f##_4( void *arg ) { InterlockedExchange( &batch_started, 4 ); return f( arg ); } \
     static const LPTHREAD_START_ROUTINE f##_starts[BATCHES] = { f##_1, f##_2, f##_3, f##_4 };
 typedef char batch_starts_are_four[BATCHES == 4 ? 1 : -1];
 
