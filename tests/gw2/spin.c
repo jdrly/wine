@@ -19,7 +19,7 @@
  *           a delay that sweeps through the event spin, and every 16th round after 3 ms, when the
  *           waiter is asleep.
  *   halves  (jdrly/gw2-on-mac#368) 6 threads at ABOVE_NORMAL, all started at one address, wait in
- *           NtWaitForAlertByThreadId one after another for 3 ms, 4 rounds. Nobody alerts them, so
+ *           NtWaitForAlertByThreadId one after another for 50 ms, 4 rounds. Nobody alerts them, so
  *           each wait reaches the spin's decision and has to return STATUS_TIMEOUT. The case runs
  *           first, while no other thread is at ABOVE_NORMAL, and its first round is the order of
  *           the threads' first lock waits, the order game+halfworkers numbers them in.
@@ -650,11 +650,12 @@ static void test_alerts(void)
 #define HALF_ROUNDS 4
 static struct alerted halves[HALVES];
 
-/* a wait of 3 ms that nobody alerts, so it always reaches the spin's decision */
+/* a wait of 50 ms that nobody alerts, so it always reaches the spin's decision. 50 ms, so that a
+ * thread taken off its core right after the decision still finds time left to spin */
 static DWORD WINAPI half_waiter( void *arg )
 {
     struct alerted *w = arg;
-    LARGE_INTEGER timeout = { .QuadPart = -30000 };  /* 3 ms */
+    LARGE_INTEGER timeout = { .QuadPart = -500000 };  /* 50 ms */
     NTSTATUS status;
     LONG i;
 
@@ -666,11 +667,9 @@ static DWORD WINAPI half_waiter( void *arg )
         if (WaitForSingleObject( w->go, 10000 ) != WAIT_OBJECT_0) return 1;
         if (w->stop) return 0;
         if ((status = pNtWaitForAlertByThreadId( (const void *)&w->armed, &timeout )) != STATUS_TIMEOUT)
-        {
             w->failed = status;
-            return 1;
-        }
-        InterlockedExchange( &w->taken, i );
+        InterlockedExchange( &w->taken, i );  /* after failed, which the driver reads next */
+        if (w->failed) return 1;
     }
 }
 
@@ -707,7 +706,7 @@ static void test_halves(void)
         join( threads[k], 10000 );
         CloseHandle( halves[k].go );
     }
-    printf( "gw2 test spin: %d rounds of a 3 ms wait on each of %d threads, every one timed out\n", HALF_ROUNDS, HALVES );
+    printf( "gw2 test spin: %d rounds of a 50 ms wait on each of %d threads, every one timed out\n", HALF_ROUNDS, HALVES );
 }
 
 /* pulse: PulseEvent during an event spin */

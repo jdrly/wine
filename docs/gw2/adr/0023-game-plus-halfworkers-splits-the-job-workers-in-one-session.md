@@ -34,7 +34,7 @@ spin's scope took the thread at its last lock wait.
 - `spin` goes before `start` in a thread's line, so readers that take name and value pairs read it
   as one more pair. A heat log from before this change has no `spin`.
 - `tests/gw2/spin.c` has a case for it, `halves`. Six threads at ABOVE_NORMAL, all started at one
-  address, wait 3 ms on an alert that never comes, one after another, while no other thread is at
+  address, wait 50 ms on an alert that never comes, one after another, while no other thread is at
   that priority. Their rows' `spin` has to be 1, 0, 1, 0, 1, 0 in that order. A thread with
   `spin 1` has to have spun, and one with `spin 0` has to have counted `spin_scoped` and no spin.
   An alert would have let a wait skip the spin's decision when its thread was off its core, so
