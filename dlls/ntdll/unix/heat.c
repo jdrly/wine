@@ -31,8 +31,10 @@
  *                         A kind may end in a scope: ":not=<p>" leaves out the threads whose
  *                         priority is p, and repeats; ":game" is ":not=1", GW2's ABOVE_NORMAL
  *                         workers; ":all", the default, leaves out none.
+ *                         ":game+halfworkers" is ":game", except that every other ABOVE_NORMAL
+ *                         thread spins (jdrly/gw2-on-mac#368).
  *   WINE_HEAT_SPIN_PAUSE=<n>  waits without a spin after 4 misses in a row (default 32)
- *   WINE_HEAT_PROF=1      the game thread's sampler under FEX (heatprof.c, jdrly/gw2-on-mac#43).
+ *   WINE_HEAT_PROF=1     the game thread's sampler under FEX (heatprof.c, jdrly/gw2-on-mac#43).
  *                         With FEX_PROFILESTATS=1 the log also gets the game thread's FEX counters.
  *
  * See jdrly/gw2-on-mac#40 and, for 0.1.x's version of the same switches, gw2-on-mac's
@@ -85,6 +87,10 @@
  *   lock_site <hex> <n>   a lock_sleep_guest call, at its first futex_wait: the return address
  *                         of the call in the image's code below it (heat_site())
  *   wake_site <hex> <n>   an alert's wake call outside the emulator, the same way
+ *
+ * Since jdrly/gw2-on-mac#368 a thread's line has "spin 1" or "spin 0" before "start": 1 when the
+ * lock spin's scope took the thread at its last lock wait, 0 when it left it out, before its first
+ * lock wait, and with the lock spin off (heatspin.c).
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -490,10 +496,12 @@ static void heat_dump(void)
         len += snprintf( buf + len, sizeof(buf) - len, "thread %04x",
                          __atomic_load_n( &heat_rows[i].tid, __ATOMIC_RELAXED ) );
         if (len < sizeof(buf) - 1) len += heat_print_row( buf + len, sizeof(buf) - len, c, t );
-        /* jdrly/gw2-on-mac#99: last, so that a reader of name and value pairs reads them as two more */
+        /* jdrly/gw2-on-mac#99: last, so that a reader of name and value pairs reads them as two more.
+         * jdrly/gw2-on-mac#368: spin before them. */
         heat_row_name( &heat_rows[i], name );
         if (len < sizeof(buf) - 1)
-            len += snprintf( buf + len, sizeof(buf) - len, " start %#llx name %s\n",
+            len += snprintf( buf + len, sizeof(buf) - len, " spin %u start %#llx name %s\n",
+                             __atomic_load_n( &heat_rows[i].spin, __ATOMIC_RELAXED ),
                              (unsigned long long)__atomic_load_n( &heat_rows[i].start, __ATOMIC_RELAXED ), name );
     }
     if (len > sizeof(buf) - 1) len = sizeof(buf) - 1;
@@ -598,7 +606,7 @@ static unsigned int heat_spin_parse( const char *spec )
     unsigned int mode = 0, kind, not;
     size_t n;
     long us, prio;
-    BOOL ok;
+    BOOL ok, half;
 
     snprintf( buf, sizeof(buf), "%s", spec );
     for (item = strtok_r( buf, ",", &save ); item; item = strtok_r( NULL, ",", &save ))
@@ -610,13 +618,16 @@ static unsigned int heat_spin_parse( const char *spec )
         us = strtol( p, &end, 10 );
         if (end == p || us < 1 || us > 1000) continue;
         not = 0;
+        half = FALSE;
         ok = TRUE;
         for (p = end; ok && *p; p += n)
         {
             if (*p++ != ':') { ok = FALSE; break; }
             n = strcspn( p, ":" );
-            if (n == 3 && !strncmp( p, "all", 3 )) not = 0;
+            if (n == 3 && !strncmp( p, "all", 3 )) not = 0, half = FALSE;
             else if (n == 4 && !strncmp( p, "game", 4 )) not |= HEAT_PRIORITY_BIT( 1 );
+            /* jdrly/gw2-on-mac#368 */
+            else if (n == 16 && !strncmp( p, "game+halfworkers", 16 )) not |= HEAT_PRIORITY_BIT( 1 ), half = TRUE;
             else if (n > 4 && !strncmp( p, "not=", 4 ) && (prio = strtol( p + 4, &end, 10 )) >= -15 &&
                      prio <= 15 && end == p + n)
                 not |= HEAT_PRIORITY_BIT( prio );
@@ -625,6 +636,7 @@ static unsigned int heat_spin_parse( const char *spec )
         if (!ok) continue;
         heat_spin_ns[kind] = us * 1000;
         heat_spin_not[kind] = not;
+        heat_spin_half = (heat_spin_half & ~(1u << kind)) | (half ? 1u << kind : 0);
         mode |= HEAT_SPIN_LOCK << kind;
     }
     return mode;
@@ -651,6 +663,8 @@ static void heat_spin_describe( unsigned int mode )
         for (prio = -15; prio <= 15 && len < sizeof(heat_spin_line); prio++)
             if (heat_spin_not[kind] & HEAT_PRIORITY_BIT( prio ))
                 len += snprintf( heat_spin_line + len, sizeof(heat_spin_line) - len, ":not=%d", prio );
+        if ((heat_spin_half & (1u << kind)) && len < sizeof(heat_spin_line))  /* jdrly/gw2-on-mac#368 */
+            len += snprintf( heat_spin_line + len, sizeof(heat_spin_line) - len, "+halfworkers" );
     }
     if (len < sizeof(heat_spin_line))
         snprintf( heat_spin_line + len, sizeof(heat_spin_line) - len, " pause %u\n", heat_spin_pause );

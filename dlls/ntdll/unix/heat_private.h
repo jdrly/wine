@@ -68,6 +68,9 @@ struct heat_row
     /* jdrly/gw2-on-mac#365: its Mach port, which the dumper reads its CPU time through, 0 for
      * none. The row keeps the port's send right, so the name isn't reused after the thread ends. */
     unsigned int       port;
+    /* jdrly/gw2-on-mac#368: 1 when the lock spin's scope took the thread at its last lock wait,
+     * which only the thread writes. In what was the struct's padding, so its size stays. */
+    unsigned int       spin;
 };
 
 #define HEAT_NAME(id, name) #name,
@@ -192,6 +195,7 @@ extern struct heat_pool *heat_pools HEAT_HIDDEN;
 
 extern unsigned long long heat_spin_ns[HEAT_SPIN_KINDS] HEAT_HIDDEN;
 extern unsigned int heat_spin_not[HEAT_SPIN_KINDS] HEAT_HIDDEN;
+extern unsigned int heat_spin_half HEAT_HIDDEN;  /* jdrly/gw2-on-mac#368: game+halfworkers, 1 << kind */
 extern unsigned int heat_spin_pause HEAT_HIDDEN;
 extern unsigned long long *heat_spinners HEAT_HIDDEN;
 
