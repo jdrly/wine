@@ -40,6 +40,17 @@
  * report's rule, and its block comes first. The hook runs on the row's own thread with the server's signals blocked, so only
  * the dumper reads a row while it changes.
  *
+ * Since jdrly/gw2-on-mac#365 a dump ends in one workers row when there are workers:
+ *
+ *   workers start 0x140dd5950 threads 7 from 115.0 to 120.0 lock_sleep 80123 ... cpu_sys_ms 212.500
+ *
+ * The workers are the threads with the start address in the image's code that the most rows share,
+ * leaving out the game thread's: GW2 starts the game thread and its other named threads through
+ * one function, 0x140e6e7b0 on the 2026-11-17 build, and its job workers through another. Two
+ * threads at least; on a tie the start whose first row came first. The row adds up each worker's
+ * counters and timers that changed since its last workers row, or since its start, and prints those
+ * that aren't 0, as a counters line does. from is the end of the last workers row.
+ *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation; either
@@ -221,5 +232,69 @@ int heat_req_block( char *buf, size_t size, unsigned int row, double now,
     if (len < size)
         len += snprintf( buf + len, size - len, "message unlisted %llu\nset_queue_mask poll %llu nopoll %llu\n",
                          s[HS_MSG_UNLISTED], s[HS_POLL], s[HS_NOPOLL] );
+    return len < size ? len : size - 1;
+}
+
+/* jdrly/gw2-on-mac#365: the start address in the image's code that the most of the <rows> rows
+ * share, leaving out that of row <game>, or 0 when none is shared */
+static ULONG_PTR heat_workers_start( unsigned int rows, unsigned int game )
+{
+    ULONG_PTR start, best = 0, skip = __atomic_load_n( &heat_rows[game].start, __ATOMIC_RELAXED );
+    unsigned int i, j, n, most = 1;
+
+    for (i = 0; i < rows; i++)
+    {
+        start = __atomic_load_n( &heat_rows[i].start, __ATOMIC_RELAXED );
+        if (start == skip || start < heat_code_lo || start >= heat_code_hi) continue;
+        for (j = 0; j < i && __atomic_load_n( &heat_rows[j].start, __ATOMIC_RELAXED ) != start; j++) ;
+        if (j < i) continue;  /* counted at its first row */
+        for (n = 1, j = i + 1; j < rows; j++) if (__atomic_load_n( &heat_rows[j].start, __ATOMIC_RELAXED ) == start) n++;
+        if (n > most)
+        {
+            most = n;
+            best = start;
+        }
+    }
+    return best;
+}
+
+/* the workers row into <buf>: the counters and timers of the workers' rows that changed since
+ * each row's last workers row, added up; returns its length, 0 without workers */
+int heat_req_workers( char *buf, size_t size, unsigned int rows, unsigned int game, double now )
+{
+    static double printed;  /* the end of the last workers row */
+    unsigned long long hc[HC_NB] = {0}, ht[HT_NB] = {0}, v;
+    ULONG_PTR start = heat_workers_start( rows, game );
+    struct heat_req_row *prev;
+    unsigned int i, k, n = 0;
+    int len;
+
+    if (!start) return 0;
+    for (i = 0; i < rows; i++)
+    {
+        if (__atomic_load_n( &heat_rows[i].start, __ATOMIC_RELAXED ) != start) continue;
+        prev = &heat_reqs_prev[i];
+        for (k = 0; k < HC_NB; k++)
+        {
+            v = __atomic_load_n( &heat_rows[i].c[k], __ATOMIC_RELAXED );
+            hc[k] += v - prev->whc[k];
+            prev->whc[k] = v;
+        }
+        for (k = 0; k < HT_NB; k++)
+        {
+            v = __atomic_load_n( &heat_rows[i].t[k], __ATOMIC_RELAXED );
+            ht[k] += v - prev->wht[k];
+            prev->wht[k] = v;
+        }
+        n++;
+    }
+    len = snprintf( buf, size, "workers start %#llx threads %u from %.1f to %.1f", (unsigned long long)start, n,
+                    printed, now );
+    printed = now;
+    for (k = 0; k < HC_NB && len < size; k++)
+        if (hc[k]) len += snprintf( buf + len, size - len, " %s %llu", heat_counter_names[k], hc[k] );
+    for (k = 0; k < HT_NB && len < size; k++)
+        if (ht[k]) len += snprintf( buf + len, size - len, " %s %.3f", heat_timer_names[k], ht[k] / 1e6 );
+    if (len < size) len += snprintf( buf + len, size - len, "\n" );
     return len < size ? len : size - 1;
 }

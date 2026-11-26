@@ -8,11 +8,20 @@
  * 1. requests: two threads ask the server for their own exit code 3,000 and 2,000 times while the
  *    main thread does it 1,000 times (get_thread_info). The request log has blocks for all three,
  *    each with at least its count of get_thread_info, and the counters lines of the main thread's
- *    blocks add up to its RELEASES releases.
+ *    blocks add up to its RELEASES releases. Each of the two has a start routine of its own.
  * 2. lock: a holder takes a critical section, waits until the sleeper's EnterCriticalSection has
  *    raised its lock count, yields 200 times so the sleeper can go to sleep, and leaves, 50 rounds.
  *    The sleepers' rows: lock_sleep and lock_ms above 0, and their five lock_ buckets add up to
  *    lock_sleep. The holders': at least one alert that made the wake call, and alert_ms above 0.
+ *    Since jdrly/gw2-on-mac#365 both start in locker(), the only start routine two threads share
+ *    (cases 3 and 4 have a start routine per batch),
+ *    and each stays after its rounds until two more blocks are in the request log, so a dump has
+ *    read its CPU time. The counters file has a lock_site line inside lock_enter() and a wake_site
+ *    line inside lock_leave(), the case's two calls into the critical section. On each of the
+ *    case's threads lock_wait is at least lock_sleep_guest and cpu_sys_ms is above 0, and the
+ *    sleepers' lock_guest_ buckets add up to lock_sleep_guest. Every workers row of the request
+ *    log starts at locker(), the last has the case's threads, and the rows' lock_sleep,
+ *    lock_sleep_guest, alert_wake and server add up to the case's rows' in the counters file.
  * 3. events: a thread sets and resets an auto-reset event nobody waits on 1,000 times: event_set
  *    1,000, event_wake_none 1,000, event_wake 0, wake_none 0, wake_ms above 0. Then a setter sets an
  *    event 20 times, each time after its waiter said it is about to wait and 200 yields: event_set
@@ -110,6 +119,20 @@ static BOOL until( volatile LONG *value, LONG want )
     return TRUE;
 }
 
+/* jdrly/gw2-on-mac#365: <f>_starts[], a start routine per batch for the cases that may run again.
+ * Their threads then don't pile up on one start, and case 2's are the only ones that share a
+ * start: the request log's workers row follows them. Each routine stores its batch's number
+ * before it calls <f>, so no two have the same code and a linker can't fold them into one. The
+ * store is interlocked: a case's two threads may make theirs at once. */
+static volatile LONG batch_started;
+#define BATCH_STARTS(f) \
+    static DWORD WINAPI f##_1( void *arg ) { InterlockedExchange( &batch_started, 1 ); return f( arg ); } \
+    static DWORD WINAPI f##_2( void *arg ) { InterlockedExchange( &batch_started, 2 ); return f( arg ); } \
+    static DWORD WINAPI f##_3( void *arg ) { InterlockedExchange( &batch_started, 3 ); return f( arg ); } \
+    static DWORD WINAPI f##_4( void *arg ) { InterlockedExchange( &batch_started, 4 ); return f( arg ); } \
+    static const LPTHREAD_START_ROUTINE f##_starts[BATCHES] = { f##_1, f##_2, f##_3, f##_4 };
+typedef char batch_starts_are_four[BATCHES == 4 ? 1 : -1];
+
 static void yields(void)
 {
     int i;
@@ -125,16 +148,22 @@ static BOOL ask( int n )
     return TRUE;
 }
 
-static DWORD WINAPI requester( void *arg )
+/* a start routine each, so that only case 2's threads share one (jdrly/gw2-on-mac#365) */
+static DWORD WINAPI requester_a( void *arg )
 {
-    return !ask( (int)(INT_PTR)arg );
+    return !ask( REQ_A );
+}
+
+static DWORD WINAPI requester_b( void *arg )
+{
+    return !ask( REQ_B );
 }
 
 static DWORD req_a, req_b;
 
 static void test_requests(void)
 {
-    HANDLE a = thread( requester, (void *)(INT_PTR)REQ_A, &req_a ), b = thread( requester, (void *)(INT_PTR)REQ_B, &req_b );
+    HANDLE a = thread( requester_a, NULL, &req_a ), b = thread( requester_b, NULL, &req_b );
 
     if (!ask( REQ_GAME )) FAIL( "GetExitCodeThread: error %lu", GetLastError() );
     join( a, "requester A" );
@@ -144,18 +173,39 @@ static void test_requests(void)
 /* 2: lock, a batch at a time */
 
 static CRITICAL_SECTION cs;
-static volatile LONG lock_go, lock_done;
+static volatile LONG lock_go, lock_done, lock_finished;
 static DWORD lock_holders[BATCHES], lock_sleepers[BATCHES];
 static int lock_batches;
+static HANDLE lock_park;              /* with counting: set once two dumps ran after a batch's rounds */
+static char req_log[MAX_PATH * 2];    /* with counting: heat-requests-<pid>.log */
 
-static DWORD WINAPI holder( void *arg )
+static void await_dumps( const char *path );
+
+/* Each call into the critical section has a function of its own, so the log's sites can be told
+ * apart: a site of the case is a return address inside one of the two (jdrly/gw2-on-mac#365). The
+ * empty asm after the call keeps the return address in the function: no tail call. */
+static __attribute__((noinline)) void lock_enter( CRITICAL_SECTION *c )
+{
+    EnterCriticalSection( c );
+    __asm__ __volatile__( "" ::: "memory" );
+}
+
+static __attribute__((noinline)) void lock_leave( CRITICAL_SECTION *c )
+{
+    LeaveCriticalSection( c );
+    __asm__ __volatile__( "" ::: "memory" );
+}
+
+#define LOCK_FUNC_SIZE 64  /* more than either function's code */
+
+static DWORD hold(void)
 {
     DWORD start;
     LONG r;
 
     for (r = 1; r <= LOCK_ROUNDS; r++)
     {
-        EnterCriticalSection( &cs );
+        lock_enter( &cs );
         InterlockedExchange( &lock_go, r );
         /* the sleeper's EnterCriticalSection raised the count: it waits for this thread */
         for (start = GetTickCount(); *(volatile LONG *)&cs.LockCount < 1;)
@@ -164,34 +214,54 @@ static DWORD WINAPI holder( void *arg )
             if (GetTickCount() - start > LIMIT_MS) return 2;
         }
         yields();
-        LeaveCriticalSection( &cs );
+        lock_leave( &cs );
         if (!until( &lock_done, r )) return 3;
     }
     return 0;
 }
 
-static DWORD WINAPI sleeper( void *arg )
+static DWORD sleep_on(void)
 {
     LONG r;
 
     for (r = 1; r <= LOCK_ROUNDS; r++)
     {
         if (!until( &lock_go, r )) return 2;
-        EnterCriticalSection( &cs );
-        LeaveCriticalSection( &cs );
+        lock_enter( &cs );
+        lock_leave( &cs );
         InterlockedExchange( &lock_done, r );
     }
     return 0;
 }
 
+/* The holder (<arg> not NULL) and the sleeper start here, so that the request log's workers row
+ * follows the two. With counting each stays after its rounds until a dump has read its CPU time. */
+static DWORD WINAPI locker( void *arg )
+{
+    DWORD ret = arg ? hold() : sleep_on();
+
+    InterlockedIncrement( &lock_finished );
+    if (lock_park && WaitForSingleObject( lock_park, 60000 ) != WAIT_OBJECT_0) return 4;
+    return ret;
+}
+
 static void lock_batch(void)
 {
+    DWORD start;
     HANDLE h, s;
 
-    lock_go = lock_done = 0;
+    lock_go = lock_done = lock_finished = 0;
     InitializeCriticalSection( &cs );
-    h = thread( holder, NULL, &lock_holders[lock_batches] );
-    s = thread( sleeper, NULL, &lock_sleepers[lock_batches] );
+    if (lock_park) ResetEvent( lock_park );
+    h = thread( locker, (void *)1, &lock_holders[lock_batches] );
+    s = thread( locker, NULL, &lock_sleepers[lock_batches] );
+    if (lock_park)
+    {
+        for (start = GetTickCount(); lock_finished < 2; Sleep( 1 ))
+            if (GetTickCount() - start > 30000) FAIL( "the lock case's threads didn't end their rounds in 30 s" );
+        await_dumps( req_log );
+        SetEvent( lock_park );
+    }
     join( h, "the holder" );
     join( s, "the sleeper" );
     DeleteCriticalSection( &cs );
@@ -248,14 +318,17 @@ static DWORD WINAPI set_waited( void *arg )
     return 0;
 }
 
+BATCH_STARTS(event_waiter)
+BATCH_STARTS(set_waited)
+
 static void wake_batch(void)
 {
     HANDLE w, s;
 
     wake_ready = wake_done = 0;
     if (!(wake_event = CreateEventW( NULL, FALSE, FALSE, NULL ))) FAIL( "CreateEvent: error %lu", GetLastError() );
-    w = thread( event_waiter, NULL, NULL );
-    s = thread( set_waited, NULL, &event_setters[wake_batches] );
+    w = thread( event_waiter_starts[wake_batches], NULL, NULL );
+    s = thread( set_waited_starts[wake_batches], NULL, &event_setters[wake_batches] );
     join( w, "the event's waiter" );
     join( s, "the setter with a waiter" );
     CloseHandle( wake_event );
@@ -279,9 +352,11 @@ static DWORD WINAPI waiter( void *arg )
     return 0;
 }
 
+BATCH_STARTS(waiter)
+
 static void wait_batch(void)
 {
-    join( thread( waiter, NULL, &waiters[wait_batches] ), "the waiter" );
+    join( thread( waiter_starts[wait_batches], NULL, &waiters[wait_batches] ), "the waiter" );
     wait_batches++;
 }
 
@@ -535,6 +610,104 @@ static void start_and_name( DWORD tid, ULONG_PTR *start, char *name, size_t size
     snprintf( name, size, "%.*s", (int)strcspn( n, " \n" ), n );
 }
 
+/* the count on the "<kind> <hex> <n>" line of the counters file whose address is inside <func>,
+ * 0 for none */
+static long long site( const char *kind, const void *func )
+{
+    ULONG_PTR lo = (ULONG_PTR)func, addr;
+    const char *p = heat_text;
+    char key[32], *end;
+    size_t n = snprintf( key, sizeof(key), "\n%s ", kind );
+
+    while ((p = strstr( p, key )))
+    {
+        p += n;
+        addr = (ULONG_PTR)_strtoui64( p, &end, 16 );
+        if (addr >= lo && addr < lo + LOCK_FUNC_SIZE) return _atoi64( end );
+    }
+    return 0;
+}
+
+/* case 2's lines of jdrly/gw2-on-mac#365: the sites, each thread's CPU time, and lock_wait */
+static void check_lock_365(void)
+{
+    const char *p;
+    long long lock_sites, wake_sites, wait, guest;
+    double user, sys;
+    int i, j;
+
+    for (p = heat_text; (p = strstr( p, "\n" )) && *++p;)
+        if (!strncmp( p, "lock_site ", 10 ) || !strncmp( p, "wake_site ", 10 ))
+            printf( "gw2 test timers: %.*s\n", (int)strcspn( p, "\n" ), p );
+    lock_sites = site( "lock_site", lock_enter );
+    wake_sites = site( "wake_site", lock_leave );
+    printf( "gw2 test timers: lock sites: lock_site in lock_enter() at %p %lld, wake_site in lock_leave() at %p %lld; "
+            "the sleepers' lock_sleep_guest %lld buckets %lld lock_guest_ms %.3f\n", lock_enter, lock_sites, lock_leave,
+            wake_sites, sum( lock_sleepers, lock_batches, "lock_sleep_guest" ), sum_buckets( lock_sleepers, lock_batches, "lock_guest" ),
+            sum_ms( lock_sleepers, lock_batches, "lock_guest_ms" ) );
+    if (!lock_sites) FAIL( "no lock_site line inside lock_enter()" );
+    if (!wake_sites) FAIL( "no wake_site line inside lock_leave()" );
+    if (sum_buckets( lock_sleepers, lock_batches, "lock_guest" ) != sum( lock_sleepers, lock_batches, "lock_sleep_guest" ))
+        FAIL( "the lock_guest buckets don't add up to lock_sleep_guest" );
+    for (i = 0; i < lock_batches; i++)
+    {
+        const DWORD two[2] = { lock_holders[i], lock_sleepers[i] };
+
+        for (j = 0; j < 2; j++)
+        {
+            wait = counter( two[j], "lock_wait" );
+            guest = counter( two[j], "lock_sleep_guest" );
+            user = timer( two[j], "cpu_user_ms" );
+            sys = timer( two[j], "cpu_sys_ms" );
+            printf( "gw2 test timers: lock, batch %d, the %s %04lx: lock_wait %lld lock_sleep_guest %lld lock_sleep %lld "
+                    "cpu_user_ms %.3f cpu_sys_ms %.3f\n", i + 1, j ? "sleeper" : "holder", two[j], wait, guest,
+                    counter( two[j], "lock_sleep" ), user, sys );
+            if (wait < guest) FAIL( "thread %04lx: lock_wait %lld under lock_sleep_guest %lld", two[j], wait, guest );
+            if (sys <= 0) FAIL( "thread %04lx: cpu_sys_ms %.3f", two[j], sys );
+        }
+    }
+}
+
+static long long field( const char *line, const char *name );
+
+/* the request log's workers rows: all of locker(), and together what the case's rows have
+ * (jdrly/gw2-on-mac#365) */
+static void check_workers( const char *path )
+{
+    static const char * const names[] = { "lock_sleep", "lock_sleep_guest", "alert_wake", "server" };
+    static char line[16384];
+    long long rows = 0, threads = 0, got[ARRAYSIZE(names)] = {0}, want;
+    ULONG_PTR start;
+    double sys = 0;
+    unsigned int k;
+    const char *p;
+    FILE *f;
+
+    if (!(f = fopen( path, "r" ))) FAIL( "can't open %s", path );
+    while (fgets( line, sizeof(line), f ))
+    {
+        if (strncmp( line, "workers start ", 14 )) continue;
+        start = (ULONG_PTR)_strtoui64( line + 14, NULL, 16 );
+        if (start != (ULONG_PTR)locker)
+            FAIL( "a workers row starts at %#llx, not at locker() %p: %s", (unsigned long long)start, locker, line );
+        rows++;
+        threads = field( line, "threads" );
+        for (k = 0; k < ARRAYSIZE(names); k++) got[k] += field( line, names[k] );
+        if ((p = strstr( line, " cpu_sys_ms " ))) sys += atof( p + 12 );
+    }
+    fclose( f );
+    printf( "gw2 test timers: workers: %lld rows, the last with %lld threads; lock_sleep %lld lock_sleep_guest %lld "
+            "alert_wake %lld server %lld cpu_sys_ms %.3f\n", rows, threads, got[0], got[1], got[2], got[3], sys );
+    if (!rows) FAIL( "no workers row in %s", path );
+    if (threads != 2 * lock_batches) FAIL( "the last workers row has %lld threads, not %d", threads, 2 * lock_batches );
+    for (k = 0; k < ARRAYSIZE(names); k++)
+    {
+        want = sum( lock_holders, lock_batches, names[k] ) + sum( lock_sleepers, lock_batches, names[k] );
+        if (got[k] != want) FAIL( "the workers rows add up to %s %lld, the case's rows to %lld", names[k], got[k], want );
+    }
+    if (sys <= 0) FAIL( "the workers rows have no cpu_sys_ms" );
+}
+
 /* every case's checks, on the counters file as load_heat() read it last */
 static void check_heat(void)
 {
@@ -552,6 +725,7 @@ static void check_heat(void)
     if (sum_buckets( lock_sleepers, lock_batches, "lock" ) != sleeps) FAIL( "the lock buckets don't add up to lock_sleep" );
     if (alerts < woke) FAIL( "the holders: alert %lld, alert_wake %lld", alerts, woke );
     if (!lock_seen()) FAIL( "no lock sleep with its time, or no alert wake with its time, in %d batches", lock_batches );
+    check_lock_365();
 
     /* 3 */
     set = sum( event_setters, wake_batches, "event_set" );
@@ -674,6 +848,9 @@ int main(void)
     {
         for (start = GetTickCount(); !find_log( "heat-requests-*.log", NULL, path, sizeof(path) ); Sleep( 20 ))
             if (GetTickCount() - start > 15000) FAIL( "the dumper wrote no heat-requests-*.log in 15 s" );
+        /* jdrly/gw2-on-mac#365 */
+        snprintf( req_log, sizeof(req_log), "%s", path );
+        if (!(lock_park = CreateEventW( NULL, TRUE, FALSE, NULL ))) FAIL( "CreateEvent: error %lu", GetLastError() );
     }
 
     test_requests();
@@ -704,6 +881,7 @@ int main(void)
         }
         check_requests( path );
         check_heat();
+        check_workers( path );
     }
     printf( "gw2 test timers: passed\n" );
     return 0;

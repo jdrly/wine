@@ -19,6 +19,9 @@
  * pointer leaves it alone: heat_req_block() loads it once more, and heat_dump_locked() has other
  * registers. Dropping the static from heat_rows in the one-file heat.c changes the same two.
  *
+ * Since jdrly/gw2-on-mac#365 a thread's first count goes through heat_row_new() in heat.c, which
+ * takes the thread's Mach port, so that only heat.c needs Mach's headers.
+ *
  * heat.h stays the one header of these that the rest of ntdll includes.
  *
  * This library is free software; you can redistribute it and/or
@@ -62,6 +65,9 @@ struct heat_row
     /* jdrly/gw2-on-mac#99 */
     ULONG_PTR          start;     /* the thread's start address, thread_data's */
     char               name[64];  /* the name it last gave itself, empty for none */
+    /* jdrly/gw2-on-mac#365: its Mach port, which the dumper reads its CPU time through, 0 for
+     * none. The row keeps the port's send right, so the name isn't reused after the thread ends. */
+    unsigned int       port;
 };
 
 #define HEAT_NAME(id, name) #name,
@@ -73,17 +79,15 @@ extern unsigned int heat_nrows HEAT_HIDDEN;
 extern __thread struct heat_row *heat_self HEAT_HIDDEN;
 extern mach_timebase_info_data_t heat_timebase HEAT_HIDDEN;
 extern struct heat_fex_clock heat_fex_started HEAT_HIDDEN;
+/* jdrly/gw2-on-mac#365: the executable sections of the process's image, 0 and 0 if it has none */
+extern ULONG_PTR heat_code_lo HEAT_HIDDEN, heat_code_hi HEAT_HIDDEN;
+
+/* the thread's first count: its row, or NULL when all are taken (heat.c) */
+extern struct heat_row *heat_row_new(void) HEAT_HIDDEN;
 
 static inline struct heat_row *heat_row(void)
 {
-    unsigned int i;
-
-    if (heat_self) return heat_self;
-    if ((i = __atomic_fetch_add( &heat_nrows, 1, __ATOMIC_RELAXED )) >= HEAT_ROWS) return NULL;
-    heat_self = &heat_rows[i];
-    __atomic_store_n( &heat_self->start, (ULONG_PTR)get_thread_data()->start, __ATOMIC_RELAXED );
-    __atomic_store_n( &heat_self->tid, get_thread_data()->tid, __ATOMIC_RELAXED );
-    return heat_self;
+    return heat_self ? heat_self : heat_row_new();
 }
 
 /* only the row's own thread writes it, but a signal handler on that thread may count in the
@@ -139,12 +143,14 @@ struct heat_req_row
     unsigned long long hc[HC_NB], ht[HT_NB];  /* its heat_row at its last block (jdrly/gw2-on-mac#99) */
     unsigned long long server;              /* its HT_SERVER at the last dump */
     unsigned long long fex[HEAT_FEX_FIELDS];  /* its FEX counters at its last line (jdrly/gw2-on-mac#111) */
+    unsigned long long whc[HC_NB], wht[HT_NB];  /* its heat_row at its last workers row (jdrly/gw2-on-mac#365) */
 };
 
 extern struct heat_req_row *heat_reqs HEAT_HIDDEN;
 extern struct heat_req_row *heat_reqs_prev HEAT_HIDDEN;
 extern int heat_req_block( char *buf, size_t size, unsigned int row, double now,
                            const unsigned char *fex, size_t fex_size ) HEAT_HIDDEN;
+extern int heat_req_workers( char *buf, size_t size, unsigned int rows, unsigned int game, double now ) HEAT_HIDDEN;
 
 /***********************************************************************
  *  the handle marks: the event counter's (heatwake.c), and the event pool's (heatpool.c)

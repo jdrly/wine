@@ -102,12 +102,20 @@ C_ASSERT( HEAT_BITS <= 32 );  /* heat_mode is an unsigned int */
     C(WAIT_TIMED, wait_timed) /* ... with a timeout that is neither infinite nor zero */ \
     C(WAIT_POLL, wait_poll) /* ... with a zero timeout */ \
     /* jdrly/gw2-on-mac#249 */ \
-    C(WAKE_SHARED, wake_shared) /* releases the skip refused: msync counts another holder of the semaphore */
+    C(WAKE_SHARED, wake_shared) /* releases the skip refused: msync counts another holder of the semaphore */ \
+    /* jdrly/gw2-on-mac#365 */ \
+    C(LOCK_WAIT, lock_wait) /* NtWaitForAlertByThreadId calls outside the emulator */ \
+    C(ALERT_WAKE_NONE, alert_wake_none) /* alert wake calls that returned ENOENT: no thread waited */ \
+    C(LOCK_SLEEP_GUEST, lock_sleep_guest) /* LOCK_WAIT calls that slept, with HT_LOCK_GUEST, and by their first sleep's length: */ \
+    C(LOCK_GUEST_5US, lock_guest_5us) C(LOCK_GUEST_20US, lock_guest_20us) C(LOCK_GUEST_100US, lock_guest_100us) \
+    C(LOCK_GUEST_1MS, lock_guest_1ms) C(LOCK_GUEST_LONG, lock_guest_long)
 
 #define HEAT_TIMERS(C) \
     C(SERVER, server_ms) C(YIELD, yield_ms) \
     C(SPIN, spin_ms) /* jdrly/gw2-on-mac#45 */ \
-    C(LOCK, lock_ms) C(WAIT, wait_ms) C(WAKE, wake_ms) C(ALERT, alert_ms) /* jdrly/gw2-on-mac#99 */
+    C(LOCK, lock_ms) C(WAIT, wait_ms) C(WAKE, wake_ms) C(ALERT, alert_ms) /* jdrly/gw2-on-mac#99 */ \
+    /* jdrly/gw2-on-mac#365: the guest's lock sleeps, and the thread's CPU time, which the dumper reads */ \
+    C(LOCK_GUEST, lock_guest_ms) C(CPU_USER, cpu_user_ms) C(CPU_SYS, cpu_sys_ms)
 
 #define HEAT_COUNTER_ID(id, name) HC_##id,
 enum heat_counter { HEAT_COUNTERS(HEAT_COUNTER_ID) HC_NB };
@@ -126,6 +134,8 @@ extern void heat_time( enum heat_counter c, enum heat_timer t, unsigned long lon
 extern void heat_yield_done( unsigned long long start );
 /* jdrly/gw2-on-mac#99 */
 extern void heat_lock_slept( unsigned long long start );
+extern void heat_alert_woke( BOOL found, unsigned long long start );  /* jdrly/gw2-on-mac#365 */
+extern void heat_lock_called(void);
 extern void heat_wait_slept( unsigned long long start );
 extern void heat_wake_done( BOOL event, BOOL found, unsigned long long start );
 extern void heat_add_time( enum heat_timer t, unsigned long long start );
@@ -159,6 +169,12 @@ static inline unsigned long long heat_start(void)
 static inline void heat_wait_begun( const LARGE_INTEGER *timeout )
 {
     if (heat_mode & HEAT_COUNT) heat_wait_counted( timeout );
+}
+
+/* NtWaitForAlertByThreadId, on entry: counts a call outside the emulator (jdrly/gw2-on-mac#365) */
+static inline void heat_lock_waited(void)
+{
+    if (heat_mode & HEAT_COUNT) heat_lock_called();
 }
 
 /* set_native_thread_name named this thread <name> (jdrly/gw2-on-mac#99) */
