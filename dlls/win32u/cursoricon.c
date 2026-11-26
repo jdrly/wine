@@ -64,6 +64,9 @@ struct cursoricon_object
 static struct list icon_cache = LIST_INIT( icon_cache );
 
 static LONG has_set_cursor = 0;
+/* GW2 on Mac (jdrly/gw2-on-mac#61): WINE_WIN32U_SETCURSOR=shm, read at the first NtUserSetCursor:
+   1 on, 0 off, -1 not read yet */
+static LONG setcursor_shm = -1;
 
 static struct cursoricon_object *get_icon_ptr( HICON handle )
 {
@@ -112,8 +115,42 @@ HCURSOR WINAPI NtUserSetCursor( HCURSOR cursor )
     struct cursoricon_object *obj;
     HCURSOR old_cursor;
     BOOL ret;
+    LONG shm = ReadNoFence( &setcursor_shm );
 
     TRACE( "%p\n", cursor );
+
+    if (shm < 0)
+    {
+        const char *value = getenv( "WINE_WIN32U_SETCURSOR" );
+
+        shm = value && !strcmp( value, "shm" );
+        if (value && !shm) ERR( "WINE_WIN32U_SETCURSOR=%s isn't shm\n", debugstr_a(value) );
+        WriteNoFence( &setcursor_shm, shm );
+    }
+    /* With shm, a call that repeats the cursor this thread's input has in shared memory returns
+       it with neither the request nor the drain after it. That needs a set_cursor request before
+       it, since NtUserGetCursor reads has_set_cursor, and a handle that is NULL or a cursor of this
+       process. The server takes those without an error, and the path below returns them as they
+       are. Every other call takes that path. */
+    if (shm && ReadNoFence( &has_set_cursor ))
+    {
+        struct object_lock lock = OBJECT_LOCK_INIT;
+        const input_shm_t *input_shm;
+        user_handle_t current = 0;
+        NTSTATUS status;
+
+        while ((status = get_shared_input( GetCurrentThreadId(), &lock, &input_shm )) == STATUS_PENDING)
+            current = input_shm->cursor;
+        if (!status && current == wine_server_user_handle( cursor ))
+        {
+            if (!cursor) return 0;
+            if ((obj = get_icon_ptr( cursor )))
+            {
+                release_user_handle_ptr( obj );
+                return cursor;
+            }
+        }
+    }
 
     SERVER_START_REQ( set_cursor )
     {
