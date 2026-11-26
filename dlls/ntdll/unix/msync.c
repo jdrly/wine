@@ -517,6 +517,8 @@ static NTSTATUS msync_wait_multiple( const int *objs, void **objs_shm, const uns
     {
         if (check_shm_contention( objs_shm, alert_obj_shm, count, tid ))
         {
+            /* WINE_HEAT_MSYNC_UNREG=1: count the bailout's unregister (athei's msync makes it now) */
+            if (heat_mode & HEAT_MSYNC_UNREG) heat_count( HC_UNREG );
             server_remove_wait( data, &wait );
             return STATUS_PENDING;
         }
@@ -1232,9 +1234,11 @@ NTSTATUS msync_wait_objs( const DWORD count, const int *objs, BOOLEAN wait_any,
         while (1)
         {
             BOOL abandoned;
+            ULONGLONG grabbed;  /* the mutexes this pass took (count <= MAXIMUM_WAIT_OBJECTS == 64) */
 
 tryagain:
             abandoned = FALSE;
+            grabbed = 0;
 
             /* First step: try to wait on each object in sequence. */
 
@@ -1313,6 +1317,7 @@ tryagain:
                         goto tooslow;
                     if (__sync_val_compare_and_swap( &mutex->tid, tid, current_tid ) != tid)
                         goto tooslow;
+                    grabbed |= 1ull << i;
                     if (tid == ~0)
                         abandoned = TRUE;
                     break;
@@ -1373,7 +1378,9 @@ tooslow:
                     /* HACK: This won't do the right thing with abandoned
                      * mutexes, but fixing it is probably more trouble than
                      * it's worth. */
-                    __atomic_store_n( &mutex->tid, 0, __ATOMIC_SEQ_CST );
+                    /* Only a mutex this pass took: one the caller already owned keeps its owner. */
+                    if (grabbed & (1ull << i))
+                        __atomic_store_n( &mutex->tid, 0, __ATOMIC_SEQ_CST );
                     break;
                 }
                 case MSYNC_SEMAPHORE:
