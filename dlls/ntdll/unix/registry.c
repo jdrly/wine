@@ -641,6 +641,7 @@ NTSTATUS WINAPI NtNotifyChangeMultipleKeys( HANDLE key, ULONG count, OBJECT_ATTR
         if (ret) return ret;
     }
 
+    heat_evpool_forget( event );  /* the server sets it on a change */
     SERVER_START_REQ( set_registry_notification )
     {
         req->hkey    = wine_server_obj_handle( key );

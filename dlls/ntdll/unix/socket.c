@@ -1662,6 +1662,8 @@ NTSTATUS sock_ioctl( HANDLE handle, HANDLE event, PIO_APC_ROUTINE apc, void *apc
 
             TRACE( "event %p, mask %#x\n", params->event, params->mask );
             if (out_size) FIXME( "unexpected output size %u\n", out_size );
+            /* the server sets it on a socket event */
+            if (in_size >= sizeof(*params)) heat_evpool_forget( params->event );
 
             status = STATUS_BAD_DEVICE_TYPE;
             break;

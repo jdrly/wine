@@ -881,6 +881,22 @@ extern NTSTATUS check_signal_access( struct inproc_sync *sync )
     return STATUS_OBJECT_TYPE_MISMATCH;
 }
 
+/* WINE_HEAT_EVPOOL: whether no thread of this process holds the handle's cached sync now, in a
+ * wait or a set; it may not be cached at all */
+BOOL heat_inproc_sync_idle( HANDLE handle )
+{
+    unsigned int spare, entry, idx = inproc_sync_handle_to_index( handle, &entry );
+    struct inproc_sync *cache;
+
+    if (entry >= INPROC_SYNC_CACHE_ENTRIES || !inproc_sync_cache[entry]) return TRUE;
+    cache = &inproc_sync_cache[entry][idx];
+    /* an entry that still holds a closed object caches the handle in the spare it names, for the
+     * handle's whole life (since Mach9 0.4.0) */
+    spare = __atomic_load_n( &cache->closed, __ATOMIC_ACQUIRE ) >> 1;
+    if (spare) cache = &inproc_sync_spares[spare - 1];
+    return InterlockedCompareExchange( &cache->refcount, 0, 0 ) <= 1;
+}
+
 /* caller must hold fd_cache_mutex */
 void close_inproc_sync( HANDLE handle )
 {
@@ -1239,6 +1255,11 @@ NTSTATUS WINAPI NtCreateEvent( HANDLE *handle, ACCESS_MASK access, const OBJECT_
 
     *handle = 0;
     if (type != NotificationEvent && type != SynchronizationEvent) return STATUS_INVALID_PARAMETER;
+    if (heat_evpool_get( handle, access, attr, type, state ))
+    {
+        heat_event_created( *handle );
+        return STATUS_SUCCESS;
+    }
     if ((ret = wine_server_alloc_object_attributes( attr, &objattr, &len ))) return ret;
 
     SERVER_START_REQ( create_event )
@@ -1253,6 +1274,7 @@ NTSTATUS WINAPI NtCreateEvent( HANDLE *handle, ACCESS_MASK access, const OBJECT_
     SERVER_END_REQ;
 
     if (!ret) heat_event_created( *handle );
+    if (!ret) heat_evpool_created( *handle, access, attr, type );
     free( objattr );
     return ret;
 }
@@ -1361,6 +1383,7 @@ NTSTATUS WINAPI NtPulseEvent( HANDLE handle, LONG *prev_state )
 
     TRACE( "handle %p, prev_state %p\n", handle, prev_state );
 
+    heat_evpool_forget( handle );  /* it may keep a pulse nobody took */
     if ((ret = inproc_pulse_event( handle, prev_state )) != STATUS_NOT_IMPLEMENTED)
         return ret;
 
