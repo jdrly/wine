@@ -105,8 +105,8 @@ C_ASSERT( HEAT_BITS <= 32 );  /* heat_mode is an unsigned int */
     C(WAKE_SHARED, wake_shared) /* releases the skip refused: msync counts another holder of the semaphore */ \
     /* jdrly/gw2-on-mac#365 */ \
     C(LOCK_WAIT, lock_wait) /* NtWaitForAlertByThreadId calls outside the emulator */ \
-    C(ALERT_WAKE_NONE, alert_wake_none) /* alert wake calls that found no thread asleep */ \
-    C(LOCK_SLEEP_GUEST, lock_sleep_guest) /* lock sleeps outside the emulator, with HT_LOCK_GUEST, and by length: */ \
+    C(ALERT_WAKE_NONE, alert_wake_none) /* alert wake calls that returned ENOENT: no thread waited */ \
+    C(LOCK_SLEEP_GUEST, lock_sleep_guest) /* LOCK_WAIT calls that slept, with HT_LOCK_GUEST, and by their first sleep's length: */ \
     C(LOCK_GUEST_5US, lock_guest_5us) C(LOCK_GUEST_20US, lock_guest_20us) C(LOCK_GUEST_100US, lock_guest_100us) \
     C(LOCK_GUEST_1MS, lock_guest_1ms) C(LOCK_GUEST_LONG, lock_guest_long)
 

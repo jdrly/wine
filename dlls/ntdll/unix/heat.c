@@ -69,11 +69,12 @@
  * Since jdrly/gw2-on-mac#365, at the end of the counters and the timers:
  *
  *   lock_wait    NtWaitForAlertByThreadId calls outside the x86 emulator, with or without a sleep
- *   alert_wake_none  alerts whose wake call found no thread asleep on the alert
- *   lock_sleep_guest  the lock sleeps outside the emulator, timed in lock_guest_ms, by length in
- *                lock_guest_5us to lock_guest_long. lock_sleep stays every sleep, FEX's own waits
- *                included, as the logs before had it; lock_wait minus lock_sleep_guest is the
- *                calls that took an alert without a sleep (a call that slept twice counts two)
+ *   alert_wake_none  alerts whose wake call returned ENOENT: no thread waited on the alert
+ *   lock_sleep_guest  the lock_wait calls that slept, once a call. lock_guest_ms is all their sleep,
+ *                and lock_guest_5us to lock_guest_long the length of each call's first sleep: a
+ *                call sleeps again after EINTR. lock_sleep stays every sleep, FEX's own waits and
+ *                the second sleeps included, as the logs before had it. lock_wait minus
+ *                lock_sleep_guest is the calls that took their alert without a sleep
  *   cpu_user_ms cpu_sys_ms  the thread's CPU time, from thread_info() at the dump. A thread that
  *                ended keeps what it had at the dump before it ended.
  *
@@ -232,8 +233,8 @@ static void heat_site( enum heat_site_kind kind )
     {
         struct heat_site *e = &heat_sites[kind][(h + i) & (HEAT_SITES - 1)];
 
-        if (!(seen = __atomic_load_n( &e->addr, __ATOMIC_RELAXED )))
-            __atomic_compare_exchange_n( &e->addr, &seen, addr, FALSE, __ATOMIC_RELAXED, __ATOMIC_RELAXED );
+        if (!(seen = __atomic_load_n( &e->addr, __ATOMIC_ACQUIRE )))
+            __atomic_compare_exchange_n( &e->addr, &seen, addr, FALSE, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE );
         /* seen stays 0 when this thread took the slot */
         if (!seen || seen == addr)
         {
@@ -334,6 +335,9 @@ void heat_yield_done( unsigned long long start )
  * one of these only when it isn't.
  */
 
+/* jdrly/gw2-on-mac#365: this thread's NtWaitForAlertByThreadId call has counted its guest sleep */
+static __thread BOOL heat_lock_counted;
+
 /* NtWaitForAlertByThreadId's futex_wait returned. Keeps errno. */
 void heat_lock_slept( unsigned long long start )
 {
@@ -342,8 +346,15 @@ void heat_lock_slept( unsigned long long start )
 
     if (!row) return;
     heat_slept_for( row, HC_LOCK_SLEEP, HC_LOCK_5US, HT_LOCK, d );
-    /* jdrly/gw2-on-mac#365: the sleeps outside the emulator once more, with their site */
+    /* jdrly/gw2-on-mac#365: outside the emulator, once a call, with the first sleep's length and
+     * site. A call sleeps again after EINTR; that sleep adds only its time. */
     if (!heat_in_guest()) return;
+    if (heat_lock_counted)
+    {
+        heat_bump( &row->t[HT_LOCK_GUEST], d );
+        return;
+    }
+    heat_lock_counted = TRUE;
     heat_slept_for( row, HC_LOCK_SLEEP_GUEST, HC_LOCK_GUEST_5US, HT_LOCK_GUEST, d );
     heat_site( HEAT_SITE_LOCK );
 }
@@ -351,6 +362,7 @@ void heat_lock_slept( unsigned long long start )
 /* NtWaitForAlertByThreadId was called (jdrly/gw2-on-mac#365) */
 void heat_lock_called(void)
 {
+    heat_lock_counted = FALSE;
     if (heat_in_guest()) heat_add( HC_LOCK_WAIT );
 }
 

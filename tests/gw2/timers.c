@@ -13,7 +13,8 @@
  *    raised its lock count, yields 200 times so the sleeper can go to sleep, and leaves, 50 rounds.
  *    The sleepers' rows: lock_sleep and lock_ms above 0, and their five lock_ buckets add up to
  *    lock_sleep. The holders': at least one alert that made the wake call, and alert_ms above 0.
- *    Since jdrly/gw2-on-mac#365 both start in locker(), the only start routine two threads share,
+ *    Since jdrly/gw2-on-mac#365 both start in locker(), the only start routine two threads share
+ *    (cases 3 and 4 have a start routine per batch),
  *    and each stays after its rounds until two more blocks are in the request log, so a dump has
  *    read its CPU time. The counters file has a lock_site line inside lock_enter() and a wake_site
  *    line inside lock_leave(), the case's two calls into the critical section. On each of the
@@ -117,6 +118,19 @@ static BOOL until( volatile LONG *value, LONG want )
     }
     return TRUE;
 }
+
+/* jdrly/gw2-on-mac#365: <f>_starts[], a start routine per batch for the cases that may run again.
+ * Their threads then don't pile up on one start, and case 2's are the only ones that share a
+ * start: the request log's workers row follows them. Each routine stores its batch's number
+ * before it calls <f>, so no two have the same code and a linker can't fold them into one. */
+static volatile LONG batch_started;
+#define BATCH_STARTS(f) \
+    static DWORD WINAPI f##_1( void *arg ) { batch_started = 1; return f( arg ); } \
+    static DWORD WINAPI f##_2( void *arg ) { batch_started = 2; return f( arg ); } \
+    static DWORD WINAPI f##_3( void *arg ) { batch_started = 3; return f( arg ); } \
+    static DWORD WINAPI f##_4( void *arg ) { batch_started = 4; return f( arg ); } \
+    static const LPTHREAD_START_ROUTINE f##_starts[BATCHES] = { f##_1, f##_2, f##_3, f##_4 };
+typedef char batch_starts_are_four[BATCHES == 4 ? 1 : -1];
 
 static void yields(void)
 {
@@ -303,14 +317,17 @@ static DWORD WINAPI set_waited( void *arg )
     return 0;
 }
 
+BATCH_STARTS(event_waiter)
+BATCH_STARTS(set_waited)
+
 static void wake_batch(void)
 {
     HANDLE w, s;
 
     wake_ready = wake_done = 0;
     if (!(wake_event = CreateEventW( NULL, FALSE, FALSE, NULL ))) FAIL( "CreateEvent: error %lu", GetLastError() );
-    w = thread( event_waiter, NULL, NULL );
-    s = thread( set_waited, NULL, &event_setters[wake_batches] );
+    w = thread( event_waiter_starts[wake_batches], NULL, NULL );
+    s = thread( set_waited_starts[wake_batches], NULL, &event_setters[wake_batches] );
     join( w, "the event's waiter" );
     join( s, "the setter with a waiter" );
     CloseHandle( wake_event );
@@ -334,9 +351,11 @@ static DWORD WINAPI waiter( void *arg )
     return 0;
 }
 
+BATCH_STARTS(waiter)
+
 static void wait_batch(void)
 {
-    join( thread( waiter, NULL, &waiters[wait_batches] ), "the waiter" );
+    join( thread( waiter_starts[wait_batches], NULL, &waiters[wait_batches] ), "the waiter" );
     wait_batches++;
 }
 
