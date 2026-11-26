@@ -34,9 +34,10 @@
 #    ntdll.so with a 30 s limit (jdrly/gw2-on-mac#322), which only reports how the run ended, and
 #    three under mine, which have to pass.
 # 4. (jdrly/gw2-on-mac#45) spin.exe under mine, as WINE_HEAT_EXE with WINE_HEAT_COUNT=1, with
-#    WINE_HEAT_SPIN unset and in three settings, three runs each, one setting at a time: the app's string
+#    WINE_HEAT_SPIN unset and in four settings, three runs each, one setting at a time: the app's string
 #    (lock and event at :game), sem alone at its default scope with WINE_HEAT_WAKE=one,skip (the
-#    spin against the wake skip's sleeper count), and every kind on with a scope of its own.
+#    spin against the wake skip's sleeper count), every kind on with a scope of its own, and
+#    (jdrly/gw2-on-mac#368) the dev list's string, the lock at :game+halfworkers.
 # 5. (jdrly/gw2-on-mac#43) prof.exe under mine as WINE_HEAT_EXE with WINE_HEAT_PROF=1 and
 #    FEX_PROFILESTATS=1, once, 8 seconds. Block 2 runs it for a second with the sampler unset and set
 #    for another program, where no file of the sampler's may appear either. (jdrly/gw2-on-mac#111)
@@ -320,6 +321,8 @@ collect
 side spin-sem spin sem "sem=5" one,skip
 collect
 side spin-scopes spin scopes "lock=20:all,event=30:not=2,sem=20:game"
+collect
+side spin-halves spin halves "lock=20:game+halfworkers,event=30:game"  # jdrly/gw2-on-mac#368
 collect
 fi
 

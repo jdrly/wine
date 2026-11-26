@@ -7,9 +7,23 @@
  *                         A kind may end in a scope: ":not=<p>" leaves out the threads whose
  *                         priority is p, and repeats; ":game" is ":not=1", GW2's ABOVE_NORMAL
  *                         workers; ":all", the default, leaves out none.
+ *                         ":game+halfworkers" is ":game", except that every other ABOVE_NORMAL
+ *                         thread spins (jdrly/gw2-on-mac#368).
  *   WINE_HEAT_SPIN_PAUSE=<n>  waits without a spin after 4 misses in a row (default 32)
  *
  * heat.c parses both, in heat_spin_parse() and heat_init().
+ *
+ * game+halfworkers (jdrly/gw2-on-mac#368, ADR 0023) splits GW2's job workers into two halves in
+ * one session, so that the halves can be compared under the same load. A thread at priority 1
+ * takes a number at its first wait of a kind with that scope, and the threads numbered 0, 2, 4 and
+ * so on spin as if their priority were in scope. The others, and every other thread, are as with
+ * ":game". The number is the order of those first waits, not of the threads' starts: numbering at
+ * the start would need a hook in heat.h's heat_thread_priority(), which every unix file of ntdll
+ * includes.
+ *
+ * With counting, a thread's row says whether the lock spin's scope took it at its last lock wait
+ * ("spin 1" in heat.c's log), which tells the halves apart. It says 0 before the thread's first lock
+ * wait, and when the lock spin is off.
  *
  * Three kinds of sleep may spin first, each up to its own time, read from the clock every 16
  * turns:
@@ -119,8 +133,11 @@
 
 unsigned long long heat_spin_ns[HEAT_SPIN_KINDS];  /* the most a spin takes, 0 for off */
 unsigned int heat_spin_not[HEAT_SPIN_KINDS];       /* priorities left out, HEAT_PRIORITY_BIT */
+unsigned int heat_spin_half;                       /* jdrly/gw2-on-mac#368: game+halfworkers, 1 << kind */
 unsigned int heat_spin_pause = 32;
 __thread LONG heat_priority;
+static unsigned int heat_spin_numbered;            /* jdrly/gw2-on-mac#368: the threads numbered so far */
+static __thread unsigned int heat_spin_pick;       /* this thread's: 0 none yet, 1 spins, 2 doesn't */
 /* per msync slot: the spinners of this process on it, and in the high half its registrations */
 unsigned long long *heat_spinners;
 #define HEAT_SPINNERS_ONE  0x100000001ull  /* one more spinner, one more registration */
@@ -128,12 +145,27 @@ unsigned long long *heat_spinners;
 static __thread unsigned int heat_spin_misses[HEAT_SPIN_KINDS];  /* this thread's misses in a row */
 static __thread unsigned int heat_spin_skip[HEAT_SPIN_KINDS];    /* its waits left without a spin */
 
+/* game+halfworkers: TRUE when this thread at <prio>, which the kind's scope leaves out, is one of
+ * the half that spins (jdrly/gw2-on-mac#368) */
+static BOOL heat_spin_picked( enum heat_spin_kind kind, LONG prio )
+{
+    if (prio != 1 || !(heat_spin_half & (1u << kind))) return FALSE;
+    if (!heat_spin_pick) heat_spin_pick = __atomic_fetch_add( &heat_spin_numbered, 1, __ATOMIC_RELAXED ) % 2 ? 2 : 1;
+    return heat_spin_pick == 1;
+}
+
 /* how long this thread may spin before this sleep (ns), 0 for not at all */
 unsigned long long heat_spin_budget( enum heat_spin_kind kind )
 {
     LONG prio = heat_priority;
+    BOOL scoped = prio >= -15 && prio <= 15 && (heat_spin_not[kind] & HEAT_PRIORITY_BIT( prio )) &&
+                  !heat_spin_picked( kind, prio );
+    struct heat_row *row;
 
-    if (prio >= -15 && prio <= 15 && (heat_spin_not[kind] & HEAT_PRIORITY_BIT( prio )))
+    /* jdrly/gw2-on-mac#368: the row's spin, written only when it changes */
+    if (kind == HEAT_SPIN_KIND_LOCK && (heat_mode & HEAT_COUNT) && (row = heat_row()) && row->spin != !scoped)
+        __atomic_store_n( &row->spin, !scoped, __ATOMIC_RELAXED );
+    if (scoped)
     {
         heat_count( HC_SPIN_SCOPED );
         return 0;
