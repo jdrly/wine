@@ -33,8 +33,8 @@ without its `WINE_HEAT_`, `WINE_MACDRV_` or `WINE_` prefix.
 | `dlls/ntdll/unix/sync.c` | `NtPulseEvent` | The pool forgets an event that may keep an untaken pulse | `EVPOOL` | #42 |
 | `dlls/ntdll/unix/sync.c` | `NtYieldExecution` | Times the yield, the `swtch()` call of WineHQ's `53ba24d` (ADR 0022) | `COUNT` | #40, #342 |
 | `dlls/ntdll/unix/sync.c` | `NtQueryPerformanceCounter` | Counts calls | `COUNT` | #40 |
-| `dlls/ntdll/unix/sync.c` | `NtAlertThreadByThreadId` | Counts alerts and times the wake call | `COUNT` | #99 |
-| `dlls/ntdll/unix/sync.c` | `NtWaitForAlertByThreadId` | Spins before the first sleep, outside the emulator, and times the sleeps | `SPIN=lock`, `COUNT` | #45, #99 |
+| `dlls/ntdll/unix/sync.c` | `NtAlertThreadByThreadId` | Counts alerts, times the wake call and keeps its return: whether it found the thread asleep, and the call's site | `COUNT` | #99, #365 |
+| `dlls/ntdll/unix/sync.c` | `NtWaitForAlertByThreadId` | Counts each call on entry, spins before the first sleep, outside the emulator, and times the sleeps, each with its site | `SPIN=lock`, `COUNT` | #45, #99, #365 |
 | `dlls/ntdll/unix/msync.c` | `msync_wait_single` | Times the sleep, and counts the sleepers on a semaphore | `COUNT`, `WAKE=skip` | #40, #99 |
 | `dlls/ntdll/unix/msync.c` | `msync_wait_multiple` | Times the sleep, and counts the contention bailout's unregister, which athei's msync makes since Mach9 0.4.0 | `COUNT` | #44, #99 |
 | `dlls/ntdll/unix/msync.c` | `signal_all` | Takes a semaphore release's count for `one` and `skip`, and times each wake call. `skip` decides by msync's reference count and this process's sleepers | `WAKE`, `COUNT` | #40, #99, #249 |

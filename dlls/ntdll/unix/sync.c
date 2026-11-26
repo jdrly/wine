@@ -3725,20 +3725,18 @@ NTSTATUS WINAPI NtAlertThreadByThreadId( HANDLE tid )
     {
         LONG *futex = &entry->futex;
         unsigned long long start;
+        int ret;
 
         if (InterlockedOr( futex, get_alert_source() ))
         {
             heat_count( HC_ALERT );
             return STATUS_SUCCESS;
         }
-        /* jdrly/gw2-on-mac#99: the wake call, timed while counting */
+        /* jdrly/gw2-on-mac#99: the wake call, timed while counting, and since #365 whether it
+         * found the thread asleep */
         start = heat_start();
-        futex_wake_one( futex );
-        if (start)
-        {
-            heat_add( HC_ALERT );
-            heat_time( HC_ALERT_WAKE, HT_ALERT, start );
-        }
+        ret = futex_wake_one( futex );
+        if (start) heat_alert_woke( ret != -1 || errno != ENOENT, start );
         return STATUS_SUCCESS;
     }
 #elif defined(HAVE_KQUEUE)
@@ -3808,6 +3806,8 @@ NTSTATUS WINAPI NtWaitForAlertByThreadId( const void *address, const LARGE_INTEG
         ULONGLONG end;
         unsigned long long start;  /* jdrly/gw2-on-mac#99 */
         int ret;
+
+        heat_lock_waited();  /* jdrly/gw2-on-mac#365 */
 
 #ifdef __aarch64__
         /* A thread has a single alert flag. The x86 emulator's own locks wait

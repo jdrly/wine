@@ -66,6 +66,23 @@
  *                reference count was above 2: another process, or a second handle of this one,
  *                had looked the semaphore up
  *
+ * Since jdrly/gw2-on-mac#365, at the end of the counters and the timers:
+ *
+ *   lock_wait    NtWaitForAlertByThreadId calls outside the x86 emulator, with or without a sleep
+ *   alert_wake_none  alerts whose wake call found no thread asleep on the alert
+ *   lock_sleep_guest  the lock sleeps outside the emulator, timed in lock_guest_ms, by length in
+ *                lock_guest_5us to lock_guest_long. lock_sleep stays every sleep, FEX's own waits
+ *                included, as the logs before had it; lock_wait minus lock_sleep_guest is the
+ *                calls that took an alert without a sleep (a call that slept twice counts two)
+ *   cpu_user_ms cpu_sys_ms  the thread's CPU time, from thread_info() at the dump. A thread that
+ *                ended keeps what it had at the dump before it ended.
+ *
+ * and after the "total" line, the 16 busiest call sites of each kind, one line each:
+ *
+ *   lock_site <hex> <n>   a lock sleep outside the emulator: the return address of the call in the
+ *                         image's code below it (heat_site())
+ *   wake_site <hex> <n>   an alert's wake call outside the emulator, the same way
+ *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation; either
@@ -96,6 +113,7 @@
 #include <sys/mman.h>
 #include <time.h>
 #include <unistd.h>
+#include <mach/mach.h>
 #include <mach/mach_time.h>
 
 #include "ntstatus.h"
@@ -126,21 +144,165 @@ unsigned int heat_nrows;
 __thread struct heat_row *heat_self;
 mach_timebase_info_data_t heat_timebase;
 struct heat_fex_clock heat_fex_started;  /* jdrly/gw2-on-mac#156 */
+ULONG_PTR heat_code_lo, heat_code_hi;    /* jdrly/gw2-on-mac#365 */
+
+struct heat_row *heat_row_new(void)
+{
+    struct thread_data *data = get_thread_data();
+    unsigned int i;
+
+    if ((i = __atomic_fetch_add( &heat_nrows, 1, __ATOMIC_RELAXED )) >= HEAT_ROWS) return NULL;
+    heat_self = &heat_rows[i];
+    __atomic_store_n( &heat_self->start, (ULONG_PTR)data->start, __ATOMIC_RELAXED );
+    __atomic_store_n( &heat_self->tid, data->tid, __ATOMIC_RELAXED );
+    /* jdrly/gw2-on-mac#365: a Mach trap, safe in a signal handler too */
+    __atomic_store_n( &heat_self->port, mach_thread_self(), __ATOMIC_RELAXED );
+    return heat_self;
+}
+
+/* the thread's CPU time into its row's HT_CPU_USER and HT_CPU_SYS, which only the dumper writes.
+ * A thread that ended keeps what it had at the dump before (jdrly/gw2-on-mac#365). */
+static void heat_cpu_read( struct heat_row *row )
+{
+    unsigned int port = __atomic_load_n( &row->port, __ATOMIC_RELAXED );
+    mach_msg_type_number_t count = THREAD_BASIC_INFO_COUNT;
+    thread_basic_info_data_t info;
+
+    if (!port || thread_info( port, THREAD_BASIC_INFO, (thread_info_t)&info, &count ) != KERN_SUCCESS) return;
+    __atomic_store_n( &row->t[HT_CPU_USER], info.user_time.seconds * 1000000000ull + info.user_time.microseconds * 1000ull,
+                      __ATOMIC_RELAXED );
+    __atomic_store_n( &row->t[HT_CPU_SYS], info.system_time.seconds * 1000000000ull + info.system_time.microseconds * 1000ull,
+                      __ATOMIC_RELAXED );
+}
+
+/***********************************************************************
+ *  call sites (WINE_HEAT_COUNT=1, jdrly/gw2-on-mac#365)
+ *
+ * The site of a lock sleep or an alert's wake call is the first word on the PE stack, from the
+ * syscall frame's sp up, that points into the image's executable sections: the return address
+ * of the game's call into ntdll.dll. ntdll.dll's own frames, ARM64EC, lie below it. Under FEX the
+ * x86 code's stack is that same stack. Only calls outside the emulator have a site.
+ */
+#define HEAT_SITES      1024  /* addresses of a kind, open addressing */
+#define HEAT_SITE_TOP   16    /* the log's lines of a kind */
+#define HEAT_SITE_WORDS 512   /* the most words of stack a scan reads */
+#define HEAT_SYSCALL_SP 31    /* struct syscall_frame's sp, by 64-bit word, as heatprof.c reads it */
+
+enum heat_site_kind { HEAT_SITE_LOCK, HEAT_SITE_WAKE, HEAT_SITE_KINDS };
+
+struct heat_site
+{
+    ULONG_PTR          addr;  /* 0: free */
+    unsigned long long n;
+};
+
+static struct heat_site heat_sites[HEAT_SITE_KINDS][HEAT_SITES];
+
+/* outside the x86 emulator: NtWaitForAlertByThreadId's test of the thread's CPU area */
+static BOOL heat_in_guest(void)
+{
+#ifdef __aarch64__
+    struct thread_data *data = get_thread_data();
+    CHPE_V2_CPU_AREA_INFO *cpu = data && data->teb ? data->teb->ChpeV2CpuAreaInfo : NULL;
+
+    return !cpu || (!cpu->InSimulation && !cpu->InSyscallCallback);
+#else
+    return TRUE;
+#endif
+}
+
+/* counts this thread's site of <kind>; touches no errno */
+static void heat_site( enum heat_site_kind kind )
+{
+    struct thread_data *data = get_thread_data();
+    const ULONG_PTR *sp, *top;
+    const ULONG64 *frame;
+    ULONG_PTR addr = 0, seen;
+    unsigned int i, h;
+
+    if (!heat_code_hi || !data || !data->teb || !(frame = (const ULONG64 *)get_syscall_frame( data ))) return;
+    sp = (const ULONG_PTR *)((frame[HEAT_SYSCALL_SP] + 7) & ~7ull);
+    top = data->teb->Tib.StackBase;
+    if (sp < (const ULONG_PTR *)data->teb->Tib.StackLimit || sp >= top) return;
+    for (i = 0; i < HEAT_SITE_WORDS && sp < top && !addr; i++, sp++)
+        if (*sp >= heat_code_lo && *sp < heat_code_hi) addr = *sp;
+    if (!addr) return;
+    h = (addr * 0x9e3779b97f4a7c15ull) >> 54;  /* 10 bits, HEAT_SITES */
+    for (i = 0; i < 32; i++)
+    {
+        struct heat_site *e = &heat_sites[kind][(h + i) & (HEAT_SITES - 1)];
+
+        if (!(seen = __atomic_load_n( &e->addr, __ATOMIC_RELAXED )))
+            __atomic_compare_exchange_n( &e->addr, &seen, addr, FALSE, __ATOMIC_RELAXED, __ATOMIC_RELAXED );
+        /* seen stays 0 when this thread took the slot */
+        if (!seen || seen == addr)
+        {
+            __atomic_fetch_add( &e->n, 1, __ATOMIC_RELEASE );  /* after the address */
+            return;
+        }
+    }
+}
+
+/* the HEAT_SITE_TOP busiest sites of each kind, a line each: "lock_site <hex> <n>" */
+static int heat_sites_print( char *buf, size_t size )
+{
+    static const char * const names[HEAT_SITE_KINDS] = { "lock_site", "wake_site" };
+    static unsigned long long n[HEAT_SITES];  /* under heat_dump_mutex */
+    unsigned int kind, i, k, best;
+    int len = 0;
+
+    for (kind = 0; kind < HEAT_SITE_KINDS; kind++)
+    {
+        for (i = 0; i < HEAT_SITES; i++) n[i] = __atomic_load_n( &heat_sites[kind][i].n, __ATOMIC_ACQUIRE );
+        for (k = 0; k < HEAT_SITE_TOP && len < size; k++)
+        {
+            for (best = HEAT_SITES, i = 0; i < HEAT_SITES; i++) if (n[i] && (best == HEAT_SITES || n[i] > n[best])) best = i;
+            if (best == HEAT_SITES) break;
+            len += snprintf( buf + len, size - len, "%s %#llx %llu\n", names[kind],
+                             (unsigned long long)__atomic_load_n( &heat_sites[kind][best].addr, __ATOMIC_RELAXED ), n[best] );
+            n[best] = 0;
+        }
+    }
+    return len < size ? len : size - 1;
+}
+
+/* the image's executable sections, read once by heat_init(): the main exe is mapped by then */
+static void heat_code_find(void)
+{
+    const IMAGE_DOS_HEADER *dos = (const IMAGE_DOS_HEADER *)peb->ImageBaseAddress;
+    const IMAGE_NT_HEADERS64 *nt;
+    const IMAGE_SECTION_HEADER *sec;
+    ULONG_PTR base = (ULONG_PTR)dos, lo = 0, hi = 0, s, e;
+    unsigned int i;
+
+    if (!dos || dos->e_magic != IMAGE_DOS_SIGNATURE) return;
+    nt = (const IMAGE_NT_HEADERS64 *)(base + dos->e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE || nt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC) return;
+    sec = IMAGE_FIRST_SECTION( nt );
+    for (i = 0; i < nt->FileHeader.NumberOfSections; i++)
+    {
+        if (!(sec[i].Characteristics & IMAGE_SCN_MEM_EXECUTE)) continue;
+        s = base + sec[i].VirtualAddress;
+        e = s + sec[i].Misc.VirtualSize;
+        if (!hi || s < lo) lo = s;
+        if (e > hi) hi = e;
+    }
+    heat_code_lo = lo;
+    heat_code_hi = hi;
+}
 static char heat_log_path[1024];
 static char heat_log_tmp[sizeof(heat_log_path) + 4];  /* heat_log_path and .tmp */
 static char heat_exe[256];
 static unsigned long long heat_started;
 static unsigned int heat_dump_ms = 5000;  /* WINE_HEAT_DUMP_MS: the dumper's period */
 
-/* a sleep that began at <start>: counted as <c>, timed in <t>, and in the bucket of its length among
- * the five from <first> (under 5 us, 20 us, 100 us, 1 ms, and longer) */
-static void heat_slept( enum heat_counter c, enum heat_counter first, enum heat_timer t, unsigned long long start )
+/* a sleep of <d> ns: counted as <c>, timed in <t>, and in the bucket of its length among the five
+ * from <first> (under 5 us, 20 us, 100 us, 1 ms, and longer) */
+static void heat_slept_for( struct heat_row *row, enum heat_counter c, enum heat_counter first, enum heat_timer t,
+                            unsigned long long d )
 {
-    struct heat_row *row = heat_row();
-    unsigned long long d = heat_now() - start;
     unsigned int bucket;
 
-    if (!row) return;
     if (d < 5000) bucket = 0;
     else if (d < 20000) bucket = 1;
     else if (d < 100000) bucket = 2;
@@ -149,6 +311,15 @@ static void heat_slept( enum heat_counter c, enum heat_counter first, enum heat_
     heat_bump( &row->c[c], 1 );
     heat_bump( &row->c[first + bucket], 1 );
     heat_bump( &row->t[t], d );
+}
+
+/* a sleep that began at <start>, as heat_slept_for() */
+static void heat_slept( enum heat_counter c, enum heat_counter first, enum heat_timer t, unsigned long long start )
+{
+    struct heat_row *row = heat_row();
+    unsigned long long d = heat_now() - start;
+
+    if (row) heat_slept_for( row, c, first, t, d );
 }
 
 void heat_yield_done( unsigned long long start )
@@ -163,10 +334,38 @@ void heat_yield_done( unsigned long long start )
  * one of these only when it isn't.
  */
 
-/* NtWaitForAlertByThreadId's futex_wait returned */
+/* NtWaitForAlertByThreadId's futex_wait returned. Keeps errno. */
 void heat_lock_slept( unsigned long long start )
 {
-    heat_slept( HC_LOCK_SLEEP, HC_LOCK_5US, HT_LOCK, start );
+    struct heat_row *row = heat_row();
+    unsigned long long d = heat_now() - start;
+
+    if (!row) return;
+    heat_slept_for( row, HC_LOCK_SLEEP, HC_LOCK_5US, HT_LOCK, d );
+    /* jdrly/gw2-on-mac#365: the sleeps outside the emulator once more, with their site */
+    if (!heat_in_guest()) return;
+    heat_slept_for( row, HC_LOCK_SLEEP_GUEST, HC_LOCK_GUEST_5US, HT_LOCK_GUEST, d );
+    heat_site( HEAT_SITE_LOCK );
+}
+
+/* NtWaitForAlertByThreadId was called (jdrly/gw2-on-mac#365) */
+void heat_lock_called(void)
+{
+    if (heat_in_guest()) heat_add( HC_LOCK_WAIT );
+}
+
+/* NtAlertThreadByThreadId's wake call returned, <found> FALSE when no thread slept on the alert
+ * (jdrly/gw2-on-mac#365) */
+void heat_alert_woke( BOOL found, unsigned long long start )
+{
+    struct heat_row *row = heat_row();
+
+    if (!row) return;
+    heat_bump( &row->c[HC_ALERT], 1 );
+    heat_bump( &row->c[HC_ALERT_WAKE], 1 );
+    heat_bump( &row->t[HT_ALERT], heat_now() - start );
+    if (!found) heat_bump( &row->c[HC_ALERT_WAKE_NONE], 1 );
+    if (heat_in_guest()) heat_site( HEAT_SITE_WAKE );
 }
 
 /* msync_wait_single's or msync_wait_multiple's ulock_wait returned */
@@ -251,6 +450,7 @@ static void heat_dump(void)
     if (n > HEAT_ROWS) n = HEAT_ROWS;
     for (i = 0; i < n; i++)
     {
+        heat_cpu_read( &heat_rows[i] );  /* jdrly/gw2-on-mac#365 */
         for (j = 0; j < HC_NB; j++) total_c[j] += __atomic_load_n( &heat_rows[i].c[j], __ATOMIC_RELAXED );
         for (j = 0; j < HT_NB; j++) total_t[j] += __atomic_load_n( &heat_rows[i].t[j], __ATOMIC_RELAXED );
     }
@@ -266,6 +466,8 @@ static void heat_dump(void)
         len += snprintf( buf + len, sizeof(buf) - len, "total" );
         len += heat_print_row( buf + len, sizeof(buf) - len, total_c, total_t );
         len += snprintf( buf + len, sizeof(buf) - len, "\n" );
+        /* jdrly/gw2-on-mac#365: before the threads, whose lines can fill the buffer */
+        len += heat_sites_print( buf + len, sizeof(buf) - len );
     }
     for (i = 0; i < n && len < sizeof(buf) - 1; i++)
     {
@@ -295,10 +497,11 @@ static char heat_req_path[1024];
 static BOOL heat_req_fex;                    /* FEX_PROFILESTATS=1 (jdrly/gw2-on-mac#111) */
 
 /* Under heat_dump_mutex. The game thread's block, then those of the two other threads with the
- * most server time since the last dump (jdrly/gw2-on-mac#99), in one write. */
+ * most server time since the last dump (jdrly/gw2-on-mac#99), then the workers row
+ * (jdrly/gw2-on-mac#365), in one write. */
 static void heat_req_dump(void)
 {
-    static char buf[3 * 8192];
+    static char buf[4 * 8192];
     unsigned long long server, d, most[2] = {0};
     unsigned int i, game = 0, rows = __atomic_load_n( &heat_nrows, __ATOMIC_RELAXED ), busy[2];
     double now = (heat_now() - heat_started) / 1e9;
@@ -339,6 +542,7 @@ static void heat_req_dump(void)
     for (i = 0; i < 2 && busy[i] < rows; i++)
         len += heat_req_block( buf + len, sizeof(buf) - len, busy[i], now, fex, fex_size );
     if (fex) munmap( (void *)fex, fex_size );
+    len += heat_req_workers( buf + len, sizeof(buf) - len, rows, game, now );
 
     if ((fd = open( heat_req_path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644 )) == -1) return;
     write( fd, buf, len );
@@ -526,6 +730,7 @@ void heat_init(void)
         snprintf( heat_req_path, sizeof(heat_req_path), "%s/heat-requests-%d.log", dir && *dir ? dir : "/tmp", getpid() );
         /* jdrly/gw2-on-mac#111: FEX's own switch, which a rule's env= sets for FEX and this file alike */
         heat_req_fex = (p = getenv( "FEX_PROFILESTATS" )) && !strcmp( p, "1" );
+        heat_code_find();  /* jdrly/gw2-on-mac#365 */
     }
     if (mode & (HEAT_COUNT | HEAT_PROF))
     {
