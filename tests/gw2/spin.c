@@ -20,20 +20,21 @@
  *           waiter is asleep.
  *   halves  (jdrly/gw2-on-mac#368) 6 threads at ABOVE_NORMAL, all started at one address, wait in
  *           NtWaitForAlertByThreadId one after another, each alerted 3 ms into its wait, 4 rounds.
- *           It runs first, while no other thread is at ABOVE_NORMAL, and its first round sets the
- *           order of the threads' first lock waits, which is the order game+halfworkers numbers
- *           them in. Each wait has to return STATUS_ALERTED.
+ *           It runs first, while no other thread is at ABOVE_NORMAL, so game+halfworkers numbers
+ *           these 6 and no other thread between them. Each wait has to return STATUS_ALERTED.
  *
  * The counters, from the threads' rows in heat.c's log:
  *   - a kind that is off shows no hit and no miss in any row
  *   - lock on: the HIGHEST alerts thread has hits; the ABOVE_NORMAL one has hits when the lock's
  *     scope keeps priority 1, and otherwise only spin_scoped (no hit, no miss); the cs threads spun
  *   - event on: the game thread spun on its jobs' event, or is scoped out; the pulse waiter has hits
- *   - every row's spin is 1 exactly when the lock's scope takes the thread: on the HIGHEST alerts
- *     thread, on the ABOVE_NORMAL one without game+halfworkers, and on each halves thread. A
- *     halves thread with spin 1 spun on its lock waits, one with spin 0 didn't and counted
- *     spin_scoped. With game+halfworkers the halves threads' spin alternates in their order, so 3
- *     of the 6 spin, and the ABOVE_NORMAL alerts thread spins as its row says (jdrly/gw2-on-mac#368)
+ *   - the spin of 8 rows, the two alerts threads' and the 6 halves threads', is 1 exactly when the
+ *     lock's scope takes the thread. A halves thread with spin 1 spun on its lock waits, one with
+ *     spin 0 didn't and counted spin_scoped. With game+halfworkers exactly 3 of the 6 have spin 1,
+ *     and the ABOVE_NORMAL alerts thread spins as its row says (jdrly/gw2-on-mac#368). Which 3 is
+ *     the order of their first lock waits that found no alert pending: a thread taken off its core
+ *     between arming and its wait for longer than the 3 ms finds the alert there, makes no spin
+ *     decision, and takes its number in a later round. So the case checks the count, not the order
  *   - sem on: the workers spun on the semaphore, or are scoped out. With WINE_HEAT_WAKE=one,skip
  *     too (matrix.zsh), a release during a worker's spin makes no wake call, and the worker joins
  *     the sleeper count only after its spin: a wake lost there would leave a round's jobs undone,
@@ -663,7 +664,7 @@ static void test_halves(void)
         halves[k].priority = THREAD_PRIORITY_ABOVE_NORMAL;
         threads[k] = start_waiter( &halves[k] );
     }
-    /* one thread in its wait at a time: round 1 orders their first lock waits */
+    /* one thread in its wait at a time */
     for (i = 1; i <= HALF_ROUNDS; i++)
     {
         for (k = 0; k < HALVES; k++)
@@ -789,15 +790,15 @@ static void check_halves(void)
         if (!row[k] && spun( halves[k].tid, LOCK )) FAIL( "halves thread %d has spin 0 and spun", k );
         if (!row[k] && spin[LOCK].on && !counter( halves[k].tid, "spin_scoped" ))
             FAIL( "halves thread %d has spin 0 and counted no spin_scoped", k );
-        if (spin[LOCK].half && !spins( LOCK, THREAD_PRIORITY_ABOVE_NORMAL ))
-        {
-            if (k && row[k] == row[k - 1]) FAIL( "halves threads %d and %d both have spin %lld", k - 1, k, row[k] );
-        }
-        else if (row[k] != spins( LOCK, THREAD_PRIORITY_ABOVE_NORMAL ))
+        if (!(spin[LOCK].half && !spins( LOCK, THREAD_PRIORITY_ABOVE_NORMAL )) &&
+            row[k] != spins( LOCK, THREAD_PRIORITY_ABOVE_NORMAL ))
             FAIL( "halves thread %d has spin %lld, and the lock's scope %s priority 1", k, row[k],
                   spins( LOCK, THREAD_PRIORITY_ABOVE_NORMAL ) ? "takes" : "leaves out" );
     }
     printf( "gw2 test spin: %lld of %d halves threads spin\n", ones, HALVES );
+    /* the 6 took the numbers 0 to 5, whatever their order: 0, 2 and 4 spin */
+    if (spin[LOCK].half && !spins( LOCK, THREAD_PRIORITY_ABOVE_NORMAL ) && ones != HALVES / 2)
+        FAIL( "%lld of %d halves threads spin with game+halfworkers, not %d", ones, HALVES, HALVES / 2 );
 }
 
 static void check_counters(void)
