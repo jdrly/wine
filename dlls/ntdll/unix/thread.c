@@ -78,6 +78,7 @@
 #include "unix_private.h"
 #include "msync.h"
 #include "heat.h"
+#include "heatprof.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(thread);
 WINE_DECLARE_DEBUG_CHANNEL(seh);
@@ -1118,6 +1119,7 @@ static void contexts_from_server( CONTEXT *context, struct context_data server_c
 static DECLSPEC_NORETURN void pthread_exit_wrapper( int status )
 {
     struct thread_data *data = get_thread_data();
+    heat_prof_exiting( data );  /* jdrly/gw2-on-mac#43: no more SIGPROF for this thread */
     /* with msync, alert_fd is an msync object index, not a file descriptor */
     if (!do_msync()) close( data->alert_fd );
     close( data->wait_fd[0] );
@@ -1321,11 +1323,13 @@ static NTSTATUS spawn_thread( struct thread_data *data )
     pthread_attr_setguardsize( &attr, 0 );
     pthread_attr_setscope( &attr, PTHREAD_SCOPE_SYSTEM ); /* force creating a kernel thread */
     InterlockedIncrement( &nb_threads );
+    heat_prof_spawning();  /* jdrly/gw2-on-mac#43: the sampler's list of threads */
     if (pthread_create( &pthread_id, &attr, (void * (*)(void *))server_init_thread, data ))
     {
         InterlockedDecrement( &nb_threads );
         status = STATUS_NO_MEMORY;
     }
+    heat_prof_spawned( data, status ? (pthread_t)0 : pthread_id );
     pthread_attr_destroy( &attr );
     pthread_sigmask( SIG_SETMASK, &sigset, NULL );
     return status;

@@ -1,0 +1,163 @@
+/*
+ * GW2 on Mac: the game thread's sampler under FEX (WINE_HEAT_PROF, jdrly/gw2-on-mac#43), heatprof.c
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2.1 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
+ */
+
+#ifndef __NTDLL_UNIX_HEATPROF_H
+#define __NTDLL_UNIX_HEATPROF_H
+
+/***********************************************************************
+ *  FEX, as the sampler reads it
+ *
+ * Every offset and value the sampler takes from FEX's memory, read from FEX at 9d4fa4b46b1 (the
+ * commit Mach9 0.3.1 pins) and the same at 597e7ccbedd (Mach9 0.4.0's), whose JITCodeTail only
+ * gained a flag in its padding. Line numbers are 9d4fa4b46b1's. FEX's source isn't in this tree,
+ * so nothing here checks these at build time. My FEX fork does: its Source/Windows/Common/GW2Contract.h fails the fork's build when one
+ * of them moves (jdrly/gw2-on-mac#109).
+ *
+ * The sampler refuses to start unless libarm64ecfex.dll's CodeView record and image size are those
+ * of a FEX it knows: the engine's, below, or the one WINE_HEAT_PROF_FEX names (jdrly/gw2-on-mac#111),
+ * "<the GUID's 32 hex digits, in file order>:<age>:<SizeOfImage>". The app sets that for my FEX
+ * from the line "libarm64ecfex.dll: build id ..." of its VERSION, and a build of my fork has these
+ * offsets or doesn't build. A build id can't tell a FEX of mine from another, so the variable is
+ * what says "this one is mine".
+ */
+
+/* Mach9 v0.4.0's lib/wine/aarch64-windows/libarm64ecfex.dll (sha256 cd6803d9...): its CodeView
+ * record's GUID and age (lld's build id, a hash of the file) and SizeOfImage */
+#define HEAT_FEX_PIN_GUID "\x86\x07\xb0\x3e\x50\x57\xdd\x52\x4c\x4c\x44\x20\x50\x44\x42\x2e"
+#define HEAT_FEX_PIN_AGE  1
+#define HEAT_FEX_PIN_SIZE 0x42f000
+#define HEAT_FEX_DLL      "libarm64ecfex.dll"
+
+/* The thread's state is FEXCore::Core::CpuStateFrame, whose first member is CPUState
+ * (FEXCore/include/FEXCore/Core/CoreState.h:439-440, :485). The CPU area's EmulatorData[0] points
+ * to it (Source/Windows/ARM64EC/Module.cpp:133-135, set at :1554). In CPUState (CoreState.h:90-109): */
+#define HEAT_FEX_STATE_BLOCK     0    /* InlineJITBlockHeader: the JITCodeHeader of the block the
+                                       * thread entered last, stored by every block's entry
+                                       * (FEXCore/Source/Interface/Core/JIT/JIT.cpp:816-819) */
+#define HEAT_FEX_STATE_RIP       24   /* rip, not kept current inside translated code */
+#define HEAT_FEX_STATE_GREGS     32   /* gregs[16], rax rcx rdx rbx rsp rbp rsi rdi r8-r15 */
+#define HEAT_FEX_STATE_CALLRET   176  /* callret_sp, stored on the way into native code
+                                       * (FEXCore/Source/Interface/Core/Dispatcher/Dispatcher.cpp:162) */
+#define HEAT_FEX_STATE_COPY      256  /* bytes of CPUState a sample copies */
+
+/* The call and return stack: each x86 call pushes { x86 return address, host return address },
+ * or two zeros when FEX made no return block (FEXCore/Source/Interface/Core/JIT/BranchOps.cpp:222-230).
+ * The first word at callret_sp is the x86 return address of the last call. */
+#define HEAT_FEX_CALLRET_COPY    16
+
+/* A block: JITCodeHeader at the block's start, JITCodeTail at OffsetToBlockTail from it
+ * (FEXCore/Source/Interface/Core/CPUBackend.h:64-99), the RIP entries at OffsetToRIPEntries from
+ * the tail, each a vl64pair of host and guest deltas (FEXCore/Source/Utils/variable_length_integer.h:169-393).
+ * RestoreRIPFromHostPC (FEXCore/Source/Interface/Core/Core.cpp:151-187) walks them. */
+#define HEAT_FEX_HEADER_TAIL     0    /* uint32_t OffsetToBlockTail */
+#define HEAT_FEX_TAIL_SIZE       0    /* size_t Size: the block is [header, header + Size) */
+#define HEAT_FEX_TAIL_RIP        8    /* uint64_t RIP: the x86 address the block starts at */
+#define HEAT_FEX_TAIL_GUEST_SIZE 16   /* size_t GuestSize */
+#define HEAT_FEX_TAIL_ENTRIES    24   /* uint32_t NumberOfRIPEntries */
+#define HEAT_FEX_TAIL_ENTRIES_AT 28   /* uint32_t OffsetToRIPEntries, from the tail */
+#define HEAT_FEX_TAIL_COPY       40   /* sizeof(JITCodeTail) */
+#define HEAT_FEX_TAIL_ID         32   /* the bytes before SpinLockFutex, which FEX changes in place */
+
+/* FEX_PROFILESTATS=1: FEX's stats object, its layout in heatfex.h (HEAT_FEX_STATS_*), which a
+ * native test builds without Wine */
+
+/***********************************************************************
+ *  the sample file, heat-prof-<pid>.bin
+ *
+ * One text line, then records back to back:
+ *
+ *   HEATPROF 1 rec <fixed bytes> stack <max stack bytes> hz <rate> timebase <numer>/<denom>\n
+ *
+ * Each record is struct heat_prof_rec, little-endian with natural alignment, followed by
+ * stack_len bytes of the guest's stack. A reader takes the record's size from the line, not from
+ * this header. Times are mach_absolute_time() ticks; nanoseconds = ticks * numer / denom.
+ */
+#define HEAT_PROF_VERSION 1
+#define HEAT_PROF_STACK   2048
+
+/* flags, from the handler */
+#define HP_SIM      0x0001  /* the CPU area's InSimulation: in translated code, or FEX working for it */
+#define HP_SYSCB    0x0002  /* the CPU area's InSyscallCallback */
+#define HP_SYSCALL  0x0004  /* in Wine's unix side: sp on the thread's kernel stack */
+#define HP_STATE    0x0008  /* state[] holds the first 256 bytes of FEX's CPUState */
+#define HP_CALLRET  0x0010  /* callret[] holds the two words at callret_sp */
+#define HP_TAIL     0x0020  /* to_tail and tail[] hold the block's JITCodeHeader and JITCodeTail */
+/* flags, from the sampler thread */
+#define HP_X86      0x0100  /* x86 and block hold the guest address of pc in the block it entered last */
+#define HP_FEX      0x0200  /* HP_SIM and pc outside that block: FEX's own work (dispatcher, compile, lookup) */
+#define HP_GONE     0x0400  /* HP_SIM, but the block couldn't be read, made no sense, or its tail
+                             * changed since the sample: freed, and its memory another block's */
+
+/* regs[] */
+#define HP_REG_FP   29
+#define HP_REG_LR   30
+#define HP_REG_SP   31
+#define HP_REG_PC   32
+#define HP_REG_CPSR 33
+#define HP_REGS     34
+
+struct heat_prof_rec
+{
+    unsigned long long t;          /* mach ticks */
+    unsigned int       tid;        /* Windows thread id */
+    unsigned short     target;     /* 0 game, 1 render, 2 worker */
+    unsigned short     flags;      /* HP_* */
+    unsigned long long regs[HP_REGS]; /* x0-x28, fp, lr, sp, pc, cpsr, raw from the signal's context */
+    unsigned long long sys_sp;     /* HP_SYSCALL: the syscall frame's sp and pc, the PE side's */
+    unsigned long long sys_pc;
+    unsigned long long x86;        /* HP_X86: pc's x86 address */
+    unsigned long long block;      /* HP_X86: the x86 address the block starts at */
+    unsigned long long stack_at;   /* the guest stack's address that stack[] starts at */
+    unsigned int       stack_len;  /* bytes of stack[] */
+    unsigned int       to_tail;    /* HP_TAIL: the block's OffsetToBlockTail */
+    unsigned long long callret[2]; /* HP_CALLRET */
+    unsigned char      tail[HEAT_FEX_TAIL_COPY];   /* HP_TAIL: its JITCodeTail at the sample */
+    unsigned char      state[HEAT_FEX_STATE_COPY]; /* HP_STATE */
+    unsigned char      stack[HEAT_PROF_STACK];     /* only stack_len bytes go to the file */
+};
+
+/***********************************************************************
+ *  hooks
+ */
+struct thread_data;
+extern BOOL heat_prof_init( const char *dir );
+extern int heat_prof_fex_stats( char *buf, int size );
+extern const unsigned char *heat_prof_fex_map( size_t *size );
+extern void heat_prof_thread_lock(void);
+extern void heat_prof_thread_add( struct thread_data *data, pthread_t thread );
+extern void heat_prof_thread_gone( struct thread_data *data );
+
+/* spawn_thread, before pthread_create: takes the list's lock */
+static inline void heat_prof_spawning(void)
+{
+    if (heat_mode & HEAT_PROF) heat_prof_thread_lock();
+}
+
+/* spawn_thread, after pthread_create: adds the thread, 0 if it failed, and releases the lock */
+static inline void heat_prof_spawned( struct thread_data *data, pthread_t thread )
+{
+    if (heat_mode & HEAT_PROF) heat_prof_thread_add( data, thread );
+}
+
+/* pthread_exit_wrapper: the sampler must not signal this thread any more */
+static inline void heat_prof_exiting( struct thread_data *data )
+{
+    if (heat_mode & HEAT_PROF) heat_prof_thread_gone( data );
+}
+
+#endif /* __NTDLL_UNIX_HEATPROF_H */
