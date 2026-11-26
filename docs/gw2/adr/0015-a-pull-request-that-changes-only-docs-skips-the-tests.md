@@ -1,6 +1,7 @@
 # A pull request that changes only docs skips the tests
 
-Decided 2026-11-17. Status: accepted.
+Decided 2026-11-17. Status: accepted, changed on 2026-11-20 by jdrly/gw2-on-mac #323 (the last
+consequence).
 
 ADR 0012 made a pull request run only the tests its change can reach, but any byte under
 `tests/gw2` or `.github` set `TESTS=1` and ran everything. In the seven pull requests after it, six
@@ -32,6 +33,18 @@ ADR 0017.
   owes no test, since their condition is `FULL` alone. Changed the same day by ADR 0016: they are
   window steps now, and such a pull request no longer runs them.
 - This changes ADR 0012's line "a change under `tests/gw2` or `.github` sets `TESTS`".
+- Since jdrly/gw2-on-mac #323 (2026-11-20) a pull request that changes only Markdown files doesn't
+  build either, which saves the build job's 5 macOS minutes and the smoke lane. The `changes` job,
+  on Linux, reads GitHub's compare of the base with the head: when every file, and a renamed
+  file's old name, ends in `.md`, the build job is skipped, and the tests and Publish with it.
+  Lint still runs, since it reads `SWITCHES.md`. A failed lookup or a list GitHub cut at 300
+  files builds. A push always builds.
+- In the same change the rest of this record went. `TESTS` no longer reads the workflow file: a
+  change to any file under `tests/gw2` or `.github`, a comment line or a Markdown file beside code
+  included, runs the tests of all three files, blocks 4 to 6 as ADR 0012's `HEAT` says. Review of
+  #323 found that a key with an inline comment can hide a section from such a reading, and I
+  would rather pay minutes than miss a test. A pull request that changes only Markdown builds and
+  tests nothing by the line above, and runs Lint.
 
 ## Alternatives I rejected
 

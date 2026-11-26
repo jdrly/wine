@@ -24,9 +24,9 @@ decision takes the next free number.
 | [0010](0010-msync-sleep-timing-stays-at-the-call-sites.md) | 2026-11-16 | Moving the timing into `ulock_wait` would change the wake order under `skip`, so it stays. |
 | [0011](0011-the-move-to-wine-11.22-waits-for-a-mach9-release.md) | 2026-11-13, planned 2026-11-16 | I take athei's rebase as the base. The trial runs on his first Mach9 release on 11.22, the move on his second. |
 | [0012](0012-a-pull-request-runs-only-the-tests-its-change-can-reach.md) | 2026-11-16 | Tests are selected by the files a change can reach. No early stop at the first red block. Narrowed by 0015 and 0016. |
-| [0013](0013-a-push-repeats-the-tests-only-when-no-green-pull-request-ran-them.md) | 2026-11-12, guarded 2026-11-16 | A push skips the matrix only when a green pull request ran on the same tree. |
+| [0013](0013-a-push-repeats-the-tests-only-when-no-green-pull-request-ran-them.md) | 2026-11-12, guarded 2026-11-16 | A push skipped the matrix only when a green pull request ran on the same tree. Superseded by #323: every push runs every test. |
 | [0014](0014-the-project-rules-that-bind-this-fork.md) | recorded 2026-11-17 | The project-wide rules in a sentence each, pointing to the workspace ADRs. |
-| [0015](0015-a-pull-request-that-changes-only-docs-skips-the-tests.md) | 2026-11-17 | Only a change that can reach a test sets `TESTS`, so a pull request that changes only docs runs the smoke test. |
+| [0015](0015-a-pull-request-that-changes-only-docs-skips-the-tests.md) | 2026-11-17 | A pull request that changes only docs runs the smoke test. Since #323 it builds nothing, and any change under `tests/gw2` or `.github` sets `TESTS` again. |
 | [0016](0016-the-tests-run-as-three-lanes.md) | 2026-11-17 | The tests run as three lanes side by side, and block 7 goes with the window steps. |
 | [0017](0017-a-pull-request-whose-head-is-behind-stops-at-once.md) | 2026-11-17 | A pull request whose merge tree differs from its head's fails in its first minute and asks for a rebase. |
 | [0018](0018-the-wake-skip-decides-by-msync-reference-count-alone.md) | 2026-11-17 | The wake skip decides by msync's reference count and my own sleepers, without the private mark. The put-back never skips. |
