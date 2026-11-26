@@ -34,11 +34,11 @@ spin's scope took the thread at its last lock wait.
 - `spin` goes before `start` in a thread's line, so readers that take name and value pairs read it
   as one more pair. A heat log from before this change has no `spin`.
 - `tests/gw2/spin.c` has a case for it, `halves`. Six threads at ABOVE_NORMAL, all started at one
-  address, wait on alerts one after another while no other thread is at that priority, and
-  exactly three of their rows must have `spin 1`. A thread with `spin 1` has to have spun, and one
-  with `spin 0` has to have counted `spin_scoped` and no spin. The case can't check which three:
-  a thread taken off its core before its wait finds the alert pending, makes no spin decision and
-  takes its number a round later. In every run the `spin` of those six rows and of the two alerts
+  address, wait 3 ms on an alert that never comes, one after another, while no other thread is at
+  that priority. Their rows' `spin` has to be 1, 0, 1, 0, 1, 0 in that order. A thread with
+  `spin 1` has to have spun, and one with `spin 0` has to have counted `spin_scoped` and no spin.
+  An alert would have let a wait skip the spin's decision when its thread was off its core, so
+  the waits time out instead. In every run the `spin` of those six rows and of the two alerts
   threads' is checked against the scope.
   `matrix.zsh` runs it with the dev list's string, `lock=20:game+halfworkers,event=30:game`, beside
   the release row's string, which keeps checking that plain `:game` leaves ABOVE_NORMAL out.

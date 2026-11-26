@@ -19,9 +19,10 @@
  *           a delay that sweeps through the event spin, and every 16th round after 3 ms, when the
  *           waiter is asleep.
  *   halves  (jdrly/gw2-on-mac#368) 6 threads at ABOVE_NORMAL, all started at one address, wait in
- *           NtWaitForAlertByThreadId one after another, each alerted 3 ms into its wait, 4 rounds.
- *           It runs first, while no other thread is at ABOVE_NORMAL, so game+halfworkers numbers
- *           these 6 and no other thread between them. Each wait has to return STATUS_ALERTED.
+ *           NtWaitForAlertByThreadId one after another for 3 ms, 4 rounds. Nobody alerts them, so
+ *           each wait reaches the spin's decision and has to return STATUS_TIMEOUT. The case runs
+ *           first, while no other thread is at ABOVE_NORMAL, and its first round is the order of
+ *           the threads' first lock waits, the order game+halfworkers numbers them in.
  *
  * The counters, from the threads' rows in heat.c's log:
  *   - a kind that is off shows no hit and no miss in any row
@@ -30,11 +31,9 @@
  *   - event on: the game thread spun on its jobs' event, or is scoped out; the pulse waiter has hits
  *   - the spin of 8 rows, the two alerts threads' and the 6 halves threads', is 1 exactly when the
  *     lock's scope takes the thread. A halves thread with spin 1 spun on its lock waits, one with
- *     spin 0 didn't and counted spin_scoped. With game+halfworkers exactly 3 of the 6 have spin 1,
- *     and the ABOVE_NORMAL alerts thread spins as its row says (jdrly/gw2-on-mac#368). Which 3 is
- *     the order of their first lock waits that found no alert pending: a thread taken off its core
- *     between arming and its wait for longer than the 3 ms finds the alert there, makes no spin
- *     decision, and takes its number in a later round. So the case checks the count, not the order
+ *     spin 0 didn't and counted spin_scoped. With game+halfworkers the halves threads have spin 1,
+ *     0, 1, 0, 1, 0 in their order, and the ABOVE_NORMAL alerts thread spins as its row says
+ *     (jdrly/gw2-on-mac#368)
  *   - sem on: the workers spun on the semaphore, or are scoped out. With WINE_HEAT_WAKE=one,skip
  *     too (matrix.zsh), a release during a worker's spin makes no wake call, and the worker joins
  *     the sleeper count only after its spin: a wake lost there would leave a round's jobs undone,
@@ -572,13 +571,13 @@ static DWORD WINAPI alert_waiter( void *arg )
     }
 }
 
-static HANDLE start_waiter( struct alerted *w )
+static HANDLE start_waiter( struct alerted *w, LPTHREAD_START_ROUTINE func )
 {
     HANDLE h;
     DWORD t0 = GetTickCount();
 
     if (!(w->go = CreateSemaphoreW( NULL, 0, 1, NULL ))) FAIL( "CreateSemaphore: error %lu", GetLastError() );
-    h = thread( alert_waiter, w );
+    h = thread( func, w );
 
     /* alone: no other thread starts or ends while it does, and it set its priority */
     while (!w->ready)
@@ -630,8 +629,8 @@ static void test_alerts(void)
 
     start( "alerts" );
     load_alerts();
-    a = start_waiter( &above );
-    h = start_waiter( &high );
+    a = start_waiter( &above, alert_waiter );
+    h = start_waiter( &high, alert_waiter );
     s = thread( alerter, NULL );
     join( s, 60000 );
     high.stop = above.stop = 1;  /* both wait for their next turn */
@@ -651,6 +650,30 @@ static void test_alerts(void)
 #define HALF_ROUNDS 4
 static struct alerted halves[HALVES];
 
+/* a wait of 3 ms that nobody alerts, so it always reaches the spin's decision */
+static DWORD WINAPI half_waiter( void *arg )
+{
+    struct alerted *w = arg;
+    LARGE_INTEGER timeout = { .QuadPart = -30000 };  /* 3 ms */
+    NTSTATUS status;
+    LONG i;
+
+    set_priority( w->priority );
+    w->tid = GetCurrentThreadId();
+    InterlockedExchange( &w->ready, 1 );
+    for (i = 1;; i++)
+    {
+        if (WaitForSingleObject( w->go, 10000 ) != WAIT_OBJECT_0) return 1;
+        if (w->stop) return 0;
+        if ((status = pNtWaitForAlertByThreadId( (const void *)&w->armed, &timeout )) != STATUS_TIMEOUT)
+        {
+            w->failed = status;
+            return 1;
+        }
+        InterlockedExchange( &w->taken, i );
+    }
+}
+
 static void test_halves(void)
 {
     HANDLE threads[HALVES];
@@ -662,19 +685,16 @@ static void test_halves(void)
     for (k = 0; k < HALVES; k++)
     {
         halves[k].priority = THREAD_PRIORITY_ABOVE_NORMAL;
-        threads[k] = start_waiter( &halves[k] );
+        threads[k] = start_waiter( &halves[k], half_waiter );
     }
-    /* one thread in its wait at a time */
+    /* one thread in its wait at a time, so the first round orders their first lock waits */
     for (i = 1; i <= HALF_ROUNDS; i++)
     {
         for (k = 0; k < HALVES; k++)
         {
             ReleaseSemaphore( halves[k].go, 1, NULL );
-            await( &halves[k].armed, i, 2000, "a halves thread didn't get to its wait", i );
-            Sleep( 3 );  /* past the spin's start, whatever it decides */
-            pNtAlertThreadByThreadId( ULongToHandle( halves[k].tid ) );
-            if (halves[k].failed) FAIL( "round %ld: thread %d's wait returned %#lx", i, k, halves[k].failed );
-            await( &halves[k].taken, i, 3000, "the alert wasn't taken", i );
+            await( &halves[k].taken, i, 3000, "a halves thread's wait didn't end", i );
+            if (halves[k].failed) FAIL( "round %ld: thread %d's wait returned %#lx, not a timeout", i, k, halves[k].failed );
         }
     }
     for (k = 0; k < HALVES; k++)
@@ -687,7 +707,7 @@ static void test_halves(void)
         join( threads[k], 10000 );
         CloseHandle( halves[k].go );
     }
-    printf( "gw2 test spin: %d rounds of an alert to each of %d threads, every one taken\n", HALF_ROUNDS, HALVES );
+    printf( "gw2 test spin: %d rounds of a 3 ms wait on each of %d threads, every one timed out\n", HALF_ROUNDS, HALVES );
 }
 
 /* pulse: PulseEvent during an event spin */
@@ -790,15 +810,16 @@ static void check_halves(void)
         if (!row[k] && spun( halves[k].tid, LOCK )) FAIL( "halves thread %d has spin 0 and spun", k );
         if (!row[k] && spin[LOCK].on && !counter( halves[k].tid, "spin_scoped" ))
             FAIL( "halves thread %d has spin 0 and counted no spin_scoped", k );
-        if (!(spin[LOCK].half && !spins( LOCK, THREAD_PRIORITY_ABOVE_NORMAL )) &&
-            row[k] != spins( LOCK, THREAD_PRIORITY_ABOVE_NORMAL ))
+        /* with game+halfworkers, the numbers 0 to 5 in the threads' order: 0, 2 and 4 spin */
+        if (spin[LOCK].half && !spins( LOCK, THREAD_PRIORITY_ABOVE_NORMAL ))
+        {
+            if (row[k] != !(k % 2)) FAIL( "halves thread %d has spin %lld with game+halfworkers", k, row[k] );
+        }
+        else if (row[k] != spins( LOCK, THREAD_PRIORITY_ABOVE_NORMAL ))
             FAIL( "halves thread %d has spin %lld, and the lock's scope %s priority 1", k, row[k],
                   spins( LOCK, THREAD_PRIORITY_ABOVE_NORMAL ) ? "takes" : "leaves out" );
     }
     printf( "gw2 test spin: %lld of %d halves threads spin\n", ones, HALVES );
-    /* the 6 took the numbers 0 to 5, whatever their order: 0, 2 and 4 spin */
-    if (spin[LOCK].half && !spins( LOCK, THREAD_PRIORITY_ABOVE_NORMAL ) && ones != HALVES / 2)
-        FAIL( "%lld of %d halves threads spin with game+halfworkers, not %d", ones, HALVES, HALVES / 2 );
 }
 
 static void check_counters(void)
