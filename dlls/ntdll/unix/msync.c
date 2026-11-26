@@ -850,7 +850,8 @@ void msync_init(void)
 }
 
 /* returns FALSE if nothing waited on the object. <release> is a semaphore release's count, which
- * WINE_HEAT_WAKE may spend on fewer wake calls; 0 for anything else, which wakes every waiter. */
+ * WINE_HEAT_WAKE may spend on fewer wake calls; 0 for anything else and for a wait-all's put-back
+ * (jdrly/gw2-on-mac#249), which wakes every waiter. */
 static inline BOOL signal_all( void *shm, unsigned int shm_idx, ULONG release )
 {
     mach_msg_header_t send_header;
@@ -1503,7 +1504,10 @@ tooslow:
                 {
                     struct semaphore *semaphore = (struct semaphore *)objs_shm[i];
                     __sync_fetch_and_add( &semaphore->count, 1 );
-                    signal_all( semaphore, objs[i], 1 );  /* jdrly/gw2-on-mac#219, as above */
+                    /* jdrly/gw2-on-mac#219, as above. 0, not 1: every waiter, in every
+                     * WINE_HEAT_WAKE mode, since the wake skip can't see a sleeper of another
+                     * process here once every handle is closed (jdrly/gw2-on-mac#249) */
+                    signal_all( semaphore, objs[i], 0 );
                     break;
                 }
                 case MSYNC_AUTO_EVENT:
