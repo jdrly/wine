@@ -163,6 +163,7 @@ int main( void )
     /* 4 */
     hr = IAudioSessionManager2_RegisterSessionNotification( manager, &notification.iface );
     if (hr != S_OK) FAIL( "RegisterSessionNotification, the second time, returned 0x%08lx, not S_OK", hr );
+    if (notification.ref != 2) FAIL( "the notification registered again has %ld references, not 2", notification.ref );
     left = IAudioSessionManager2_Release( manager );
     printf( "gw2 test sessions: the manager released with the notification registered: %lu references left on it, "
             "%ld on the notification\n", left, notification.ref );

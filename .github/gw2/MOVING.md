@@ -125,11 +125,12 @@ on its `gw2-on-mac`. In short:
 
 ## 5. What the gates hold my files to then
 
-The build job builds `BASE_COMMIT` and compares each file with the new engine's: byte for byte on
-the engine's runner and Xcode, structurally otherwise. Then `compare.py patched` holds this
-commit's objects to that base build, and the tests run my files in the new engine. For
-`mmdevapi.dll` `pe.zsh compare` holds my base build to the new engine's file by machine, sections,
-exports and imports, and `pe.zsh objects` holds this commit's PE objects to the base build's.
+The build job builds `BASE_COMMIT` and compares `ntdll.so` and `winemac.so` with the new engine's:
+byte for byte on the engine's runner and Xcode, structurally otherwise. Then `compare.py patched`
+holds this commit's objects to that base build, and the tests run my files in the new engine.
+`mmdevapi.dll` has its own gate on any runner: `pe.zsh compare` holds my base build to the new
+engine's file by machine, sections, exports and imports, and `pe.zsh objects` holds this commit's
+PE objects to the base build's.
 
 An engine that is not a Mach9 release, my own build of upstream Wine for example, has no engine
 file to compare my base build with. The baseline gate then has nothing to hold to, and only the

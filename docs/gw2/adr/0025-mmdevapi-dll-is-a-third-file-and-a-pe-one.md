@@ -13,7 +13,9 @@ libraries under `lib/wine/aarch64-unix`.
 
 So the fork builds a third file, my `mmdevapi.dll`: the engine's commit plus the fix, an ARM64X
 file like the engine's, with an ARM64 half for ARM64 code and an ARM64EC half for x64 code under
-FEX. The fix has no switch (ADR 0006). It only turns two failures into successes.
+FEX. The fix has no switch (ADR 0006). It only turns two failures into successes. Its code is in
+`dlls/mmdevapi/sessionnotify.h`, a file of mine, and `audiosessionmanager.c` calls it from the two
+functions, the manager's release and its creation.
 
 ## Consequences
 
@@ -24,8 +26,8 @@ FEX. The fix has no switch (ADR 0006). It only turns two failures into successes
   commit has the engine file's machine, sections, exports and imports, and this commit's has the
   same. The bytes are a report: the link writes the time and a hash of the contents into every
   build. Of the PE objects and compiled resources, only those made from a source under
-  `dlls/mmdevapi` the commit changes may differ from my base build's, in each half of the file,
-  with each object's COFF time stamp left out. That is what "the engine's file plus my change"
+  `dlls/mmdevapi` the commit changes (a `.c`, or a header it includes) may differ from my base
+  build's, in each half of the file, with each object's COFF time stamp left out. That is what "the engine's file plus my change"
   means for a PE file.
 - Each green push publishes `mmdevapi-arm64-<commit>.tar.xz` to `arm64-builds`, with
   `mmdevapi.dll`, its `VERSION` and the licences, like the other two kinds. `VERSION` has the

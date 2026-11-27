@@ -81,7 +81,7 @@
 #   tests of the files it can have changed: the build job's selection.env says which of ntdll.so
 #   and winemac.so the fork report or the changed paths reach, and whether the changed paths reach
 #   mmdevapi.dll, and any change under
-#   tests/gw2 or .github runs the tests of both (jdrly/gw2-on-mac#217, #323), blocks 4 to 6
+#   tests/gw2 or .github runs the tests of all three (jdrly/gw2-on-mac#217, #323), blocks 4 to 6
 #   as HEAT below says. One that changes only
 #   Markdown files doesn't build at all: the changes job says so, and the build job and with it
 #   the tests are skipped (jdrly/gw2-on-mac#228, #323). Of matrix.zsh's ntdll blocks, blocks 4, 5
@@ -591,18 +591,19 @@ jobs:
             fi
           done
           # mmdevapi.dll (jdrly/gw2-on-mac#387), stripped as the engine's: the baseline's machine,
-          # sections, exports and imports, and of its PE objects and compiled resources only those
-          # made from a source under dlls/mmdevapi this commit changes against the engine's may
-          # differ from my base build's: a .c's object, or what widl makes of an .idl. A changed
-          # header fails the gate where it reaches an object, for me to look at.
+          # sections, exports and imports, and of its PE objects and compiled resources only the
+          # objects of the .c files under dlls/mmdevapi this commit changes against the engine's,
+          # or that include a header there it changes, may differ from my base build's. Anything
+          # else that differs, a resource of a changed .idl for one, fails the gate for me to look at.
           "$GW2/pe.zsh" stage "$BUILD/dlls/mmdevapi/aarch64-windows/mmdevapi.dll" "$RUNNER_TEMP/mmdevapi.dll"
           mine=()
           for f in "${touched[@]}"; do
             [[ $f == dlls/mmdevapi/* && $f != dlls/mmdevapi/*/* ]] || continue
-            stem=$(basename "${f%.*}")
             case $f in
-              *.c) mine+=("$stem.o") ;;
-              *.idl) mine+=("${stem}_r.res" "${stem}_l.res" "${stem}_t.res" "${stem}_i.o" "${stem}_p.o") ;;
+              *.c) mine+=("$(basename "$f" .c).o") ;;
+              *.h)
+                while IFS= read -r c; do mine+=("$(basename "$c" .c).o"); done < <(
+                  grep -lF "#include \"$(basename "$f")\"" "$SRC"/dlls/mmdevapi/*.c || true) ;;
             esac
           done
           {

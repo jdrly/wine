@@ -4,8 +4,8 @@ Every line of mine in a file that athei's Wine has is a possible conflict when I
 newer engine, so a rebase starts here, and so does `MOVING.md`. A change that adds or removes a
 line of mine in an upstream file changes its row in this file.
 
-My own files (`dlls/ntdll/unix/heat*`, `dlls/winemac.drv/gcmouse_scale.h`, `surface_frame.h`)
-aren't listed. Issue numbers are in jdrly/gw2-on-mac. To list the hunks:
+My own files (`dlls/ntdll/unix/heat*`, `dlls/winemac.drv/gcmouse_scale.h`, `surface_frame.h`,
+`dlls/mmdevapi/sessionnotify.h`) aren't listed. Issue numbers are in jdrly/gw2-on-mac. To list the hunks:
 
 ```zsh
 git diff 501796b0ed1 HEAD -U0 -- dlls server include | grep -E '^(diff --git|@@)'
@@ -49,6 +49,7 @@ without its `WINE_HEAT_` or `WINE_MACDRV_` prefix.
 | `dlls/winemac.drv/macdrv_main.c` | includes, globals, `setup_options` | Reads every `WINE_MACDRV_*` | all `WINE_MACDRV_*` | #57, #59 |
 | `dlls/winemac.drv/cocoa_gcmouse.m` | `gcmouse_post_movement`, `gcmouse_moved` | Scales the counts through `gcmouse_scale.h` and carries the fractions | `MOUSE_SCALE` | #59 |
 | `dlls/winemac.drv/surface.c` | `struct macdrv_window_surface`, `macdrv_surface_flush`, `macdrv_surface_destroy` | Hands Cocoa a copy of the frame, skips an equal one, and counts flushes on the `macsurface` channel | `SURFACE` | #57 |
+| `dlls/mmdevapi/audiosessionmanager.c` | includes, `struct session_mgr`, `ASM_Release`, `ASM_RegisterSessionNotification`, `ASM_UnregisterSessionNotification`, `AudioSessionManager_Create` | Keeps the manager's session notifications through `sessionnotify.h`, a fix without a switch (the second table) | none | #387 |
 
 ## Fixes without a switch
 
@@ -70,4 +71,4 @@ fixes of #159 and the break-in of #174.
 | `dlls/ntdll/unix/virtual.c`, `virtual_handle_fault` | Rosetta's workaround, a read fault in a readable page taken as a write fault, only on x86_64 (ADR 0021) | #342 | at merge | WineHQ `dedead43f26`, after `wine-11.22`. athei: no |
 | `dlls/ntdll/unix/sync.c`, `NtYieldExecution` | On macOS `swtch()`, and `STATUS_NO_YIELD_PERFORMED` when it returns false (ADR 0021) | #342 | at merge | WineHQ `53ba24da06b`, after `wine-11.22`. athei: no |
 | `dlls/ntdll/unix/sync.c`, `NtDelayExecution` | A sleep that isn't alertable: a zero timeout is only the yield, a relative one a `nanosleep`, again with the rest after `EINTR` (ADR 0021) | #342 | at merge | WineHQ `48d67d33670`, after `wine-11.22`. athei: no |
-| `dlls/mmdevapi/audiosessionmanager.c`, `ASM_RegisterSessionNotification`, `ASM_UnregisterSessionNotification`, `ASM_Release`, `AudioSessionManager_Create` | A session notification registers and unregisters with `S_OK` instead of `E_NOTIMPL`: the manager keeps a reference until the unregister or its own release. An unknown pointer gets `E_INVALIDARG`. No session event is sent. In `mmdevapi.dll`, a PE file of its own (ADR 0025). Its test is `test_session_notification` in `dlls/mmdevapi/tests/render.c`, which the fork doesn't build, and `tests/gw2/sessions.c` | #387 | at merge | athei: no. WineHQ: no, master `ecca8e75524` on 2026-11-26 |
+| `dlls/mmdevapi/audiosessionmanager.c`, `ASM_RegisterSessionNotification`, `ASM_UnregisterSessionNotification`, `ASM_Release`, `AudioSessionManager_Create` | A session notification registers and unregisters with `S_OK` instead of `E_NOTIMPL`: the manager keeps a reference until the unregister or its own release (`sessionnotify.h`, the hook above). An unknown pointer gets `E_INVALIDARG`. No session event is sent. In `mmdevapi.dll`, a PE file of its own (ADR 0025). Its test is `test_session_notification` in `dlls/mmdevapi/tests/render.c`, which the fork doesn't build, and `tests/gw2/sessions.c` | #387 | at merge | athei: no. WineHQ: no, master `ecca8e75524` on 2026-11-26 |

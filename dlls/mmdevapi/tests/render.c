@@ -3275,6 +3275,7 @@ static void test_session_notification(void)
 
     hr = IAudioSessionManager2_RegisterSessionNotification(sesm2, &notification.IAudioSessionNotification_iface);
     ok(hr == S_OK, "RegisterSessionNotification returned %08lx\n", hr);
+    ok(notification.ref > 1, "the registered notification has %ld references\n", notification.ref);
     ref = IAudioSessionManager2_Release(sesm2);
     ok(!ref, "the manager has %lu references left\n", ref);
     ok(notification.ref == 1, "the released manager left the notification %ld references\n", notification.ref);
