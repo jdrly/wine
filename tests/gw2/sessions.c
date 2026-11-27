@@ -13,8 +13,7 @@
  * A runner may have no audio device, so before COM starts the program writes a render endpoint
  * into the prefix's registry, as mmdevapi keeps the endpoints it has seen. mmdevapi loads it as
  * not present, and its session manager doesn't care. The default endpoint comes first; the
- * written one only when there is none. If neither gives a manager, the program says
- * "inconclusive" and passes, and the workflow warns.
+ * written one only when there is none. Without either the program fails before the first check.
  *
  * Prints "gw2 test sessions: passed" and exits 0, or names the call that failed with its result
  * and exits 1. Under the engine's mmdevapi.dll the first check fails with
@@ -135,12 +134,8 @@ int main( void )
             printf( "gw2 test sessions: no default render endpoint (0x%08lx), the written one\n", hr_default );
     }
     if (!device)
-    {
-        printf( "gw2 test sessions: inconclusive, no endpoint: GetDefaultAudioEndpoint returned 0x%08lx, "
-                "GetDevice of the written one 0x%08lx\n", hr_default, hr_seeded );
-        printf( "gw2 test sessions: passed\n" );
-        return 0;
-    }
+        FAIL( "no endpoint: GetDefaultAudioEndpoint returned 0x%08lx, GetDevice of the written one 0x%08lx",
+              hr_default, hr_seeded );
 
     hr = IMMDevice_Activate( device, &IID_IAudioSessionManager2, CLSCTX_ALL, NULL, (void **)&manager );
     if (FAILED(hr)) FAIL( "Activate(IAudioSessionManager2) returned 0x%08lx", hr );

@@ -17,10 +17,15 @@
 #                                            and with a hash of its contents, so no two builds
 #                                            match byte for byte.
 #   pe.zsh objects <base> <head> <name>...   the gate: <base> and <head> hold the same PE objects
-#                                            of one module, a directory per architecture as the
-#                                            build leaves them (aarch64-windows/, arm64ec-windows/),
-#                                            and every object but the <name>s (file names, such as
-#                                            audiosessionmanager.o) is the same, byte for byte
+#                                            (*.o) and compiled resources (*.res, the COM
+#                                            registration of an .idl) of one module, a directory
+#                                            per architecture as the build leaves them
+#                                            (aarch64-windows/, arm64ec-windows/), and every one but
+#                                            the <name>s (file names, such as
+#                                            audiosessionmanager.o) is the same, byte for byte. An
+#                                            object's COFF header has the compile's time in bytes
+#                                            4 to 7 (LLVM's WinCOFFObjectWriter), which the gate
+#                                            leaves out
 #
 # Each prints Markdown for the job summary. llvm-readobj and llvm-strip are $MINGW_DIR's, the
 # llvm-mingw Mach9 builds its PE files with.
@@ -49,10 +54,21 @@ shape() {
   "$readobj" --file-headers "$f" | sed -nE 's/^ *(Machine: .*)$/\1/p'
   "$readobj" --sections "$f" | awk '/^ *Name: / { print "section " $2 }'
   "$readobj" --coff-exports "$f" | awk '/^ *Ordinal: / { o = $2 } /^ *Name: / { print "export " o " " $2 }'
+  # a delay import's symbols are Import blocks inside its DelayImport block, without a Name
   "$readobj" --coff-imports "$f" | awk '
-    /^ *(Import|DelayImport) \{/ { kind = $1 }
-    /^ *Name: / { dll = $2 }
-    /^ *Symbol: / { $1 = ""; print kind " " dll $0 }'
+    /^ *DelayImport \{/ { kind = "DelayImport"; top = 0; next }
+    /^ *Import \{/ { top = 1; next }
+    /^ *Name: / { if (top) kind = "Import"; top = 0; dll = $2; next }
+    /^ *Symbol: / { top = 0; $1 = ""; print kind " " dll $0 }'
+}
+
+# same <a> <b>: the two objects are the same, but for a COFF object's time stamp
+same() {
+  if [[ $1 == *.o ]]; then
+    [[ $(head -c 4 "$1" | od -An -tx1) == "$(head -c 4 "$2" | od -An -tx1)" ]] && cmp -s "$1" "$2" 8 8
+  else
+    cmp -s "$1" "$2"
+  fi
 }
 
 compare() {
@@ -62,6 +78,13 @@ compare() {
   shape "$ref" >"$b"
   print "### ${f:t} against ${ref:t} (${ref:h:t}/)"
   print '```'
+  # a shape the parser read nothing of would match any other
+  if ! grep '^Machine: ' "$b" >/dev/null || ! grep '^export ' "$b" >/dev/null || ! grep '^Import ' "$b" >/dev/null; then
+    print "shape: the reference's has no machine, export or import line, so llvm-readobj's output isn't what this script reads"
+    print '```'
+    rm -f "$a" "$b"
+    return 1
+  fi
   if diff "$b" "$a"; then
     print "shape: the same, $(grep -c . "$a") lines (machine, sections, exports, imports)"
     rm -f "$a" "$b"
@@ -84,14 +107,14 @@ objects() {
   print "### The module's objects against my build of the engine's commit"
   print '```'
   for arch in aarch64 arm64ec; do
-    local -a b=("$base/$arch-windows"/*.o(N:t)) h=("$head/$arch-windows"/*.o(N:t))
+    local -a b=("$base/$arch-windows"/*.(o|res)(N:t)) h=("$head/$arch-windows"/*.(o|res)(N:t))
     if (( ! ${#b} )) || [[ ${(j: :)b} != ${(j: :)h} ]]; then
       print "$arch-windows: the base build has ${b:-nothing}, this one ${h:-nothing}"
       rc=1
       continue
     fi
     for name in $b; do
-      if cmp -s "$base/$arch-windows/$name" "$head/$arch-windows/$name"; then
+      if same "$base/$arch-windows/$name" "$head/$arch-windows/$name"; then
         verdict=same
       elif (( ${may[(Ie)$name]} )); then
         verdict="changed, its source is this change's"

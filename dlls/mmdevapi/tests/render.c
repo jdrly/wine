@@ -3204,6 +3204,82 @@ static void test_audio_clock_adjustment(void)
     IAudioClient_Release(ac);
 }
 
+/* gw2 (jdrly/gw2-on-mac#387): a session notification registers and unregisters. The fork's build
+ * configures with --disable-tests, so this test doesn't run there; tests/gw2/sessions.c runs the
+ * same checks on the runner. */
+struct session_notification
+{
+    IAudioSessionNotification IAudioSessionNotification_iface;
+    LONG ref;
+};
+
+static HRESULT WINAPI session_notification_QueryInterface(IAudioSessionNotification *iface, REFIID riid, void **out)
+{
+    if (IsEqualIID(riid, &IID_IUnknown) || IsEqualIID(riid, &IID_IAudioSessionNotification))
+    {
+        *out = iface;
+        IAudioSessionNotification_AddRef(iface);
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI session_notification_AddRef(IAudioSessionNotification *iface)
+{
+    struct session_notification *This = CONTAINING_RECORD(iface, struct session_notification, IAudioSessionNotification_iface);
+    return InterlockedIncrement(&This->ref);
+}
+
+static ULONG WINAPI session_notification_Release(IAudioSessionNotification *iface)
+{
+    struct session_notification *This = CONTAINING_RECORD(iface, struct session_notification, IAudioSessionNotification_iface);
+    return InterlockedDecrement(&This->ref);
+}
+
+static HRESULT WINAPI session_notification_OnSessionCreated(IAudioSessionNotification *iface, IAudioSessionControl *session)
+{
+    return S_OK;
+}
+
+static const IAudioSessionNotificationVtbl session_notification_vtbl =
+{
+    session_notification_QueryInterface,
+    session_notification_AddRef,
+    session_notification_Release,
+    session_notification_OnSessionCreated,
+};
+
+static void test_session_notification(void)
+{
+    struct session_notification notification = {{&session_notification_vtbl}, 1};
+    IAudioSessionManager2 *sesm2;
+    ULONG ref;
+    HRESULT hr;
+
+    hr = IMMDevice_Activate(dev, &IID_IAudioSessionManager2, CLSCTX_INPROC_SERVER, NULL, (void **)&sesm2);
+    ok(hr == S_OK, "Activate failed: %08lx\n", hr);
+    if (hr != S_OK)
+        return;
+
+    hr = IAudioSessionManager2_RegisterSessionNotification(sesm2, &notification.IAudioSessionNotification_iface);
+    ok(hr == S_OK, "RegisterSessionNotification returned %08lx\n", hr);
+    ok(notification.ref > 1, "the registered notification has %ld references\n", notification.ref);
+
+    hr = IAudioSessionManager2_UnregisterSessionNotification(sesm2, &notification.IAudioSessionNotification_iface);
+    ok(hr == S_OK, "UnregisterSessionNotification returned %08lx\n", hr);
+    ok(notification.ref == 1, "the unregistered notification has %ld references\n", notification.ref);
+
+    hr = IAudioSessionManager2_UnregisterSessionNotification(sesm2, &notification.IAudioSessionNotification_iface);
+    ok(hr == E_INVALIDARG, "the second UnregisterSessionNotification returned %08lx\n", hr);
+
+    hr = IAudioSessionManager2_RegisterSessionNotification(sesm2, &notification.IAudioSessionNotification_iface);
+    ok(hr == S_OK, "RegisterSessionNotification returned %08lx\n", hr);
+    ref = IAudioSessionManager2_Release(sesm2);
+    ok(!ref, "the manager has %lu references left\n", ref);
+    ok(notification.ref == 1, "the released manager left the notification %ld references\n", notification.ref);
+}
+
 START_TEST(render)
 {
     HRESULT hr;
@@ -3246,6 +3322,7 @@ START_TEST(render)
     test_simplevolume();
     test_volume_dependence();
     test_session_creation();
+    test_session_notification();
     test_worst_case();
     test_endpointvolume();
     test_audio_clock_adjustment();

@@ -23,17 +23,18 @@ FEX. The fix has no switch (ADR 0006). It only turns two failures into successes
 - `compare.py` reads Mach-O only, so `.github/gw2/pe.zsh` checks the file. My build of the engine's
   commit has the engine file's machine, sections, exports and imports, and this commit's has the
   same. The bytes are a report: the link writes the time and a hash of the contents into every
-  build. Of the PE objects, only those whose source under `dlls/mmdevapi` the commit changes may
-  differ from my base build's, in each half of the file. That is what "the engine's file plus my
-  change" means for a PE file.
+  build. Of the PE objects and compiled resources, only those made from a source under
+  `dlls/mmdevapi` the commit changes may differ from my base build's, in each half of the file,
+  with each object's COFF time stamp left out. That is what "the engine's file plus my change"
+  means for a PE file.
 - Each green push publishes `mmdevapi-arm64-<commit>.tar.xz` to `arm64-builds`, with
   `mmdevapi.dll`, its `VERSION` and the licences, like the other two kinds. `VERSION` has the
   file's sha256 and both compares.
 - `tests/gw2/sessions.c` registers and unregisters a notification as NAudio does. It has to pass
   under the engine with my file and fail on `E_NOTIMPL` under the engine's own. A runner may have
-  no audio device, so it writes an endpoint into the prefix's registry first. The test lives
-  under `tests/gw2`, not `dlls/mmdevapi/tests`: the fork configures with `--disable-tests`, so
-  Wine's own tests never build here.
+  no audio device, so it writes an endpoint into the prefix's registry first. The same checks are
+  `test_session_notification` in Wine's own `dlls/mmdevapi/tests/render.c`, which never runs
+  here: the fork configures with `--disable-tests`.
 - My app installs no PE file of mine today. Installing this one is a ticket of its own in the app.
   It needs a place for the file, a download by commit and a check of its sha256, and the
   engine's own file kept next to it, as the app does for `ntdll.so`. The `wine` setting has to put

@@ -79,7 +79,8 @@
 #   (jdrly/gw2-on-mac#323; up to then a push whose tree a green pull request run had tested ran
 #   only smoke.exe, jdrly/gw2-on-mac#241). A pull request runs only the
 #   tests of the files it can have changed: the build job's selection.env says which of ntdll.so
-#   and winemac.so the fork report or the changed paths reach, and any change under
+#   and winemac.so the fork report or the changed paths reach, and whether the changed paths reach
+#   mmdevapi.dll, and any change under
 #   tests/gw2 or .github runs the tests of both (jdrly/gw2-on-mac#217, #323), blocks 4 to 6
 #   as HEAT below says. One that changes only
 #   Markdown files doesn't build at all: the changes job says so, and the build job and with it
@@ -423,11 +424,13 @@ jobs:
           cp -p "$BUILD/dlls/ntdll/ntdll.so" "$RUNNER_TEMP/baseline-ntdll.so"
           cp -p "$BUILD/dlls/winemac.drv/winemac.so" "$RUNNER_TEMP/baseline-winemac.so"
           # mmdevapi.dll as the engine ships it, stripped (jdrly/gw2-on-mac#387), and its PE
-          # objects, a directory for each half of the ARM64X file
+          # objects and compiled resources, a directory for each half of the ARM64X file
           "$GW2/pe.zsh" stage "$BUILD/dlls/mmdevapi/aarch64-windows/mmdevapi.dll" "$RUNNER_TEMP/baseline-mmdevapi.dll"
           for arch in aarch64 arm64ec; do
             mkdir -p "$RUNNER_TEMP/base-objects/mmdevapi/$arch-windows"
-            cp -p "$BUILD/dlls/mmdevapi/$arch-windows/"*.o "$RUNNER_TEMP/base-objects/mmdevapi/$arch-windows/"
+            # find, since a half may have no .res and bash keeps a glob that matches nothing
+            find "$BUILD/dlls/mmdevapi/$arch-windows" -maxdepth 1 \( -name '*.o' -o -name '*.res' \) \
+              -exec cp -p {} "$RUNNER_TEMP/base-objects/mmdevapi/$arch-windows/" \;
           done
           # what the patched build's objects are compared with, with the times its link saw. A PE
           # object of the Mac driver is in a subdirectory of its own (aarch64-windows/), so the glob
@@ -555,7 +558,7 @@ jobs:
           "$GW2/wine.zsh" checkout "$COMMIT"
           # every object compiled again, so none compared is one the base build left behind
           date +%s >"$RUNNER_TEMP/checkout-time"
-          rm -f "$BUILD"/dlls/ntdll/unix/*.o "$BUILD"/dlls/winemac.drv/*.o "$BUILD"/dlls/mmdevapi/{aarch64,arm64ec}-windows/*.o
+          rm -f "$BUILD"/dlls/ntdll/unix/*.o "$BUILD"/dlls/winemac.drv/*.o "$BUILD"/dlls/mmdevapi/{aarch64,arm64ec}-windows/*.{o,res}
           "$GW2/wine.zsh" build | tee "$RUNNER_TEMP/head-build.log"
           (cd "$BUILD" && find include -type f -print0 | sort -z | xargs -0 shasum -a 256) >"$RUNNER_TEMP/head-headers.txt"
           diff "$RUNNER_TEMP/base-headers.txt" "$RUNNER_TEMP/head-headers.txt" ||
@@ -588,12 +591,19 @@ jobs:
             fi
           done
           # mmdevapi.dll (jdrly/gw2-on-mac#387), stripped as the engine's: the baseline's machine,
-          # sections, exports and imports, and of its PE objects only those whose source under
-          # dlls/mmdevapi this commit changes against the engine's may differ from my base build's
+          # sections, exports and imports, and of its PE objects and compiled resources only those
+          # made from a source under dlls/mmdevapi this commit changes against the engine's may
+          # differ from my base build's: a .c's object, or what widl makes of an .idl. A changed
+          # header fails the gate where it reaches an object, for me to look at.
           "$GW2/pe.zsh" stage "$BUILD/dlls/mmdevapi/aarch64-windows/mmdevapi.dll" "$RUNNER_TEMP/mmdevapi.dll"
           mine=()
           for f in "${touched[@]}"; do
-            if [[ $f == dlls/mmdevapi/*.c && $f != dlls/mmdevapi/*/* ]]; then mine+=("$(basename "$f" .c).o"); fi
+            [[ $f == dlls/mmdevapi/* && $f != dlls/mmdevapi/*/* ]] || continue
+            stem=$(basename "${f%.*}")
+            case $f in
+              *.c) mine+=("$stem.o") ;;
+              *.idl) mine+=("${stem}_r.res" "${stem}_l.res" "${stem}_t.res" "${stem}_i.o" "${stem}_p.o") ;;
+            esac
           done
           {
             "$GW2/pe.zsh" compare "$RUNNER_TEMP/mmdevapi.dll" "$RUNNER_TEMP/baseline-mmdevapi.dll" || status=1
@@ -1199,8 +1209,8 @@ jobs:
       # from a second thread, as NAudio does for Blish HUD, then checks a second unregister and a
       # manager released with one still registered. Under the engine with my mmdevapi.dll every
       # check has to pass. Under the engine's own it has to fail the first on E_NOTIMPL, the stub,
-      # so the test sees it, and is marked as expected. If it finds no endpoint, not even the one it
-      # writes into the prefix, it says inconclusive and the step warns.
+      # so the test sees it, and is marked as expected. Without an endpoint, not even the one it
+      # writes into the prefix, both runs fail, the second on the wrong line.
       - name: Session notifications
         if: matrix.lane == 'window' && env.RUN_MMDEVAPI == '1'
         run: |
@@ -1212,11 +1222,6 @@ jobs:
             { echo "### sessions.exe under $who"; echo '```'; cat "$RUNNER_TEMP/sessions-$wine.txt"; echo '```'; } | tee -a "$GITHUB_STEP_SUMMARY"
             if [[ $wine == mmdevapi ]]; then
               (( status == 0 )) || { echo "::error::sessions.exe failed under $who"; exit 1; }
-              if grep -qF 'gw2 test sessions: inconclusive' "$RUNNER_TEMP/sessions-$wine.txt"; then
-                echo "::warning::sessions.exe found no audio endpoint, not even the one it writes, so it shows nothing" |
-                  tee -a "$GITHUB_STEP_SUMMARY"
-                exit 0
-              fi
             else
               (( status == 1 )) || { echo "::error::under $who: run.zsh exited $status, not 1"; exit 1; }
               # the program's failure prints "expected"; a FAIL is the prefix boot's or a process left behind
