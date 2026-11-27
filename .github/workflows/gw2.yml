@@ -1,6 +1,6 @@
-# gw2 (jdrly/gw2-on-mac#40, #57, #61, #124, #374): my ntdll.so and winemac.so for Mach9
-# $MACH9_VERSION's engine, built on GitHub's runner the way Mach9's CI built the engine's, and
-# checked against the engine's files. Nothing here runs on my Mac.
+# gw2 (jdrly/gw2-on-mac#40, #57, #61, #124, #374, #387): my ntdll.so, winemac.so and mmdevapi.dll
+# for Mach9 $MACH9_VERSION's engine, built on GitHub's runner the way Mach9's CI built the
+# engine's, and checked against the engine's files. Nothing here runs on my Mac.
 #
 # The toolchain and the gate (jdrly/gw2-on-mac#124). The build and test jobs run on $RUNNER with
 # Xcode $XCODE_VERSION. With the engine's own, $ENGINE_RUNNER and Xcode $ENGINE_XCODE_VERSION, my
@@ -17,7 +17,13 @@
 #   engine's paths, with Xcode $XCODE_VERSION, macOS $MACOSX_DEPLOYMENT_TARGET, llvm-mingw
 #   $LLVM_MINGW_VERSION and Homebrew's FreeType headers. Each build makes dlls/ntdll/ntdll.so and
 #   dlls/winemac.drv/winemac.so, and the dlls/win32u/win32u.so winemac.so links against, which
-#   nothing compares or ships since jdrly/gw2-on-mac#374. On a pull request whose merge commit has
+#   nothing compares or ships since jdrly/gw2-on-mac#374, and the ARM64X
+#   dlls/mmdevapi/aarch64-windows/mmdevapi.dll, my one PE file (jdrly/gw2-on-mac#387). compare.py
+#   reads Mach-O only, so .github/gw2/pe.zsh checks mmdevapi.dll: stripped as Mach9 strips the
+#   engine's PE files, my build of the engine's commit has the engine file's machine, sections,
+#   exports and imports, with its bytes a report (the link stamps each build), and this commit's
+#   has the same shape, with no PE object differing from the base build's but those whose source
+#   under dlls/mmdevapi it changes. On a pull request whose merge commit has
 #   another tree than its head, as it has when the head is behind gw2-on-mac, the job stops before
 #   it builds anything (jdrly/gw2-on-mac#228). In the tree, one after the other:
 #   - $BASE_COMMIT, the commit the engine was built from, each file compared with the engine's by
@@ -42,8 +48,8 @@
 #     relocations, changed, new or gone (jdrly/gw2-on-mac#106). A report, never a gate.
 #   The per-function listing with masked addresses that follows a failed byte gate only names
 #   what differs; it is not the gate and never passes or fails a build.
-#   Artifacts ntdll-arm64-<commit> and macdrv-arm64-<commit>: ntdll.so or winemac.so, VERSION,
-#   COPYING.LIB, LICENSE, kept 7 days. Up to jdrly/gw2-on-mac#374 macdrv-arm64-<commit> also had
+#   Artifacts ntdll-arm64-<commit>, macdrv-arm64-<commit> and mmdevapi-arm64-<commit>: ntdll.so,
+#   winemac.so or mmdevapi.dll, VERSION, COPYING.LIB, LICENSE, kept 7 days. Up to jdrly/gw2-on-mac#374 macdrv-arm64-<commit> also had
 #   my win32u.so when the compare listed a changed function of it. VERSION's line "baseline:
 #   <file> <gate>" says which gate held, and its toolchain line names the runner. Its line
 #   "switches: …" names every WINE_HEAT_* (ntdll.so) or WINE_MACDRV_* (winemac.so) variable the
@@ -65,12 +71,17 @@
 #   leftover.exe leaves a process behind, and tests/gw2/run.zsh has to fail its run, name the
 #   process and end it (jdrly/gw2-on-mac#128). rundll.exe has rundll32 call the entry point of a
 #   stand-in for arcdps's d3d11.dll: it has to fail with Wine's default order and pass with the app's
-#   compatdb rule for rundll32.exe (jdrly/gw2-on-mac#155). A push to gw2-on-mac runs every test
+#   compatdb rule for rundll32.exe (jdrly/gw2-on-mac#155). sessions.exe registers and unregisters
+#   an audio session notification as NAudio does for Blish HUD: under the engine with my
+#   mmdevapi.dll it has to pass, under the engine's own fail on E_NOTIMPL (jdrly/gw2-on-mac#387);
+#   it runs in the window lane when the change can reach mmdevapi.dll (dlls/mmdevapi, include,
+#   tools) or the tests. A push to gw2-on-mac runs every test
 #   (jdrly/gw2-on-mac#323; up to then a push whose tree a green pull request run had tested ran
 #   only smoke.exe, jdrly/gw2-on-mac#241). A pull request runs only the
 #   tests of the files it can have changed: the build job's selection.env says which of ntdll.so
-#   and winemac.so the fork report or the changed paths reach, and any change under
-#   tests/gw2 or .github runs the tests of both (jdrly/gw2-on-mac#217, #323), blocks 4 to 6
+#   and winemac.so the fork report or the changed paths reach, and whether the changed paths reach
+#   mmdevapi.dll, and any change under
+#   tests/gw2 or .github runs the tests of all three (jdrly/gw2-on-mac#217, #323), blocks 4 to 6
 #   as HEAT below says. One that changes only
 #   Markdown files doesn't build at all: the changes job says so, and the build job and with it
 #   the tests are skipped (jdrly/gw2-on-mac#228, #323). Of matrix.zsh's ntdll blocks, blocks 4, 5
@@ -94,8 +105,9 @@
 #   compare.py's self-test on the engine's files (every address-bearing instruction changed in turn),
 #   .github/gw2/SWITCHES.md names exactly the switches the sources read, and heatreq.h's request
 #   list is enum request's (.github/gw2/heatreq.py).
-# publish: after the others are green, packs ntdll-arm64-<commit>.tar.xz and
-#   macdrv-arm64-<commit>.tar.xz and prints their sha256. For a push to gw2-on-mac it adds both to
+# publish: after the others are green, packs ntdll-arm64-<commit>.tar.xz,
+#   macdrv-arm64-<commit>.tar.xz and mmdevapi-arm64-<commit>.tar.xz and prints their sha256. For a
+#   push to gw2-on-mac it adds the three to
 #   the pre-release arm64-builds, the one release this workflow makes, never marked latest, keeps
 #   the 30 newest of each kind. The pre-release this workflow filled before jdrly/gw2-on-mac#121 keeps the
 #   archives of earlier commits under the names they had, and gets nothing more.
@@ -182,7 +194,7 @@ jobs:
           echo "Markdown only: $docs, $why" | tee -a "$GITHUB_STEP_SUMMARY"
 
   build:
-    name: Build ntdll.so and winemac.so
+    name: Build ntdll.so, winemac.so and mmdevapi.dll
     needs: changes
     if: needs.changes.outputs.docs != '1'
     runs-on: *runner
@@ -192,6 +204,7 @@ jobs:
     outputs:
       run_ntdll: ${{ steps.owes.outputs.run_ntdll }}
       run_winemac: ${{ steps.owes.outputs.run_winemac }}
+      run_mmdevapi: ${{ steps.owes.outputs.run_mmdevapi }}
       heat: ${{ steps.owes.outputs.heat }}
       engine_bugs: ${{ steps.owes.outputs.engine_bugs }}
       lanes: ${{ steps.owes.outputs.lanes }}
@@ -310,11 +323,13 @@ jobs:
         with:
           key: mach9-tarball-${{ env.MACH9_VERSION }}
           path: toolchains/mach9.tar.xz
+      # and its mmdevapi.dll (jdrly/gw2-on-mac#387)
       - name: Unpack the engine's unix modules
         run: |
           echo "$MACH9_SHA256  toolchains/mach9.tar.xz" | shasum -a 256 -c
           mkdir -p toolchains/engine
-          tar -xf toolchains/mach9.tar.xz -C toolchains/engine --strip-components 1 wine/lib/wine/aarch64-unix
+          tar -xf toolchains/mach9.tar.xz -C toolchains/engine --strip-components 1 wine/lib/wine/aarch64-unix \
+            wine/lib/wine/aarch64-windows/mmdevapi.dll
 
       - name: Restore llvm-mingw
         id: mingw
@@ -408,6 +423,15 @@ jobs:
           "$GW2/wine.zsh" build | tee "$RUNNER_TEMP/base-build.log"
           cp -p "$BUILD/dlls/ntdll/ntdll.so" "$RUNNER_TEMP/baseline-ntdll.so"
           cp -p "$BUILD/dlls/winemac.drv/winemac.so" "$RUNNER_TEMP/baseline-winemac.so"
+          # mmdevapi.dll as the engine ships it, stripped (jdrly/gw2-on-mac#387), and its PE
+          # objects and compiled resources, a directory for each half of the ARM64X file
+          "$GW2/pe.zsh" stage "$BUILD/dlls/mmdevapi/aarch64-windows/mmdevapi.dll" "$RUNNER_TEMP/baseline-mmdevapi.dll"
+          for arch in aarch64 arm64ec; do
+            mkdir -p "$RUNNER_TEMP/base-objects/mmdevapi/$arch-windows"
+            # find, since a half may have no .res and bash keeps a glob that matches nothing
+            find "$BUILD/dlls/mmdevapi/$arch-windows" -maxdepth 1 \( -name '*.o' -o -name '*.res' \) \
+              -exec cp -p {} "$RUNNER_TEMP/base-objects/mmdevapi/$arch-windows/" \;
+          done
           # what the patched build's objects are compared with, with the times its link saw. A PE
           # object of the Mac driver is in a subdirectory of its own (aarch64-windows/), so the glob
           # takes the unix ones only.
@@ -438,6 +462,11 @@ jobs:
               "$GATE" >"$RUNNER_TEMP/baseline-$lib.md" || status=1
             tee -a "$GITHUB_STEP_SUMMARY" <"$RUNNER_TEMP/baseline-$lib.md"
           done
+          # mmdevapi.dll (jdrly/gw2-on-mac#387): the same machine, sections, exports and imports as
+          # the engine's, and its bytes a report
+          "$GW2/pe.zsh" compare "$RUNNER_TEMP/baseline-mmdevapi.dll" toolchains/engine/lib/wine/aarch64-windows/mmdevapi.dll \
+            >"$RUNNER_TEMP/baseline-mmdevapi.md" || status=1
+          tee -a "$GITHUB_STEP_SUMMARY" <"$RUNNER_TEMP/baseline-mmdevapi.md"
           exit "$status"
       # what differs, for the first functions the compare's listing names (the listing is not the gate)
       - name: Disassemble what differs
@@ -462,6 +491,7 @@ jobs:
           path: |
             ${{ runner.temp }}/baseline-ntdll.so
             ${{ runner.temp }}/baseline-winemac.so
+            ${{ runner.temp }}/baseline-mmdevapi.dll
           retention-days: 7
 
       # One line of NtYieldExecution changed: a second sched_yield call, which also moves every
@@ -528,7 +558,7 @@ jobs:
           "$GW2/wine.zsh" checkout "$COMMIT"
           # every object compiled again, so none compared is one the base build left behind
           date +%s >"$RUNNER_TEMP/checkout-time"
-          rm -f "$BUILD"/dlls/ntdll/unix/*.o "$BUILD"/dlls/winemac.drv/*.o
+          rm -f "$BUILD"/dlls/ntdll/unix/*.o "$BUILD"/dlls/winemac.drv/*.o "$BUILD"/dlls/mmdevapi/{aarch64,arm64ec}-windows/*.{o,res}
           "$GW2/wine.zsh" build | tee "$RUNNER_TEMP/head-build.log"
           (cd "$BUILD" && find include -type f -print0 | sort -z | xargs -0 shasum -a 256) >"$RUNNER_TEMP/head-headers.txt"
           diff "$RUNNER_TEMP/base-headers.txt" "$RUNNER_TEMP/head-headers.txt" ||
@@ -560,14 +590,36 @@ jobs:
               tee -a "$GITHUB_STEP_SUMMARY" <"$RUNNER_TEMP/fork-$lib.md"
             fi
           done
-          # Which of my two files this pull request can have changed, for the tests job: a file
-          # counts as changed when the fork report lists a function, or when the change touches a
-          # path that can reach it (a data-only change has no changed function). TESTS says the
+          # mmdevapi.dll (jdrly/gw2-on-mac#387), stripped as the engine's: the baseline's machine,
+          # sections, exports and imports, and of its PE objects and compiled resources only the
+          # objects of the .c files under dlls/mmdevapi this commit changes against the engine's,
+          # or that include a header there it changes, may differ from my base build's. Anything
+          # else that differs, a resource of a changed .idl for one, fails the gate for me to look at.
+          "$GW2/pe.zsh" stage "$BUILD/dlls/mmdevapi/aarch64-windows/mmdevapi.dll" "$RUNNER_TEMP/mmdevapi.dll"
+          mine=()
+          for f in "${touched[@]}"; do
+            [[ $f == dlls/mmdevapi/* && $f != dlls/mmdevapi/*/* ]] || continue
+            case $f in
+              *.c) mine+=("$(basename "$f" .c).o") ;;
+              *.h)
+                while IFS= read -r c; do mine+=("$(basename "$c" .c).o"); done < <(
+                  grep -lF "#include \"$(basename "$f")\"" "$SRC"/dlls/mmdevapi/*.c || true) ;;
+            esac
+          done
+          {
+            "$GW2/pe.zsh" compare "$RUNNER_TEMP/mmdevapi.dll" "$RUNNER_TEMP/baseline-mmdevapi.dll" || status=1
+            "$GW2/pe.zsh" objects "$RUNNER_TEMP/base-objects/mmdevapi" "$BUILD/dlls/mmdevapi" "${mine[@]}" || status=1
+          } >"$RUNNER_TEMP/compare-mmdevapi.md"
+          tee -a "$GITHUB_STEP_SUMMARY" <"$RUNNER_TEMP/compare-mmdevapi.md"
+          # Which of my files this pull request can have changed, for the tests job: ntdll.so or
+          # winemac.so counts as changed when the fork report lists a function, or when the change
+          # touches a path that can reach it (a data-only change has no changed function), and
+          # mmdevapi.dll when the change touches a path that can reach it. TESTS says the
           # tests or the CI changed, and then everything runs: any file under tests/gw2 or .github
           # (jdrly/gw2-on-mac#323; from #228 to then, Markdown files and gw2.yml's comment lines and
           # lint and publish jobs didn't count). HEAT says whether matrix.zsh's blocks 4, 5 and 6
           # run (jdrly/gw2-on-mac#323), and fails open: it is 0 only when every changed file is
-          # clearly outside them. A push gets these four set. ENGINE_BUGS says whether mutexall's
+          # clearly outside them. A push gets these five set. ENGINE_BUGS says whether mutexall's
           # and putback's runs under the engine's ntdll.so are owed (jdrly/gw2-on-mac#324): a new
           # MACH9_VERSION, or a change to msync.c, where both bugs are, to either program, or to
           # matrix.zsh or run.zsh, which decide what their runs mean. On a push it compares with the
@@ -607,6 +659,18 @@ jobs:
                 flag "$name" 0 "no function of $lib.so and nothing under ${paths[*]} changed"
               fi
             done
+            # mmdevapi.dll has no fork report, so the paths that can reach it decide
+            # (jdrly/gw2-on-mac#387)
+            if [[ -z ${FORK:-} ]]; then
+              flag MMDEVAPI 1 "a push has no fork point"
+            else
+              names=$(changed "$FORK" dlls/mmdevapi include tools)
+              if [[ -n $names ]]; then
+                flag MMDEVAPI 1 "changed: $names"
+              else
+                flag MMDEVAPI 0 "nothing under dlls/mmdevapi, include or tools changed"
+              fi
+            fi
             if [[ -z ${FORK:-} ]]; then
               flag TESTS 1 "a push has no fork point"
               flag HEAT 1 "a push has no fork point"
@@ -657,10 +721,11 @@ jobs:
           path: |
             ${{ env.BUILD }}/dlls/ntdll/ntdll.so
             ${{ env.BUILD }}/dlls/winemac.drv/winemac.so
+            ${{ runner.temp }}/mmdevapi.dll
           retention-days: 7
 
       # What the tests job owes, as this job's outputs. run_<file>: the file, the tests or the CI
-      # changed (jdrly/gw2-on-mac#217); a push sets both. Up to jdrly/gw2-on-mac#323 a push
+      # changed (jdrly/gw2-on-mac#217, #387); a push sets all three. Up to jdrly/gw2-on-mac#323 a push
       # whose tree a green pull request run had tested ran only the smoke test (#214, #241); now
       # every push runs every test. lanes: the tests job's lanes that have a step to run, as a
       # JSON list for its matrix (jdrly/gw2-on-mac#229): window for the steps with a window or a
@@ -672,12 +737,12 @@ jobs:
         id: owes
         run: |
           f=$RUNNER_TEMP/selection/selection.env
-          [[ $(grep -cE '^(NTDLL|WINEMAC|TESTS|HEAT|ENGINE_BUGS)=[01]$' "$f") == 5 && $(wc -l <"$f" | tr -d ' ') == 5 ]] ||
-            { echo "::error::selection.env isn't the five lines the Compare step writes"; cat "$f"; exit 1; }
-          # shellcheck disable=SC1090 # five checked lines of NAME=0 or NAME=1
+          [[ $(grep -cE '^(NTDLL|WINEMAC|MMDEVAPI|TESTS|HEAT|ENGINE_BUGS)=[01]$' "$f") == 6 && $(wc -l <"$f" | tr -d ' ') == 6 ]] ||
+            { echo "::error::selection.env isn't the six lines the Compare step writes"; cat "$f"; exit 1; }
+          # shellcheck disable=SC1090 # six checked lines of NAME=0 or NAME=1
           . "$f"
           any=0
-          for name in NTDLL WINEMAC; do
+          for name in NTDLL WINEMAC MMDEVAPI; do
             run=0
             if [[ ${!name} == 1 || $TESTS == 1 ]]; then run=1; any=1; fi
             printf -v "RUN_$name" %s "$run"
@@ -705,8 +770,9 @@ jobs:
           {
             echo "### What the tests job owes"
             echo '```'
-            echo "RUN_NTDLL=$RUN_NTDLL RUN_WINEMAC=$RUN_WINEMAC HEAT=$HEAT ENGINE_BUGS=$ENGINE_BUGS"
+            echo "RUN_NTDLL=$RUN_NTDLL RUN_WINEMAC=$RUN_WINEMAC RUN_MMDEVAPI=$RUN_MMDEVAPI HEAT=$HEAT ENGINE_BUGS=$ENGINE_BUGS"
             echo "lanes: ${lanes[*]}"
+            echo "sessions.exe, in the window lane: $RUN_MMDEVAPI, MMDEVAPI=$MMDEVAPI, $(why MMDEVAPI)"
             echo
             echo "matrix.zsh's blocks, 1 if they run:"
             echo "1, 1b, 2, 3, 3b, 8: $RUN_NTDLL, $ntdll"
@@ -727,8 +793,9 @@ jobs:
           out=$RUNNER_TEMP/programs
           mkdir -p "$out/tests/addon"
           for c in "$SRC"/tests/gw2/*.c; do
-            # gdi32 for layered.exe's bitmap; mingw's default libraries don't have it
-            "$MINGW_DIR/bin/x86_64-w64-mingw32-clang" -O2 -Wall -Werror -o "$out/tests/$(basename "$c" .c).exe" "$c" -lgdi32
+            # gdi32 for layered.exe's bitmap, ole32 and uuid for sessions.exe's COM; mingw's default
+            # libraries don't have them
+            "$MINGW_DIR/bin/x86_64-w64-mingw32-clang" -O2 -Wall -Werror -o "$out/tests/$(basename "$c" .c).exe" "$c" -lgdi32 -lole32 -luuid
           done
           # rundll.exe's stand-in for arcdps, in a folder of its own next to it (jdrly/gw2-on-mac#155)
           "$MINGW_DIR/bin/x86_64-w64-mingw32-windres" -O coff -o "$RUNNER_TEMP/addon.res" "$SRC/tests/gw2/addon/d3d11.rc"
@@ -736,9 +803,11 @@ jobs:
             "$SRC/tests/gw2/addon/d3d11.c" "$RUNNER_TEMP/addon.res"
           ls "$out/tests" "$out/tests/addon"
 
-      # dist/ntdll and dist/macdrv: each kind's file with its VERSION and the licences. Up to
-      # jdrly/gw2-on-mac#374 my win32u.so went with winemac.so when the compare listed a function of
-      # it; now the engine's own stays in place.
+      # dist/ntdll, dist/macdrv and dist/mmdevapi: each kind's file with its VERSION and the
+      # licences. Up to jdrly/gw2-on-mac#374 my win32u.so went with winemac.so when the compare
+      # listed a function of it; now the engine's own stays in place. mmdevapi.dll
+      # (jdrly/gw2-on-mac#387) is the ARM64X file for lib/wine/aarch64-windows, stripped as the
+      # engine's, and reads no switch.
       - name: Stage
         run: |
           mkdir -p dist/ntdll dist/macdrv
@@ -784,6 +853,24 @@ jobs:
             cat "$dir/VERSION"
             ls -l "$dir"
           done
+          dir=dist/mmdevapi
+          mkdir -p "$dir"
+          cp "$RUNNER_TEMP/mmdevapi.dll" "$SRC/COPYING.LIB" "$SRC/LICENSE" "$dir/"
+          {
+            strings -a dist/ntdll/ntdll.so | grep -oE 'wine-[0-9]+\.[0-9]+-[0-9]+-g[0-9a-f]+'
+            echo "commit: $COMMIT"
+            echo "file: lib/wine/aarch64-windows/mmdevapi.dll (ARM64X), the engine's own replaced"
+            echo "base: $BASE_COMMIT ($(git -C "$SRC" describe "$BASE_COMMIT"))"
+            echo "engine: Mach9 $MACH9_VERSION (wine-$MACH9_VERSION-macos-arm64.tar.xz, sha256 $MACH9_SHA256)"
+            echo "toolchain: llvm-mingw $LLVM_MINGW_VERSION, stripped with its llvm-strip --strip-all as Mach9 strips the engine's PE files"
+            echo "mmdevapi.dll: sha256 $(shasum -a 256 "$dir/mmdevapi.dll" | cut -d' ' -f1)"
+            echo
+            cat "$RUNNER_TEMP/baseline-mmdevapi.md"
+            echo
+            cat "$RUNNER_TEMP/compare-mmdevapi.md"
+          } >"$dir/VERSION"
+          cat "$dir/VERSION"
+          ls -l "$dir"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ntdll-arm64-${{ env.COMMIT }}
@@ -794,6 +881,12 @@ jobs:
         with:
           name: macdrv-arm64-${{ env.COMMIT }}
           path: dist/macdrv
+          retention-days: 7
+          if-no-files-found: error
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: mmdevapi-arm64-${{ env.COMMIT }}
+          path: dist/mmdevapi
           retention-days: 7
           if-no-files-found: error
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -818,6 +911,7 @@ jobs:
     env:
       RUN_NTDLL: ${{ needs.build.outputs.run_ntdll }}
       RUN_WINEMAC: ${{ needs.build.outputs.run_winemac }}
+      RUN_MMDEVAPI: ${{ needs.build.outputs.run_mmdevapi }}
       HEAT: ${{ needs.build.outputs.heat }}
       ENGINE_BUGS: ${{ needs.build.outputs.engine_bugs }}
       LANE: ${{ matrix.lane }}
@@ -874,14 +968,18 @@ jobs:
         with:
           name: macdrv-arm64-${{ env.COMMIT }}
           path: ${{ runner.temp }}/macdrv-dist
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: mmdevapi-arm64-${{ env.COMMIT }}
+          path: ${{ runner.temp }}/mmdevapi-dist
       # the test programs the build job built: tests/, straight into $RUNNER_TEMP
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: programs-${{ env.COMMIT }}
           path: ${{ runner.temp }}
 
-      # Three copies of the engine: its own, one with my ntdll.so and one with my winemac.so. APFS
-      # clones, so the copies are free.
+      # Four copies of the engine: its own, one with my ntdll.so, one with my winemac.so and one
+      # with my mmdevapi.dll (jdrly/gw2-on-mac#387). APFS clones, so the copies are free.
       - name: Unpack the engine
         run: |
           echo "$MACH9_SHA256  toolchains/mach9.tar.xz" | shasum -a 256 -c
@@ -889,11 +987,14 @@ jobs:
           tar -xf toolchains/mach9.tar.xz -C "$RUNNER_TEMP/engine"
           cp -Rc "$RUNNER_TEMP/engine" "$RUNNER_TEMP/mine"
           cp -Rc "$RUNNER_TEMP/engine" "$RUNNER_TEMP/macdrv"
+          cp -Rc "$RUNNER_TEMP/engine" "$RUNNER_TEMP/mmdevapi"
           install -m 755 "$RUNNER_TEMP/dist/ntdll.so" "$RUNNER_TEMP/mine/wine/lib/wine/aarch64-unix/ntdll.so"
           install -m 755 "$RUNNER_TEMP/macdrv-dist/winemac.so" "$RUNNER_TEMP/macdrv/wine/lib/wine/aarch64-unix/winemac.so"
-          xattr -drs com.apple.quarantine "$RUNNER_TEMP/engine" "$RUNNER_TEMP/mine" "$RUNNER_TEMP/macdrv"
+          install -m 644 "$RUNNER_TEMP/mmdevapi-dist/mmdevapi.dll" "$RUNNER_TEMP/mmdevapi/wine/lib/wine/aarch64-windows/mmdevapi.dll"
+          xattr -drs com.apple.quarantine "$RUNNER_TEMP/engine" "$RUNNER_TEMP/mine" "$RUNNER_TEMP/macdrv" "$RUNNER_TEMP/mmdevapi"
           shasum -a 256 "$RUNNER_TEMP"/{engine,mine}/wine/lib/wine/aarch64-unix/ntdll.so \
-            "$RUNNER_TEMP"/{engine,macdrv}/wine/lib/wine/aarch64-unix/winemac.so
+            "$RUNNER_TEMP"/{engine,macdrv}/wine/lib/wine/aarch64-unix/winemac.so \
+            "$RUNNER_TEMP"/{engine,mmdevapi}/wine/lib/wine/aarch64-windows/mmdevapi.dll
           "$RUNNER_TEMP/mine/wine/bin/wine" --version
           ls "$RUNNER_TEMP/tests" "$RUNNER_TEMP/tests/addon"
       # One booted prefix for each engine tree this lane uses, side by side, with smoke.exe run in
@@ -1105,6 +1206,31 @@ jobs:
               [[ $loaded == "native " ]] || { echo "::error::with the rule: rundll32's d3d11.dll was \"$loaded\", not the stand-in alone"; exit 1; }
             fi
           done
+      # jdrly/gw2-on-mac#387: sessions.exe registers a session notification and unregisters it
+      # from a second thread, as NAudio does for Blish HUD, then checks a second unregister and a
+      # manager released with one still registered. Under the engine with my mmdevapi.dll every
+      # check has to pass. Under the engine's own it has to fail the first on E_NOTIMPL, the stub,
+      # so the test sees it, and is marked as expected. Without an endpoint, not even the one it
+      # writes into the prefix, both runs fail, the second on the wrong line.
+      - name: Session notifications
+        if: matrix.lane == 'window' && env.RUN_MMDEVAPI == '1'
+        run: |
+          for wine in mmdevapi engine; do
+            status=0 expect='' who="my mmdevapi.dll"
+            [[ $wine == engine ]] && expect=programs who="the engine's mmdevapi.dll"
+            GW2_TEST_EXPECT_FAIL=$expect tests/gw2/run.zsh "$RUNNER_TEMP/$wine/wine" "$RUNNER_TEMP/sessions-$wine" "$RUNNER_TEMP/tests/sessions.exe" \
+              >"$RUNNER_TEMP/sessions-$wine.txt" || status=$?
+            { echo "### sessions.exe under $who"; echo '```'; cat "$RUNNER_TEMP/sessions-$wine.txt"; echo '```'; } | tee -a "$GITHUB_STEP_SUMMARY"
+            if [[ $wine == mmdevapi ]]; then
+              (( status == 0 )) || { echo "::error::sessions.exe failed under $who"; exit 1; }
+            else
+              (( status == 1 )) || { echo "::error::under $who: run.zsh exited $status, not 1"; exit 1; }
+              # the program's failure prints "expected"; a FAIL is the prefix boot's or a process left behind
+              ! grep -q '^FAIL' "$RUNNER_TEMP/sessions-$wine.txt" || { echo "::error::under $who: run.zsh printed FAIL"; exit 1; }
+              grep -qF 'RegisterSessionNotification returned 0x80004001' "$RUNNER_TEMP/sessions-$wine.txt" ||
+                { echo "::error::under $who: sessions.exe didn't fail on the stub's E_NOTIMPL"; exit 1; }
+            fi
+          done
       # The lanes' blocks (docs/gw2/adr/0016): matrix-a and matrix-b, which only a change that
       # reaches my ntdll.so gets, share them. Block 1 is the longest, and block 6 goes with 5, whose
       # clone of my tree it uses. Blocks 4, 5 and 6 run only with HEAT (jdrly/gw2-on-mac#323). Up to
@@ -1223,13 +1349,21 @@ jobs:
         with:
           name: macdrv-arm64-${{ env.COMMIT }}
           path: dist/macdrv
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: mmdevapi-arm64-${{ env.COMMIT }}
+          path: dist/mmdevapi
       - name: Pack
         run: |
-          for kind in ntdll macdrv; do
-            files=(ntdll.so)
-            [[ $kind == ntdll ]] || files=(winemac.so)
+          for kind in ntdll macdrv mmdevapi; do
+            case $kind in
+              ntdll) files=(ntdll.so) mode=755 ;;
+              macdrv) files=(winemac.so) mode=755 ;;
+              # a PE file, 644 as the engine has it
+              mmdevapi) files=(mmdevapi.dll) mode=644 ;;
+            esac
             name="$kind-arm64-$COMMIT.tar.xz"
-            (cd "dist/$kind" && chmod 755 "${files[@]}")
+            (cd "dist/$kind" && chmod "$mode" "${files[@]}")
             chmod 644 "dist/$kind/VERSION" "dist/$kind/COPYING.LIB" "dist/$kind/LICENSE"
             tar --sort=name --owner=0 --group=0 --numeric-owner -C "dist/$kind" -cJf "$name" "${files[@]}" VERSION COPYING.LIB LICENSE
             tar -tvJf "$name"
@@ -1239,11 +1373,11 @@ jobs:
         if: github.event_name == 'push' && github.ref == 'refs/heads/gw2-on-mac'
         run: |
           if ! gh release view "$RELEASE" >/dev/null 2>&1; then
-            gh release create "$RELEASE" --prerelease --latest=false --target "$COMMIT" --title "arm64 builds of my ntdll.so and winemac.so" \
-              --notes "CI output for GW2 on Mac's arm64 line, not a release of Wine: my ntdll.so and winemac.so for Mach9 $MACH9_VERSION's engine, built and checked by .github/workflows/gw2.yml for each push to gw2-on-mac. One asset of each kind per commit, ntdll-arm64-<full sha>.tar.xz and macdrv-arm64-<full sha>.tar.xz; the 30 newest of each kind stay."
+            gh release create "$RELEASE" --prerelease --latest=false --target "$COMMIT" --title "arm64 builds of my ntdll.so, winemac.so and mmdevapi.dll" \
+              --notes "CI output for GW2 on Mac's arm64 line, not a release of Wine: my ntdll.so, winemac.so and mmdevapi.dll for Mach9 $MACH9_VERSION's engine, built and checked by .github/workflows/gw2.yml for each push to gw2-on-mac. One asset of each kind per commit, ntdll-arm64-<full sha>.tar.xz, macdrv-arm64-<full sha>.tar.xz and mmdevapi-arm64-<full sha>.tar.xz; the 30 newest of each kind stay."
           fi
           id=$(gh api "repos/$GH_REPO/releases/tags/$RELEASE" -q .id)
-          for kind in ntdll macdrv; do
+          for kind in ntdll macdrv mmdevapi; do
             name="$kind-arm64-$COMMIT.tar.xz"
             uploaded=0
             # grep without -q, which would end the pipe early and fail it under pipefail

@@ -3,7 +3,7 @@
 Decided 2026-11-11. Status: accepted.
 
 Changed on 2026-11-27 by ADR 0024: the fork ships two drop-in files, `ntdll.so` and `winemac.so`. My
-`win32u.so` is gone.
+`win32u.so` is gone. Changed the same day by ADR 0025: a third, `mmdevapi.dll`, is a PE file.
 
 The 0.2 line of GW2 on Mac runs on Mach9, athei's arm64 Wine with FEX. My Wine changes for 0.1.x
 were patches against CrossOver 26.3's source and don't carry over. So this fork exists: a fork of

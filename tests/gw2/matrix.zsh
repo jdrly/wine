@@ -17,8 +17,9 @@
 #    program. Neither of the last two may write a counters file. The engine skips the programs in
 #    $engine_bugs, which show a bug of its file. mutexall stops at 20,000 wait-alls here, as in
 #    block 3, not after its 20 s. None runs leftover.exe, which fails its run on
-#    purpose (the workflow's step for jdrly/gw2-on-mac#128 runs it), or rundll.exe, which needs a
-#    compatdb rule to pass (the workflow's step for jdrly/gw2-on-mac#155 runs it).
+#    purpose (the workflow's step for jdrly/gw2-on-mac#128 runs it), rundll.exe, which needs a
+#    compatdb rule to pass (the workflow's step for jdrly/gw2-on-mac#155 runs it), or sessions.exe,
+#    which needs my mmdevapi.dll to pass (the workflow's step for jdrly/gw2-on-mac#387 runs it).
 # 3. (jdrly/gw2-on-mac#44) mutexall three runs under the engine's ntdll.so, each of which has to
 #    fail on the bug it shows, and three under mine, which have to pass 20,000 wait-alls each
 #    (GW2_TEST_WAIT_ALLS; the engine's runs keep mutexall's 20 s). The engine's three run unless
@@ -126,7 +127,7 @@ engine_bugs=(mutexall putback dlsuspend)
 quiet() {
   local name=$1 wine=$2 log=$3 left
   local -a programs=("$exes"/*.exe)
-  programs=(${programs:#*/(leftover|rundll).exe})
+  programs=(${programs:#*/(leftover|rundll|sessions).exe})
   shift 3
   [[ $wine == "$engine" ]] && programs=(${programs:#*/(${(~j:|:)engine_bugs}).exe})
   mkdir -p "$log"

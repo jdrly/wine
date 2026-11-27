@@ -12,7 +12,7 @@ decision takes the next free number.
 
 | ADR | Decided | Decision |
 |---|---|---|
-| [0001](0001-three-drop-in-files-on-athei-mach9-wine.md) | 2026-11-11 | The fork starts at Mach9 0.3.1's commit and builds three drop-in files, two since 0024. I don't build an engine. Nothing goes to athei or WineHQ. |
+| [0001](0001-three-drop-in-files-on-athei-mach9-wine.md) | 2026-11-11 | The fork starts at Mach9 0.3.1's commit and builds three drop-in files, two since 0024, and a PE one as well since 0025. I don't build an engine. Nothing goes to athei or WineHQ. |
 | [0002](0002-every-build-is-compared-with-the-engine-file-object-by-object.md) | 2026-11-11 | The baseline is held to the engine's file, and a patched build to the baseline per object through relocations. |
 | [0003](0003-the-fork-builds-on-xcode-27-with-a-structural-gate.md) | 2026-11-12 | `macos-26` runners stopped coming, so the build moved to Xcode 27 and the byte gate became a structural one. Narrows 0002. |
 | [0004](0004-every-change-is-off-unless-its-switch-is-set.md) | 2026-11-11 | Each change of behaviour is off unless its variable is set, and the heat switches act in `Gw2-64.exe` only. |
@@ -36,3 +36,4 @@ decision takes the next free number.
 | [0022](0022-the-yield-timer-wraps-swtch-in-sync-c.md) | 2026-11-26 | My yield timer moves into the macOS branch around `swtch()`, in `sync.c`, and `yield` stops counting sleeps above 0. |
 | [0023](0023-game-plus-halfworkers-splits-the-job-workers-in-one-session.md) | 2026-11-26 | `WINE_HEAT_SPIN`'s scope `:game+halfworkers` lets every other ABOVE_NORMAL thread spin, numbered by its first wait, and each thread's row says `spin 1` or `0`, so one session compares the two halves. |
 | [0024](0024-win32u-and-the-mac-driver-calls-are-dropped.md) | 2026-11-27 | My `win32u.so` and the Mac driver's four call switches go, code, switches and tests. The `macdrv` archive has `winemac.so` alone. |
+| [0025](0025-mmdevapi-dll-is-a-third-file-and-a-pe-one.md) | 2026-11-27 | My `mmdevapi.dll`, an ARM64X PE file, is a third file: session notifications register instead of failing, for Blish HUD. Checked by `pe.zsh`, published as `mmdevapi-arm64-<commit>`. |

@@ -1,13 +1,14 @@
 #!/bin/zsh
-# gw2 (jdrly/gw2-on-mac#40, #57, #61): build dlls/ntdll/ntdll.so, dlls/winemac.drv/winemac.so and
-# dlls/win32u/win32u.so the way Mach9 0.4.0's CI built the engine's (athei/mach9 at v0.4.0: bin/build-wine.sh,
-# bin/lib/profile.sh, .github/workflows/release.yml; Wine's configure there is v0.3.1's).
+# gw2 (jdrly/gw2-on-mac#40, #57, #61, #387): build dlls/ntdll/ntdll.so, dlls/winemac.drv/winemac.so,
+# dlls/win32u/win32u.so and the ARM64X dlls/mmdevapi/aarch64-windows/mmdevapi.dll the way Mach9
+# 0.4.0's CI built the engine's (athei/mach9 at v0.4.0: bin/build-wine.sh, bin/lib/profile.sh,
+# .github/workflows/release.yml; Wine's configure there is v0.3.1's).
 #
 #   wine.zsh prepare <commit>    check $SRC out at <commit> and give it the wine-11.21 tag
 #   wine.zsh checkout <commit>   move $SRC to another commit
 #   wine.zsh configure           configure a tree in $BUILD for $SRC
-#   wine.zsh build               build ntdll.so, winemac.so and win32u.so in $BUILD and check
-#                                ntdll.so's version string
+#   wine.zsh build               build ntdll.so, winemac.so, win32u.so and mmdevapi.dll in $BUILD
+#                                and check ntdll.so's version string
 #
 # $MINGW_DIR is llvm-mingw. $SRC is a clone of this repository with its whole history, as the workflow checks it out. $SRC
 # and $BUILD are the engine's own paths (its debug map names them), since the paths reach the
@@ -87,7 +88,8 @@ configure() {
 
 build() {
   local file=$BUILD/dlls/ntdll/ntdll.so commit=$(git -C "$SRC" rev-parse HEAD) version found hash
-  make -C "$BUILD" -j"$(sysctl -n hw.ncpu)" dlls/ntdll/ntdll.so dlls/winemac.drv/winemac.so dlls/win32u/win32u.so
+  make -C "$BUILD" -j"$(sysctl -n hw.ncpu)" dlls/ntdll/ntdll.so dlls/winemac.drv/winemac.so dlls/win32u/win32u.so \
+    dlls/mmdevapi/aarch64-windows/mmdevapi.dll
   # wine_build, from git describe (configure.ac's rule for dlls/ntdll/unix/version.c). It follows
   # a 16-byte table without a NUL, so strings prints the two as one.
   version=$(sed -n 's/^Wine version //p' "$SRC/VERSION")

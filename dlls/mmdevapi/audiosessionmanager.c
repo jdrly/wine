@@ -23,6 +23,8 @@
 #include <wine/list.h>
 
 #include "mmdevapi_private.h"
+/* gw2 (jdrly/gw2-on-mac#387) */
+#include "sessionnotify.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(mmdevapi);
 
@@ -177,6 +179,7 @@ struct session_mgr
     IAudioSessionManager2 IAudioSessionManager2_iface;
     IMMDevice *device;
     LONG ref;
+    struct list notifications; /* gw2 (jdrly/gw2-on-mac#387): sessionnotify.h's */
 };
 
 static inline struct session_mgr *impl_from_IAudioSessionManager2(IAudioSessionManager2 *iface)
@@ -221,7 +224,10 @@ static ULONG WINAPI ASM_Release(IAudioSessionManager2 *iface)
     TRACE("(%p) new ref %lu\n", This, ref);
 
     if (!ref)
+    {
+        session_notifications_release(&This->notifications); /* gw2 (jdrly/gw2-on-mac#387) */
         free(This);
+    }
 
     return ref;
 }
@@ -274,20 +280,22 @@ static HRESULT WINAPI ASM_GetSessionEnumerator(IAudioSessionManager2 *iface,
     return create_session_enumerator(This->device, out);
 }
 
+/* gw2 (jdrly/gw2-on-mac#387): the two calls keep the notification and drop it again
+ * (sessionnotify.h), where they answered E_NOTIMPL */
 static HRESULT WINAPI ASM_RegisterSessionNotification(IAudioSessionManager2 *iface,
                                                       IAudioSessionNotification *notification)
 {
     struct session_mgr *This = impl_from_IAudioSessionManager2(iface);
-    FIXME("(%p)->(%p) - stub\n", This, notification);
-    return E_NOTIMPL;
+    TRACE("(%p)->(%p)\n", This, notification);
+    return session_notification_add(&This->notifications, notification);
 }
 
 static HRESULT WINAPI ASM_UnregisterSessionNotification(IAudioSessionManager2 *iface,
                                                         IAudioSessionNotification *notification)
 {
     struct session_mgr *This = impl_from_IAudioSessionManager2(iface);
-    FIXME("(%p)->(%p) - stub\n", This, notification);
-    return E_NOTIMPL;
+    TRACE("(%p)->(%p)\n", This, notification);
+    return session_notification_remove(&This->notifications, notification);
 }
 
 static HRESULT WINAPI ASM_RegisterDuckNotification(IAudioSessionManager2 *iface,
@@ -332,6 +340,7 @@ HRESULT AudioSessionManager_Create(IMMDevice *device, IAudioSessionManager2 **pp
     This->IAudioSessionManager2_iface.lpVtbl = &AudioSessionManager2_Vtbl;
     This->device = device;
     This->ref = 1;
+    list_init(&This->notifications); /* gw2 (jdrly/gw2-on-mac#387) */
 
     *ppv = &This->IAudioSessionManager2_iface;
 

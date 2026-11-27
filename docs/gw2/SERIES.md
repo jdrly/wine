@@ -53,6 +53,7 @@ How to read the columns:
 | `macdrv-surface` | 1 | Cocoa gets a copy of each GDI window frame and no frame equal to the last (#14) | `WINE_MACDRV_SURFACE` (off) | shipped, unset (the *Launcher frames* row, off) | Release row, off. Dev list: the row on | On 0.1.x the same fix ended the launcher's blank frames and took `Gw2-64.exe` from 117 to 36% of a core (`launcher-fix-2026-10-28.md`). On 0.2 the row waits until I've looked at the launcher on three starts (#105) | **decide.** Never a default on 0.2. The open case is #105 |
 | `macdrv-mouse-scale` | 1 | A factor on the GameController mouse's counts (#18) | `WINE_MACDRV_MOUSE_SCALE` (1) | set while *Mouse-look speed* isn't 1 and *Raw mouse-look* is on | Release | A player's setting | **keep.** A release row writes it |
 | `macdrv-restore` | 1 | A restored window becomes the foreground window before it is activated (#31) | none | shipped, always on | no | #160. WineHQ has it as `ede017e2b24`, so it goes empty on a base that has that commit | **keep.** Always on |
+| `mmdevapi-sessions` | 1, after the table's head | `IAudioSessionManager2`'s session notifications register and unregister with `S_OK` instead of `E_NOTIMPL`, so NAudio doesn't throw from its finalizer and end Blish HUD (jdrly/gw2-on-mac#387). In `mmdevapi.dll`, my one PE file (ADR 0025) | none | not in 0.2.1 | not yet: the app installs no PE file of mine | Blish HUD's test 1 on 0.2 died within 5 s on the finalizer's `NotImplementedException` (workspace `advisor-plans/2026-11-27-blish-hud/TEST1.md`) | **keep.** Always on, a fix without a switch (ADR 0006) |
 | `kept-0.3.1-history` | 87 | athei's 34 commits of the 0.3.1 base and the 53 on them (50 mine, 3 of his fixes picked early), reachable under the merges | n/a | n/a | n/a | n/a | **keep as history.** Not replayed. Its content is in the 59 |
 | `engine-move-merges` | 2 | `9bcdcdd3048` and `5e7bde79c2a`, both with `d377654f9d1`'s tree | n/a | n/a | n/a | n/a | **keep as history.** No tree effect |
 
@@ -322,6 +323,7 @@ dlls/ntdll/unix/heatreq.[ch] counters
 dlls/ntdll/unix/heatdl.h dlopen-fix
 dlls/win32u/* win32u
 dlls/winemac.drv/macdrv_main.c macdrv-options
+dlls/mmdevapi/* mmdevapi-sessions
 ```
 
 ```series-order
@@ -342,6 +344,7 @@ macdrv-mouse-scale
 macdrv-calls
 macdrv-restore
 win32u
+mmdevapi-sessions
 tests
 docs
 ```
@@ -370,6 +373,7 @@ win32u win32u: My build of win32u.so, with switches for SetCursor from shared me
 tests Tests: The programs and the matrix under tests/gw2
 docs Docs: AGENTS.md, the switch and hook lists, MOVING.md, SERIES.md and the ADRs
 dlopen-fix ntdll: No suspend inside dyld's lock, and no virtual_mutex across dlopen
+mmdevapi-sessions mmdevapi: Session notifications register and unregister instead of failing
 ```
 
 ## Rules
