@@ -1,7 +1,9 @@
 # Moving to another Mach9 release
 
-My two files replace the engine's, so they have to be built from the commit the engine was
-built from, with the engine's configuration. This is the list of what moves when the engine does,
+My three files replace the engine's, so they have to be built from the commit the engine was
+built from, with the engine's configuration. The third, `mmdevapi.dll`, is a PE file
+(`docs/gw2/adr/0025`): `.github/gw2/pe.zsh` holds it to the engine's, not `compare.py`, and the
+engine's `llvm-mingw` (`LLVM_MINGW_VERSION`) builds it. This is the list of what moves when the engine does,
 in the order I'd do it. Line numbers drift, so it names what to search for instead.
 
 ## 1. The new engine's Wine commit
@@ -114,7 +116,8 @@ on its `gw2-on-mac`. In short:
   to bump together. The name, title, URL, the asset's API URL (its id), size and sha256 come from
   the release; the Wine, FEX and DXMT commits from the release page's Components list; the
   loader's, `ntdll.so`'s, `winemac.so`'s, `win32u.so`'s, `d3d11.dll`'s, `winemetal.so`'s and FEX's
-  hashes from the unpacked tarball. An old hash makes `engine_matches` refuse the new engine.
+  hashes from the unpacked tarball, and `aarch64-windows/mmdevapi.dll`'s once the app installs
+  mine. An old hash makes `engine_matches` refuse the new engine.
   `MACOS_MIN`, right after the block, follows the loader's `Info.plist`. Then the two `engine:`
   lines of `.github/workflows/checks.yml`; in `scripts/test-sandbox.sh`, `ENGINE_WINE`,
   `ENGINE_FEX` and every check that names the engine's tag, URL, size, sha256 or commits (search

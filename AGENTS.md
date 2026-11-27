@@ -1,9 +1,10 @@
 # jdrly/wine agent guidance
 
 This fork belongs to GW2 on Mac, my app for Guild Wars 2 on Apple Silicon. Its branch `gw2-on-mac`
-(the default) carries my changes to two files of athei's arm64 Wine, the engine of Mach9:
-`ntdll.so` and `winemac.so`. My app drops them into Mach9's engine in place of its own. Up to
-2026-11-27 there was a third, `win32u.so` (`docs/gw2/adr/0024`). The branch starts at athei/wine
+(the default) carries my changes to three files of athei's arm64 Wine, the engine of Mach9:
+`ntdll.so`, `winemac.so` and the PE file `mmdevapi.dll` (`docs/gw2/adr/0025`). My app drops the
+first two into Mach9's engine in place of its own, and doesn't install the third yet. Up to
+2026-11-27 there was a `win32u.so` as well (`docs/gw2/adr/0024`). The branch starts at athei/wine
 `501796b0ed1` (wine-11.21-54), the commit Mach9 0.4.0's engine was built from, which
 `.github/workflows/gw2.yml` names as `BASE_COMMIT`. Up to 2026-11-17 it started at `53def89293a`,
 Mach9 0.3.1's.

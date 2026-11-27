@@ -172,11 +172,20 @@ static HRESULT create_session_enumerator(IMMDevice *device, IAudioSessionEnumera
     return S_OK;
 }
 
+/* gw2 (jdrly/gw2-on-mac#387): a registered IAudioSessionNotification, held until it is
+ * unregistered or the manager goes */
+struct session_notification
+{
+    struct list entry;
+    IAudioSessionNotification *notification;
+};
+
 struct session_mgr
 {
     IAudioSessionManager2 IAudioSessionManager2_iface;
     IMMDevice *device;
     LONG ref;
+    struct list notifications; /* struct session_notification, under sessions_lock() */
 };
 
 static inline struct session_mgr *impl_from_IAudioSessionManager2(IAudioSessionManager2 *iface)
@@ -221,7 +230,16 @@ static ULONG WINAPI ASM_Release(IAudioSessionManager2 *iface)
     TRACE("(%p) new ref %lu\n", This, ref);
 
     if (!ref)
+    {
+        struct session_notification *cur, *next;
+
+        LIST_FOR_EACH_ENTRY_SAFE(cur, next, &This->notifications, struct session_notification, entry)
+        {
+            IAudioSessionNotification_Release(cur->notification);
+            free(cur);
+        }
         free(This);
+    }
 
     return ref;
 }
@@ -274,20 +292,61 @@ static HRESULT WINAPI ASM_GetSessionEnumerator(IAudioSessionManager2 *iface,
     return create_session_enumerator(This->device, out);
 }
 
+/* gw2 (jdrly/gw2-on-mac#387): the two calls keep the notification and drop it again, so a
+ * caller that fails on E_NOTIMPL goes on (NAudio throws from its finalizer). No
+ * OnSessionCreated event is sent: the manager never tells a notification about a new session. */
 static HRESULT WINAPI ASM_RegisterSessionNotification(IAudioSessionManager2 *iface,
                                                       IAudioSessionNotification *notification)
 {
     struct session_mgr *This = impl_from_IAudioSessionManager2(iface);
-    FIXME("(%p)->(%p) - stub\n", This, notification);
-    return E_NOTIMPL;
+    struct session_notification *entry;
+
+    TRACE("(%p)->(%p)\n", This, notification);
+
+    if (!notification)
+        return E_POINTER;
+    if (!(entry = malloc(sizeof(*entry))))
+        return E_OUTOFMEMORY;
+
+    IAudioSessionNotification_AddRef(notification);
+    entry->notification = notification;
+    sessions_lock();
+    list_add_tail(&This->notifications, &entry->entry);
+    sessions_unlock();
+
+    return S_OK;
 }
 
 static HRESULT WINAPI ASM_UnregisterSessionNotification(IAudioSessionManager2 *iface,
                                                         IAudioSessionNotification *notification)
 {
     struct session_mgr *This = impl_from_IAudioSessionManager2(iface);
-    FIXME("(%p)->(%p) - stub\n", This, notification);
-    return E_NOTIMPL;
+    struct session_notification *cur, *found = NULL;
+
+    TRACE("(%p)->(%p)\n", This, notification);
+
+    if (!notification)
+        return E_POINTER;
+
+    sessions_lock();
+    LIST_FOR_EACH_ENTRY(cur, &This->notifications, struct session_notification, entry)
+    {
+        if (cur->notification == notification)
+        {
+            list_remove(&cur->entry);
+            found = cur;
+            break;
+        }
+    }
+    sessions_unlock();
+
+    if (!found)
+        return E_INVALIDARG;
+
+    IAudioSessionNotification_Release(found->notification);
+    free(found);
+
+    return S_OK;
 }
 
 static HRESULT WINAPI ASM_RegisterDuckNotification(IAudioSessionManager2 *iface,
@@ -332,6 +391,7 @@ HRESULT AudioSessionManager_Create(IMMDevice *device, IAudioSessionManager2 **pp
     This->IAudioSessionManager2_iface.lpVtbl = &AudioSessionManager2_Vtbl;
     This->device = device;
     This->ref = 1;
+    list_init(&This->notifications);
 
     *ppv = &This->IAudioSessionManager2_iface;
 
