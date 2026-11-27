@@ -2,6 +2,9 @@
 
 Decided 2026-11-16. Status: accepted.
 
+Changed on 2026-11-27 by ADR 0024: `selection.env` has no `WIN32U`, a change under `dlls/win32u`
+sets `WINEMAC`, and block 7 is gone.
+
 Every pull request ran the whole tests job, about 22 of its 28 runner minutes, 17 of them in the
 ntdll matrix, whatever it changed. One that changed only the Mac driver spent 1,045 s in the matrix,
 and one that changed only a CI script 1,009 s. GitHub has disabled this fork's workflows once for

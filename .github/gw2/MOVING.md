@@ -1,6 +1,6 @@
 # Moving to another Mach9 release
 
-My three files replace the engine's, so they have to be built from the commit the engine was
+My two files replace the engine's, so they have to be built from the commit the engine was
 built from, with the engine's configuration. This is the list of what moves when the engine does,
 in the order I'd do it. Line numbers drift, so it names what to search for instead.
 
@@ -64,12 +64,13 @@ first table of `UPSTREAM.md` as the list of hooks to carry over. Then each of th
   the sampler's test.
 - The tests that have to fail under the engine's own file, on a bug my file fixes: `engine_bugs` in
   `tests/gw2/matrix.zsh`, and the workflow's steps that run a program under `$RUNNER_TEMP/engine`
-  or the engine's `win32u.so` and expect it to fail. For every fix the new base has, that run
+  and expect it to fail. For every fix the new base has, that run
   passes now, so it goes. At 0.4.0 that was modeset.exe (#159) and attach.exe (#174). A step left
   testing only code the new base has goes too: both steps, with their programs, went in #323.
 - Hooks that applied without a conflict into code athei changed. Read his diff of every file in
   the first table of `UPSTREAM.md`. At 0.4.0 his remote layers became views a client surface can be
-  ordered under, so `WINE_MACDRV_VIEW`'s serial had to change with them too.
+  ordered under, so `WINE_MACDRV_VIEW`'s serial had to change with them too (the switch is gone
+  since #374).
 
 ## 3b. The pull request of a rebase
 

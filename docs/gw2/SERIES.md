@@ -3,7 +3,9 @@
 - Fork: jdrly/wine, branch `gw2-on-mac`.
 - Base: athei/wine `501796b0ed1` (wine-11.21-54), the commit Mach9 0.4.0's engine was built from,
   with the lightweight tag `engine-0.4.0`.
-- Head the topic table was written against: `c8d41f337ee` (#55), 2026-11-26.
+- Head the topic table was written against: `c8d41f337ee` (#55), 2026-11-26. #56 to #59 came
+  after it and have their lines in `series-topics`, and two topics were dropped on 2026-11-27
+  (below).
 - Series branch: `series/2026-11-26`.
 
 The workspace's ADR 0015 makes each of my forks a curated patch series. This file is the series of
@@ -13,7 +15,8 @@ commits into one or a few commits per topic on a `series/…` branch. That branc
 
 148 commits are in `501796b0ed1..c8d41f337ee`. 59 are what I carry on the engine's commit. The
 other 89 are the 0.3.1 line, which the move to 0.4.0 kept reachable under a merge, and the two
-merges of that move.
+merges of that move. The counts below are those 148: the four commits after them and the drop's
+commit aren't in the table.
 
 ## Topics
 
@@ -34,7 +37,7 @@ How to read the columns:
 
 | Topic | Commits | What it does | Switches (fork default) | 0.2.1 | App | Evidence | Verdict |
 |---|---|---|---|---|---|---|---|
-| `ci` | 18 | The `GW2` workflow: builds my three files on the engine's commit, compares each object with the engine's file, publishes the assets, and decides which tests a change runs. Since #323 a pull request picks blocks 4 to 6 and the two broken builds by the paths it changes (ADR 0012), one with only Markdown builds nothing, and every push runs every test | none | not in use | no | n/a | **keep.** CI |
+| `ci` | 18 | The `GW2` workflow: builds my two files on the engine's commit, compares each object with the engine's file, publishes the assets, and decides which tests a change runs. Since #323 a pull request picks blocks 4 to 6 and the two broken builds by the paths it changes (ADR 0012), one with only Markdown builds nothing, and every push runs every test | none | not in use | no | n/a | **keep.** CI |
 | `tests` | 11 | Commits made for `tests/gw2`, most of them with CI or doc lines as well: the leftover-process check, arcdps's crash window through `rundll32`, the mode-set and debugger-attach tests (gone in #323: both fixes are the engine's own since 0.4.0), and how the matrix runs | none | not in use | no | n/a | **keep.** Tests |
 | `docs` | 4 | `AGENTS.md`, `SWITCHES.md`, `UPSTREAM.md`, `MOVING.md`, this file and the ADRs. The backfill brought 0001 to 0014 and 0017. The other ADRs came with their pull requests, and the rules put them here | none | not in use | no | n/a | **keep.** Docs |
 | `engine-pins` | 1 | `f709c4cc012`: the values tied to Mach9 0.4.0 (`BASE_COMMIT`, the FEX pin of the sampler, the request list, the tests that must fail under the engine's file) | none | shipped | no | n/a | **keep.** Each move writes it again, per `MOVING.md` section 3 |
@@ -49,21 +52,37 @@ How to read the columns:
 | `upstream-picks` | 1 | Four upstream changes ahead of athei's next base (#55): athei's `5466044` turns AutoFill off for the input context, WineHQ's `dedead4` compiles the Rosetta workaround for x86_64 only, `53ba24d` yields with `swtch()`, and `48d67d3` makes a finite, nonzero sleep that isn't alertable a `nanosleep`, without the yield and `select()` before it. My yield timer moves into the `swtch()` branch with them (ADR 0022) | none | not in 0.2.1 | no | ADR 0021: the game thread yields 336 times a second at 0.31 µs, so `swtch()` can't save more than 0.1 ms a second. My trace of 2026-11-20 has a `com.apple.SafariPlatformSupport.Helper` next to the game, which AutoFill starts | **keep.** Always on. A pick the new base has goes empty at the next move. The timer's move doesn't, it stays with my hook |
 | `macdrv-surface` | 1 | Cocoa gets a copy of each GDI window frame and no frame equal to the last (#14) | `WINE_MACDRV_SURFACE` (off) | shipped, unset (the *Launcher frames* row, off) | Release row, off. Dev list: the row on | On 0.1.x the same fix ended the launcher's blank frames and took `Gw2-64.exe` from 117 to 36% of a core (`launcher-fix-2026-10-28.md`). On 0.2 the row waits until I've looked at the launcher on three starts (#105) | **decide.** Never a default on 0.2. The open case is #105 |
 | `macdrv-mouse-scale` | 1 | A factor on the GameController mouse's counts (#18) | `WINE_MACDRV_MOUSE_SCALE` (1) | set while *Mouse-look speed* isn't 1 and *Raw mouse-look* is on | Release | A player's setting | **keep.** A release row writes it |
-| `macdrv-calls` | 2 | Nothing goes to the Cocoa main thread for an unchanged view or cursor clip, and a synchronous call wakes its caller without a byte in the event pipe (#23, and the serial fix for 0.4.0) | `WINE_MACDRV_VIEW`, `WINE_MACDRV_CLIP`, `WINE_MACDRV_CALL`, `WINE_MACDRV_DRAIN` (all off) | shipped, unset | Dev list: all four | In its test, 999 extra requests in 1,000 clips became 0 (`plans/night/2026-11-12-report.md`). No session number. My cursor note says these calls "cost time in the process and nothing on the cursor" (`arm64-cursor-present-2026-11-12.md`) | **decide.** Never a default, no result in play |
 | `macdrv-restore` | 1 | A restored window becomes the foreground window before it is activated (#31) | none | shipped, always on | no | #160. WineHQ has it as `ede017e2b24`, so it goes empty on a base that has that commit | **keep.** Always on |
-| `win32u` | 1 | My build of `win32u.so`, where `SetCursor` answers an unchanged cursor from shared memory, and with `WINE_WIN32U_PEEK_YIELD=off` an empty `PeekMessage` doesn't yield (#20) | `WINE_WIN32U_SETCURSOR`, `WINE_WIN32U_PEEK_YIELD` (both off) | shipped, unset | Dev list: both | No number in play. It is the only reason I build `win32u.so`, and that file is the first place the next Wine base meets: it reads `window_shm_t` and fills `monitor_info`, whose layouts change four times past 11.21 (`upstream-watch-triage-2026-11-25.md`) | **decide.** Never a default. If it goes, `win32u.so` leaves the build, the compare and the app's driver set |
 | `kept-0.3.1-history` | 87 | athei's 34 commits of the 0.3.1 base and the 53 on them (50 mine, 3 of his fixes picked early), reachable under the merges | n/a | n/a | n/a | n/a | **keep as history.** Not replayed. Its content is in the 59 |
 | `engine-move-merges` | 2 | `9bcdcdd3048` and `5e7bde79c2a`, both with `d377654f9d1`'s tree | n/a | n/a | n/a | n/a | **keep as history.** No tree effect |
 
-Sum: 18 + 11 + 4 + 1 + 2 + 4 + 2 + 2 + 3 + 1 + 3 + 1 + 1 + 1 + 1 + 2 + 1 + 1 + 87 + 2 = 148.
+Sum: 18 + 11 + 4 + 1 + 2 + 4 + 2 + 2 + 3 + 1 + 3 + 1 + 1 + 1 + 1 + 87 + 2 = 145, and the 3 commits
+of the two dropped topics below make 148.
+
+### Dropped
+
+A dropped topic's commits stay in `gw2-on-mac`'s history. The commit that drops it takes the
+topic's name in `series-topics`, so the topic's series commit adds and removes the same lines and
+comes out empty, and a replay has nothing of it to pick. Its CI, test and doc lines go the same way
+through the rules.
+
+| Topic | Commits | Dropped | What it did | Why | The drop's commit |
+|---|---|---|---|---|---|
+| `macdrv-calls` | 2 | 2026-11-27, jdrly/gw2-on-mac#374 (ADR 0024) | Nothing went to the Cocoa main thread for an unchanged view or cursor clip, and a synchronous call woke its caller without a byte in the event pipe (#23, jdrly/gw2-on-mac#62). `WINE_MACDRV_VIEW`, `_CLIP`, `_CALL`, `_DRAIN` | With the switches off, the view update is 0.6 ms of the game thread a second, and `macdrv_ClipCursor` has no sample. The stall it was written for was never measured | takes `macdrv-calls`. Its line goes into `series-topics` when the series is next rebuilt |
+| `win32u` | 1 | 2026-11-27, jdrly/gw2-on-mac#374 (ADR 0024) | My build of `win32u.so`: `SetCursor` answered an unchanged cursor from shared memory, and an empty `PeekMessage` could skip its yield (#20, jdrly/gw2-on-mac#61). `WINE_WIN32U_SETCURSOR`, `WINE_WIN32U_PEEK_YIELD` | With the switch off, the cursor requests show no sample in 20.5 s. It was a third file in every process, and the one the next base changes first | the same commit. The rule `dlls/win32u/* win32u` puts its `dlls/win32u` lines in this topic |
+
+Left out together, the two replay clean onto `501796b0ed1`: 19 series commits clean and 2 left out,
+tree `ffa1a39f6d22`, which is `94c8b311781` with the two topics' series commits reverted. The
+drop's commit is that tree's source, plus the switch lines in `macdrv_main.c` and the tests, CI
+and docs of both.
 
 The research notes named in the table are in my workspace's `docs/research/`.
 
 ### For me to decide
 
-No Wine topic is a proposed drop. Five are open: `spins` and `macdrv-surface` (both wait for
-#105's session), `macdrv-calls`, `win32u` (with it goes my build of `win32u.so`), and `sampler`
-(I'd keep it while #175 and #176 are open).
+No Wine topic is a proposed drop. Three are open: `spins` and `macdrv-surface` (both wait for
+#105's session) and `sampler` (I'd keep it while #175 and #176 are open). `macdrv-calls` and
+`win32u` were dropped on 2026-11-27.
 
 ### What a drop costs
 
@@ -278,6 +297,10 @@ cc8f1a453d1bca0147cc34e39d9e77b5c3b1afe1 kept-0.3.1-history
 b4937621f4e5a045955074d0d64e163569556a2c tests
 63f5aa66d5d14b07e390f962b7089693749436ab tests
 c8d41f337ee063ff063697d7c23d4e1a191292b0 upstream-picks
+f774ec8f6fb111ec0150df18ca28f8a2625b2efe docs
+4722e8f3981770d8c9d30f1dad55a1fb69211845 ci
+75369d439255bd34628e6208bab5ec254e82b832 counters
+94c8b311781a3f35aae33bc5574a018986a4bb2f spins
 ```
 
 ```series-rules
@@ -297,6 +320,7 @@ dlls/ntdll/unix/heatprof.[ch] sampler
 dlls/ntdll/unix/heatfex.h sampler
 dlls/ntdll/unix/heatreq.[ch] counters
 dlls/ntdll/unix/heatdl.h dlopen-fix
+dlls/win32u/* win32u
 dlls/winemac.drv/macdrv_main.c macdrv-options
 ```
 
@@ -328,7 +352,7 @@ engine-move-merges
 ```
 
 ```series-titles
-ci CI: The GW2 workflow builds my three files on the engine's commit and checks them against the engine's
+ci CI: The GW2 workflow builds my two files on the engine's commit and checks them against the engine's
 heat-core Heat core: The switch parser, the process filter and the hooks' shared state
 job-wakes Job wakes: A semaphore release makes fewer wake calls, and can skip them without a waiter
 msync-fixes msync: My fixes to athei's msync, without a switch

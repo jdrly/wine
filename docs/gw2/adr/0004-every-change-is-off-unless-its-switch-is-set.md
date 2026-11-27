@@ -2,6 +2,9 @@
 
 Decided 2026-11-11. Status: accepted.
 
+Changed on 2026-11-27 by ADR 0024: no switch is read in win32u any more, and Lint knows only
+`WINE_HEAT_*` and `WINE_MACDRV_*`.
+
 My three files replace the engine's for every process it starts, Steam and the launcher included. So
 each change of behaviour sits behind an environment variable that is off unless set and is read
 once. The `WINE_HEAT_*` ones act only in the process that `WINE_HEAT_EXE` names, which is

@@ -4,8 +4,8 @@ Every line of mine in a file that athei's Wine has is a possible conflict when I
 newer engine, so a rebase starts here, and so does `MOVING.md`. A change that adds or removes a
 line of mine in an upstream file changes its row in this file.
 
-My own files (`dlls/ntdll/unix/heat*`, `dlls/winemac.drv/cocoa_calls.h`, `gcmouse_scale.h`,
-`surface_frame.h`) aren't listed. Issue numbers are in jdrly/gw2-on-mac. To list the hunks:
+My own files (`dlls/ntdll/unix/heat*`, `dlls/winemac.drv/gcmouse_scale.h`, `surface_frame.h`)
+aren't listed. Issue numbers are in jdrly/gw2-on-mac. To list the hunks:
 
 ```zsh
 git diff 501796b0ed1 HEAD -U0 -- dlls server include | grep -E '^(diff --git|@@)'
@@ -14,7 +14,7 @@ git diff 501796b0ed1 HEAD -U0 -- dlls server include | grep -E '^(diff --git|@@)
 ## Hooks
 
 Calls into my files and the state they need. The Switch column names the switch each serves,
-without its `WINE_HEAT_`, `WINE_MACDRV_` or `WINE_` prefix.
+without its `WINE_HEAT_` or `WINE_MACDRV_` prefix.
 
 | File | Function | What the hook does | Switch | Issue |
 |---|---|---|---|---|
@@ -46,18 +46,7 @@ without its `WINE_HEAT_`, `WINE_MACDRV_` or `WINE_` prefix.
 | `dlls/ntdll/unix/thread.c` | `pthread_exit_wrapper`, `spawn_thread` | Keeps the sampler's list of threads | `PROF` | #43 |
 | `dlls/ntdll/unix/thread.c` | `set_native_thread_name` | Gives the counters the thread's name | `COUNT` | #99 |
 | `dlls/ntdll/unix/thread.c` | `NtSetInformationThread` | Records the base priority a thread sets for itself, for the spin's scope | `SPIN` | #45 |
-| `dlls/win32u/cursoricon.c` | `setcursor_shm`, `NtUserSetCursor` | Reads the switch, then answers an unchanged cursor from shared memory | `WIN32U_SETCURSOR` | #61 |
-| `dlls/win32u/message.c` | `peek_no_yield`, `NtUserPeekMessage` | Reads the switch, then leaves out the empty peek's yield | `WIN32U_PEEK_YIELD` | #61 |
-| `dlls/winemac.drv/macdrv_main.c` | includes, globals, `switch_is`, `setup_options` | Reads every `WINE_MACDRV_*` | all `WINE_MACDRV_*` | #57, #59, #62 |
-| `dlls/winemac.drv/macdrv.h` | `struct macdrv_client_surface` | What a surface's last update sent to its view | `VIEW` | #62 |
-| `dlls/winemac.drv/window.c` | `client_view_serial`, `client_views_changed`, `create_cocoa_window`, `destroy_cocoa_window`, `macdrv_client_surface_detach`, `add_remote_layer`, `remove_remote_layer`, `macdrv_DestroyWindow` | A serial that changes when a Cocoa window, a client view or a remote layer comes or goes | `VIEW` | #62, #166 |
-| `dlls/winemac.drv/window.c` | `macdrv_client_surface_update` | Sends the view's frame and superview only when they changed | `VIEW` | #62 |
-| `dlls/winemac.drv/mouse.c` | the clip record, `macdrv_ClipCursor` | Leaves out a call for the rectangle applied last | `CLIP` | #62 |
-| `dlls/winemac.drv/cocoa_cursorclipping.m` | `clipping_changed`, `scale_rect_for_retina_mode`, both classes' `startClippingCursor` and `stopClippingCursor` | Bumps `clip_serial` on every change of the clipping | `CLIP` | #62 |
-| `dlls/winemac.drv/event.c` | `macdrv_handle_event` | A display change bumps `clip_serial` | `CLIP` | #62 |
-| `dlls/winemac.drv/event.c` | `check_fd_events` | Asks the pipe for its byte count | `DRAIN` | #62 |
-| `dlls/winemac.drv/cocoa_event.m` | `initWithEventHandler` | Adds a user event to the queue's kqueue | `CALL` | #62 |
-| `dlls/winemac.drv/cocoa_event.m` | `run_on_main_thread` (`OnMainThread` up to Mach9 0.3.1) | Wakes the caller through the kqueue, and leaves one byte in the pipe only for a waiting event | `CALL` | #62 |
+| `dlls/winemac.drv/macdrv_main.c` | includes, globals, `setup_options` | Reads every `WINE_MACDRV_*` | all `WINE_MACDRV_*` | #57, #59 |
 | `dlls/winemac.drv/cocoa_gcmouse.m` | `gcmouse_post_movement`, `gcmouse_moved` | Scales the counts through `gcmouse_scale.h` and carries the fractions | `MOUSE_SCALE` | #59 |
 | `dlls/winemac.drv/surface.c` | `struct macdrv_window_surface`, `macdrv_surface_flush`, `macdrv_surface_destroy` | Hands Cocoa a copy of the frame, skips an equal one, and counts flushes on the `macsurface` channel | `SURFACE` | #57 |
 
