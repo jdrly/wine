@@ -595,7 +595,8 @@ jobs:
               fi
               case $lib in
                 ntdll) paths=(dlls/ntdll include server tools) ;;
-                winemac) paths=(dlls/winemac.drv include) ;;
+                # winemac.so links against win32u.so, and ratio.c tests dlls/win32u/sysparams.c
+                winemac) paths=(dlls/winemac.drv dlls/win32u include) ;;
               esac
               names=$(changed "$FORK" "${paths[@]}")
               if ! grep -qx "result: $lib.so moved=0 changed=0 new=0 gone=0" "$RUNNER_TEMP/fork-$lib.md"; then

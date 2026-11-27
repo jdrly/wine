@@ -2,6 +2,8 @@
 
 Decided 2026-11-16. Status: accepted.
 
+Changed on 2026-11-27 by ADR 0024: the clip step and block 7 are gone.
+
 With `WINE_HEAT_COUNT=1` a dumper thread writes the counters to `heat-<pid>.log` every 5 s. It
 opened the log with `O_TRUNC` and then wrote, so a read in between found an empty or short file.
 That showed when the tests got a shorter dump period: `wakes.exe` read the log between the two calls

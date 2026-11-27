@@ -39,6 +39,8 @@ it.
   (ADR 0016).
 - `ratio.c` (#159) stays. It tests `make_ratio()` in `dlls/win32u/sysparams.c`, which is athei's
   code now, so it runs with every window lane: a new base that brings the abort back shows there.
+  A change under `dlls/win32u` sets `WINEMAC`, so a pull request that touches `sysparams.c` gets
+  that lane. `winemac.so` links against `win32u.so` anyway.
 - `compare.py` keeps its support for a library whose objects sit in subdirectories, unused, and its
   test of the debug map's names for them. Taking it out would touch the code every compare runs.
 - My app needs its `DEV_GONE` rows for the six variables before this merges (#373). A driver build

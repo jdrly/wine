@@ -3,6 +3,9 @@
 Decided 2026-11-17. Status: accepted, changed on 2026-11-20 by jdrly/gw2-on-mac #323 (the last
 consequence).
 
+Changed on 2026-11-27 by ADR 0024: `selection.env` has no `WIN32U`, and a change runs the
+tests of my two files.
+
 ADR 0012 made a pull request run only the tests its change can reach, but any byte under
 `tests/gw2` or `.github` set `TESTS=1` and ran everything. In the seven pull requests after it, six
 touched one of the two, and none skipped a matrix block. Pull request #40 changed three Markdown
