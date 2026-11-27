@@ -25,19 +25,8 @@
 #import "cocoa_app.h"
 #import "cocoa_cursorclipping.h"
 #import "cocoa_window.h"
-#import "cocoa_calls.h"
 
 #pragma GCC diagnostic ignored "-Wdeclaration-after-statement"
-
-
-/* GW2 on Mac (WINE_MACDRV_CLIP=changes): every change of a handler's clipping or rectangle bumps
-   clip_serial, so ClipCursor's record of the rectangle it applied last (mouse.c) no longer holds. */
-unsigned int clip_serial;
-
-static void clipping_changed(void)
-{
-    __atomic_fetch_add(&clip_serial, 1, __ATOMIC_RELEASE);
-}
 
 
 /* Neither Quartz nor Cocoa has an exact analog for Win32 cursor clipping.
@@ -122,7 +111,6 @@ static void scale_rect_for_retina_mode(BOOL mode, CGRect *cursorClipRect)
     cursorClipRect->origin.y *= scale;
     cursorClipRect->size.width *= scale;
     cursorClipRect->size.height *= scale;
-    clipping_changed();
 }
 
 
@@ -368,7 +356,6 @@ static void scale_rect_for_retina_mode(BOOL mode, CGRect *cursorClipRect)
 
         clippingCursor = TRUE;
         cursorClipRect = rect;
-        clipping_changed();
 
         CGEventTapEnable(cursorClippingEventTap, TRUE);
 
@@ -382,7 +369,6 @@ static void scale_rect_for_retina_mode(BOOL mode, CGRect *cursorClipRect)
             return FALSE;
 
         clippingCursor = FALSE;
-        clipping_changed();
 
         CGEventTapEnable(cursorClippingEventTap, FALSE);
         [warpRecords removeAllObjects];
@@ -495,7 +481,6 @@ static void scale_rect_for_retina_mode(BOOL mode, CGRect *cursorClipRect)
         clippingWindowNumber = ownerWindow.windowNumber;
         cursorClipRect = rect;
         clippingCursor = TRUE;
-        clipping_changed();
 
         return TRUE;
     }
@@ -506,7 +491,6 @@ static void scale_rect_for_retina_mode(BOOL mode, CGRect *cursorClipRect)
         [ownerWindow setMouseConfinementRect:NSZeroRect];
 
         clippingCursor = FALSE;
-        clipping_changed();
 
         return TRUE;
     }

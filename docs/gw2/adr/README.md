@@ -12,7 +12,7 @@ decision takes the next free number.
 
 | ADR | Decided | Decision |
 |---|---|---|
-| [0001](0001-three-drop-in-files-on-athei-mach9-wine.md) | 2026-11-11 | The fork starts at Mach9 0.3.1's commit and builds three drop-in files. I don't build an engine. Nothing goes to athei or WineHQ. |
+| [0001](0001-three-drop-in-files-on-athei-mach9-wine.md) | 2026-11-11 | The fork starts at Mach9 0.3.1's commit and builds three drop-in files, two since 0024. I don't build an engine. Nothing goes to athei or WineHQ. |
 | [0002](0002-every-build-is-compared-with-the-engine-file-object-by-object.md) | 2026-11-11 | The baseline is held to the engine's file, and a patched build to the baseline per object through relocations. |
 | [0003](0003-the-fork-builds-on-xcode-27-with-a-structural-gate.md) | 2026-11-12 | `macos-26` runners stopped coming, so the build moved to Xcode 27 and the byte gate became a structural one. Narrows 0002. |
 | [0004](0004-every-change-is-off-unless-its-switch-is-set.md) | 2026-11-11 | Each change of behaviour is off unless its variable is set, and the heat switches act in `Gw2-64.exe` only. |
@@ -27,7 +27,7 @@ decision takes the next free number.
 | [0013](0013-a-push-repeats-the-tests-only-when-no-green-pull-request-ran-them.md) | 2026-11-12, guarded 2026-11-16 | A push skipped the matrix only when a green pull request ran on the same tree. Superseded by #323: every push runs every test. |
 | [0014](0014-the-project-rules-that-bind-this-fork.md) | recorded 2026-11-17 | The project-wide rules in a sentence each, pointing to the workspace ADRs. |
 | [0015](0015-a-pull-request-that-changes-only-docs-skips-the-tests.md) | 2026-11-17 | A pull request that changes only docs runs the smoke test. Since #323 it builds nothing, and any change under `tests/gw2` or `.github` sets `TESTS` again. |
-| [0016](0016-the-tests-run-as-three-lanes.md) | 2026-11-17 | The tests run as three lanes side by side, and block 7 goes with the window steps. |
+| [0016](0016-the-tests-run-as-three-lanes.md) | 2026-11-17 | The tests run as three lanes side by side, and block 7 goes with the window steps. Block 7 is gone since 0024. |
 | [0017](0017-a-pull-request-whose-head-is-behind-stops-at-once.md) | 2026-11-17 | A pull request whose merge tree differs from its head's fails in its first minute and asks for a rebase. |
 | [0018](0018-the-wake-skip-decides-by-msync-reference-count-alone.md) | 2026-11-17 | The wake skip decides by msync's reference count and my own sleepers, without the private mark. The put-back never skips. |
 | [0019](0019-a-pull-request-configures-from-kept-answers.md) | 2026-11-17 | A pull request's configure starts from `config.cache` kept under a key that names its inputs. A push asks everything again, fails if its answers differ, and fills the cache. |
@@ -35,3 +35,4 @@ decision takes the next free number.
 | [0021](0021-upstream-picks-ahead-of-the-engine-have-no-switch.md) | 2026-11-26 | athei's AutoFill fix and WineHQ's yield, sleep and Rosetta changes come in as unchanged picks, always on, like the fixes of 0006. |
 | [0022](0022-the-yield-timer-wraps-swtch-in-sync-c.md) | 2026-11-26 | My yield timer moves into the macOS branch around `swtch()`, in `sync.c`, and `yield` stops counting sleeps above 0. |
 | [0023](0023-game-plus-halfworkers-splits-the-job-workers-in-one-session.md) | 2026-11-26 | `WINE_HEAT_SPIN`'s scope `:game+halfworkers` lets every other ABOVE_NORMAL thread spin, numbered by its first wait, and each thread's row says `spin 1` or `0`, so one session compares the two halves. |
+| [0024](0024-win32u-and-the-mac-driver-calls-are-dropped.md) | 2026-11-27 | My `win32u.so` and the Mac driver's four call switches go, code, switches and tests. The `macdrv` archive has `winemac.so` alone. |

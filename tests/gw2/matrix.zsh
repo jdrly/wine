@@ -2,16 +2,14 @@
 # gw2 (jdrly/gw2-on-mac#40): the test programs under the engine's ntdll.so and mine, in each
 # WINE_HEAT_WAKE mode, with tests/gw2/run.zsh.
 #
-#   matrix.zsh <engine-wine> <my-wine> <exe-dir> <work-dir> [<win32u-wine>]
+#   matrix.zsh <engine-wine> <my-wine> <exe-dir> <work-dir>
 #
-# <win32u-wine> is the engine with my ntdll.so and my win32u.so, when the build ships one.
 # 1. wakes.exe under mine, as WINE_HEAT_EXE with WINE_HEAT_COUNT=1, in each mode (off, one, skip,
 #    one,skip), one run each with test 13's minute of producing. The modes run side by side, each
 #    in a prefix of its own. Up to jdrly/gw2-on-mac#323 each mode had two more runs of 20 s.
 #    Blocks 1, 1b, 3 and 4 set WINE_HEAT_DUMP_MS=500, so their programs wait 1.5 s for the
-#    counters, not 6. Block 6's requests runs and block 7 set 1000: requests.exe makes its calls
-#    in about 0.1 s, which can still fall in two blocks, and peekyield.exe waits for five rewrites
-#    a run.
+#    counters, not 6. Block 6's requests runs set 1000: requests.exe makes its calls in about
+#    0.1 s, which can still fall in two blocks.
 # 1b. evpool.exe under mine, as WINE_HEAT_EXE with WINE_HEAT_COUNT=1, with WINE_HEAT_EVPOOL off, 1
 #    and 1,mask, three runs each, side by side (jdrly/gw2-on-mac#42).
 # 2. Every program once more, side by side: under the engine's ntdll.so; under mine with no
@@ -47,12 +45,8 @@
 #    FEX_PROFILESTATS=1 (jdrly/gw2-on-mac#111). Beside it, (jdrly/gw2-on-mac#99) timers three runs
 #    under mine with counting, and (jdrly/gw2-on-mac#111) prof under that clone with the sampler and
 #    no WINE_HEAT_PROF_FEX, where the sampler has to refuse the FEX.
-# 7. (jdrly/gw2-on-mac#61) with <win32u-wine>: setcursor, then requests and peekyield with
-#    counting, under the engine's win32u.so with WINE_WIN32U_SETCURSOR=shm and
-#    WINE_WIN32U_PEEK_YIELD=off, and under mine with neither, with only the first and with only the
-#    second. Only mine leaves the repeated cursor's requests out (GW2_TEST_SETCURSOR_SKIPS=1) or
-#    the empty peek's yield (GW2_TEST_PEEK_NO_YIELD=1), each with its own switch. Block 2 ran
-#    setcursor and peekyield under the engine's win32u.so with neither set.
+# 7. Gone with my win32u.so on 2026-11-27 (jdrly/gw2-on-mac#374, docs/gw2/adr/0024). It ran
+#    setcursor, requests and peekyield under my win32u.so with its switches.
 # 8. (jdrly/gw2-on-mac#101) timeout three runs under the engine's ntdll.so and three under mine.
 # Prints each run's lines and exits 1 if any failed. A run under the engine's ntdll.so that has to
 # fail, or only reports, passes GW2_TEST_EXPECT_FAIL=programs to run.zsh, which then prints
@@ -61,22 +55,21 @@
 # which have to lose a race to pass: the workflow sets it when the change leaves MACH9_VERSION,
 # msync.c, both programs and this script and run.zsh alone (jdrly/gw2-on-mac#324,
 # docs/gw2/adr/0009).
-# GW2_MATRIX_BLOCKS picks the blocks: "ntdll" for 1 to 6 and 8, "win32u" for 7; both by default.
-# In place of "ntdll" it takes the blocks' own names, 1, 1b, 2, 3, 3b, 4, 5, 6 and 8, for the
-# workflow's lanes. 6 needs 5 named with it: it runs under the clone block 5 makes. The workflow
-# names 4, 5 and 6 only when its HEAT is 1 (jdrly/gw2-on-mac#323).
+# GW2_MATRIX_BLOCKS picks the blocks: "ntdll" for 1 to 6 and 8, the default, or the blocks' own
+# names, 1, 1b, 2, 3, 3b, 4, 5, 6 and 8, for the workflow's lanes. 6 needs 5 named with it: it
+# runs under the clone block 5 makes. The workflow names 4, 5 and 6 only when its HEAT is 1
+# (jdrly/gw2-on-mac#323).
 emulate -L zsh
 setopt err_exit pipe_fail no_unset extended_glob
 
-(( $# == 4 || $# == 5 )) || { print -u2 "usage: matrix.zsh <engine-wine> <my-wine> <exe-dir> <work-dir> [<win32u-wine>]"; exit 2 }
-engine=${1:A} mine=${2:A} exes=${3:A} work=${4:A} win32u=${5:+${5:A}}
+(( $# == 4 )) || { print -u2 "usage: matrix.zsh <engine-wine> <my-wine> <exe-dir> <work-dir>"; exit 2 }
+engine=${1:A} mine=${2:A} exes=${3:A} work=${4:A}
 run=${0:A:h}/run.zsh
 mkdir -p "$work"
 integer failed=0
-# GW2_MATRIX_BLOCKS: which blocks run, "ntdll" (1 to 6 and 8) or their own names, and "win32u"
-# (7). Both by default. Each of the workflow's lanes names its own blocks, and none of the ntdll
-# ones for a pull request that doesn't change my ntdll.so.
-blocks=(${=GW2_MATRIX_BLOCKS-ntdll win32u})
+# GW2_MATRIX_BLOCKS: which blocks run, "ntdll" (1 to 6 and 8, the default) or their own names.
+# Each of the workflow's matrix lanes names its own blocks.
+blocks=(${=GW2_MATRIX_BLOCKS-ntdll})
 engine_bugs_run=${GW2_MATRIX_ENGINE_BUGS:-1}
 [[ $engine_bugs_run == [01] ]] || { print -u2 "matrix.zsh: GW2_MATRIX_ENGINE_BUGS is 0 or 1, not $engine_bugs_run"; exit 2 }
 pids=() names=()
@@ -85,7 +78,7 @@ pids=() names=()
 want() { (( ${blocks[(Ie)ntdll]} || ${blocks[(Ie)$1]} )) }
 # a name of no block would run nothing in its place, and no step would go red for it
 for b in $blocks; do
-  [[ $b == (ntdll|win32u|1|1b|2|3|3b|4|5|6|8) ]] || { print -u2 "matrix.zsh: there is no block $b"; exit 2 }
+  [[ $b == (ntdll|1|1b|2|3|3b|4|5|6|8) ]] || { print -u2 "matrix.zsh: there is no block $b"; exit 2 }
 done
 if want 6 && ! want 5; then
   print -u2 "matrix.zsh: block 6 needs block 5 with it"
@@ -137,8 +130,7 @@ quiet() {
   shift 3
   [[ $wine == "$engine" ]] && programs=(${programs:#*/(${(~j:|:)engine_bugs}).exe})
   mkdir -p "$log"
-  env -u WINE_HEAT_COUNT -u WINE_HEAT_WAKE -u WINE_HEAT_EVPOOL -u WINE_HEAT_SPIN -u WINE_HEAT_PROF -u WINE_HEAT_EXE -u WINE_HEAT_LOG -u WINE_HEAT_DUMP_MS \
-    -u WINE_WIN32U_SETCURSOR -u WINE_WIN32U_PEEK_YIELD -u GW2_TEST_SETCURSOR_SKIPS -u GW2_TEST_PEEK_NO_YIELD "$@" \
+  env -u WINE_HEAT_COUNT -u WINE_HEAT_WAKE -u WINE_HEAT_EVPOOL -u WINE_HEAT_SPIN -u WINE_HEAT_PROF -u WINE_HEAT_EXE -u WINE_HEAT_LOG -u WINE_HEAT_DUMP_MS "$@" \
     GW2_TEST_PRODUCER_SECONDS=20 GW2_TEST_WAIT_ALLS=20000 GW2_TEST_SECONDS=300 \
     "$run" "$wine" "$work/prefix-$name" $programs
   left=("$log"/*(N) /tmp/heat-*(N))
@@ -392,7 +384,6 @@ requests() {
     fex=()
     if (( n < 3 )); then fex=(FEX_PROFILESTATS=1); fi
     env -u WINE_HEAT_WAKE -u WINE_HEAT_EVPOOL -u WINE_HEAT_SPIN -u WINE_HEAT_PROF \
-      -u WINE_WIN32U_SETCURSOR -u WINE_WIN32U_PEEK_YIELD -u GW2_TEST_SETCURSOR_SKIPS -u GW2_TEST_PEEK_NO_YIELD \
       -u FEX_PROFILESTATS WINE_HEAT_EXE=requests.exe WINE_HEAT_COUNT=1 WINE_HEAT_DUMP_MS=1000 WINE_HEAT_LOG=$log $fex \
       GW2_TEST_SECONDS=300 "$run" "$mine" "$work/prefix-requests" "$exes/requests.exe"
   done
@@ -406,7 +397,6 @@ timers() {
   local n=$1 log=$work/log-timers-$1
   mkdir -p "$log"
   env -u WINE_HEAT_WAKE -u WINE_HEAT_EVPOOL -u WINE_HEAT_SPIN -u WINE_HEAT_PROF -u WINE_HEAT_DUMP_MS \
-    -u WINE_WIN32U_SETCURSOR -u WINE_WIN32U_PEEK_YIELD -u GW2_TEST_SETCURSOR_SKIPS -u GW2_TEST_PEEK_NO_YIELD \
     WINE_HEAT_EXE=timers.exe WINE_HEAT_COUNT=1 WINE_HEAT_LOG=$log \
     GW2_TEST_SECONDS=300 "$run" "$mine" "$work/prefix-timers-$n" "$exes/timers.exe"
 }
@@ -424,34 +414,6 @@ collect
 fi
 # no block after this one runs under the clone of block 5
 rm -rf "$work/fexid"
-
-# 7. jdrly/gw2-on-mac#61
-
-# win32u_run <name> <wine> [<variable>=<value>...]: setcursor once, then requests and peekyield with
-# counting, each with a log folder of its own, under <wine> with the variables
-win32u_run() {
-  local name=$1 wine=$2 exe
-  shift 2
-  for exe in setcursor requests peekyield; do
-    mkdir -p "$work/log-$exe-$name"
-    env -u WINE_HEAT_WAKE -u WINE_HEAT_EVPOOL -u WINE_HEAT_SPIN -u WINE_HEAT_PROF \
-      -u WINE_HEAT_EXE -u WINE_HEAT_COUNT -u WINE_WIN32U_SETCURSOR -u WINE_WIN32U_PEEK_YIELD \
-      -u GW2_TEST_SETCURSOR_SKIPS -u GW2_TEST_PEEK_NO_YIELD "$@" \
-      ${${exe:#setcursor}:+WINE_HEAT_EXE=$exe.exe} ${${exe:#setcursor}:+WINE_HEAT_COUNT=1} \
-      WINE_HEAT_LOG=$work/log-$exe-$name WINE_HEAT_DUMP_MS=1000 GW2_TEST_SECONDS=300 \
-      "$run" "$wine" "$work/prefix-win32u-$name" "$exes/$exe.exe" || return 1
-  done
-}
-
-if (( ${blocks[(I)win32u]} )) && [[ -n $win32u ]]; then
-  side win32u-engine-set win32u_run engine-set "$mine" WINE_WIN32U_SETCURSOR=shm WINE_WIN32U_PEEK_YIELD=off
-  side win32u-mine-unset win32u_run mine-unset "$win32u"
-  side win32u-mine-shm win32u_run mine-shm "$win32u" WINE_WIN32U_SETCURSOR=shm GW2_TEST_SETCURSOR_SKIPS=1
-  side win32u-mine-off win32u_run mine-off "$win32u" WINE_WIN32U_PEEK_YIELD=off GW2_TEST_PEEK_NO_YIELD=1
-  collect
-else
-  print "== win32u: block 7 isn't asked for, or this build has no win32u.so of mine"
-fi
 
 # 8. jdrly/gw2-on-mac#101: timeout three runs under the engine's ntdll.so and three under mine, with
 # no WINE_HEAT_* variable. The two side by side only: its waits have to end no earlier than 45 ms

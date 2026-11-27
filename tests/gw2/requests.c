@@ -21,9 +21,7 @@
  * written after the calls, at most one period on, and adds up this thread's blocks in
  * heat-requests-*.log: 1,010 set_cursor requests, all handle requests, 1,000 repeats and none of
  * the other flags; the messages 0x8001 100 times and 0x8002 50 times; at least 150 get_message and
- * 100 set_queue_mask requests. With GW2_TEST_SETCURSOR_SKIPS=1, for my win32u.so with
- * WINE_WIN32U_SETCURSOR=shm (jdrly/gw2-on-mac#61), the repeats make no request: 10 set_cursor
- * requests, each run's first call, and 0 repeats.
+ * 100 set_queue_mask requests.
  *
  * With FEX_PROFILESTATS=1 as well (jdrly/gw2-on-mac#111), each of this thread's blocks has FEX's
  * line right after its requests line, with the twelve names in their order, and the blocks add up to
@@ -148,9 +146,9 @@ static void check_log(void)
     long long app1 = 0, app2 = 0, other = 0, internal = 0, poll = 0, nopoll = 0, fex_lines = 0, jit = 0;
     long long reqs = 0, least = 0, block_handle = 0, unlisted = 0;  /* of the block being read */
     double cursor_ms = 0;
-    BOOL mine = FALSE, skips = env_is( "GW2_TEST_SETCURSOR_SKIPS", "1" );
+    BOOL mine = FALSE;
     BOOL fex = env_is( "FEX_PROFILESTATS", "1" ), first = FALSE, listed = FALSE;
-    long long want_cursor = skips ? ROUNDS * 2 : ROUNDS * (2 + A_RUN), want_repeat = skips ? 0 : ROUNDS * A_RUN;
+    long long want_cursor = ROUNDS * (2 + A_RUN), want_repeat = ROUNDS * A_RUN;
     FILE *f;
 
     if (!find_log( path, sizeof(path) )) FAIL( "no heat-requests-*.log" );

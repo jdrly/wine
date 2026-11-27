@@ -2,6 +2,8 @@
 
 Decided 2026-11-17. Status: accepted.
 
+Changed on 2026-11-27 by ADR 0024: block 7 is gone, so the window lane runs the window steps alone.
+
 Until now a pull request's run was one line of work: the build, then one tests job that ran the
 window steps and then the matrix. In run 44001124649 (pull request #42) the build took 4.0 minutes
 and the tests job 20.6. Inside that job the window steps took 330 s and `matrix.zsh` 834 s, and

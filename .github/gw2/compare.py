@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# gw2 (jdrly/gw2-on-mac#40, #57, #61): compare my ntdll.so, winemac.so or win32u.so with the one in
+# gw2 (jdrly/gw2-on-mac#40, #57, #61, #374): compare my ntdll.so or winemac.so with the one in
 # Mach9's engine. It reads files and runs nothing.
 #
 #   compare.py baseline <library> <mine> <engine-unix-dir> [strict | structural]
@@ -9,7 +9,7 @@
 #   compare.py fork <library> <fork objects> <build dir> <fork commit>
 #   compare.py selftest <engine-unix-dir>
 #
-# <library> is ntdll.so, winemac.so or win32u.so (LIBRARIES), <engine-unix-dir> the engine's
+# <library> is ntdll.so or winemac.so (LIBRARIES), <engine-unix-dir> the engine's
 # lib/wine/aarch64-unix. Prints a Markdown report and exits 1 when a check fails. Both modes check
 # the linked file's install name, rpaths, libraries, minos and pipe2, and that it imports nothing
 # from an @rpath library that the engine's file doesn't; for ntdll.so also the seven names
@@ -83,11 +83,8 @@ LIBRARIES = {
     # macdrv_functions is DXMT's private contract, without a version field (Mach9's docs/maintenance.md)
     "winemac.so": dict(target="dlls/winemac.drv/winemac.so", objects="dlls/winemac.drv", more_exports=False,
                        dependents=[], contract=None, per_commit=None),
-    # win32u's unix objects are in dlls/win32u and dlls/win32u/dibdrv, where bitblt.o and dc.o are
-    # other files of the same name
-    "win32u.so": dict(target="dlls/win32u/win32u.so", objects="dlls/win32u", subdirs=("dibdrv",), more_exports=False,
-                      dependents=["opengl32.so", "winemac.so", "wineps.so", "winevulkan.so"], contract=None,
-                      per_commit=None),
+    # Up to jdrly/gw2-on-mac#374 win32u.so was here too, with its objects in dlls/win32u and
+    # dlls/win32u/dibdrv: a library's "subdirs" names such subdirectories of its objects
 }
 
 
@@ -1633,43 +1630,8 @@ def selftest(engine_dir):
     if objc.functions() != {("cocoa_window.m", "-[WineWindow a]"): (0x100, 8)}:
         failed.append(f"debug map: a method named by its source, not {objc.functions()}")
 
-    # win32u.so: bitblt.o and dibdrv/bitblt.o are two objects, a PE object is in aarch64-windows/,
-    # and the debug map names dibdrv/bitblt.c's function apart from bitblt.c's
-    with tempfile.TemporaryDirectory() as tmp:
-        makefile, log = os.path.join(tmp, "Makefile"), os.path.join(tmp, "make.log")
-        with open(makefile, "w") as f:
-            f.write("dlls/win32u/bitblt.o: /src/dlls/win32u/bitblt.c\n"
-                    "dlls/win32u/dibdrv/bitblt.o: /src/dlls/win32u/dibdrv/bitblt.c /src/dlls/win32u/dibdrv/dibdrv.h\n"
-                    "dlls/win32u/aarch64-windows/main.o: /src/dlls/win32u/main.c\n")
-        with open(log, "w") as f:
-            f.write("clang -c -o dlls/win32u/bitblt.o ../src/dlls/win32u/bitblt.c\n"
-                    "clang -c -o dlls/win32u/dibdrv/bitblt.o ../src/dlls/win32u/dibdrv/bitblt.c\n"
-                    "aarch64-w64-mingw32-clang -c -o dlls/win32u/aarch64-windows/main.o main.c\n"
-                    "clang -o dlls/win32u/win32u.so -dynamiclib dlls/win32u/bitblt.o dlls/win32u/dibdrv/bitblt.o\n")
-        spec = LIBRARIES["win32u.so"]
-        inputs = makefile_inputs(makefile, "/src", spec["objects"], spec["subdirs"])
-        compiles, link = build_commands(log, "win32u.so")
-        for sub in ("", "dibdrv", "aarch64-windows"):
-            os.makedirs(os.path.join(tmp, "objs", sub), exist_ok=True)
-            open(os.path.join(tmp, "objs", sub, "main.o" if sub == "aarch64-windows" else "bitblt.o"), "wb").close()
-        files = sorted(object_files(os.path.join(tmp, "objs"), spec["subdirs"]))
-    if inputs != {"bitblt.o": {"dlls/win32u/bitblt.c"},
-                  "dibdrv/bitblt.o": {"dlls/win32u/dibdrv/bitblt.c", "dlls/win32u/dibdrv/dibdrv.h"}}:
-        failed.append(f"win32u.so: Makefile inputs read {inputs}")
-    if sorted(compiles) != ["bitblt.o", "dibdrv/bitblt.o"] or not link \
-            or link[0] != ["dlls/win32u/bitblt.o", "dlls/win32u/dibdrv/bitblt.o"]:
-        failed.append(f"win32u.so: make log read {compiles} {link}")
-    if files != ["bitblt.o", "dibdrv/bitblt.o"]:
-        failed.append(f"win32u.so: object files {files}")
-    bad, changed, _, _, _ = sort_objects({"bitblt.o": "same", "dibdrv/bitblt.o": "base"},
-                                         {"bitblt.o": "same", "dibdrv/bitblt.o": "head"}, inputs,
-                                         {"dlls/win32u/dibdrv/dibdrv.h"}, {"bitblt.o": "cc"}, {"bitblt.o": "cc"},
-                                         load=lambda o: {
-                                             "same": fake_object(four, rel(0), b"", functions=(("_f", 0),)),
-                                             "base": fake_object(four, rel(0), b"", functions=(("_f", 0),)),
-                                             "head": fake_object(four, rel(1), b"", functions=(("_f", 0),))}[o])
-    if bad or changed != ["dibdrv/bitblt.c: f"]:
-        failed.append(f"win32u.so: a touched dibdrv/bitblt.o beside an untouched bitblt.o, not {bad} {changed}")
+    # the debug map names a function of a source in a subdirectory (win32u's dibdrv/bitblt.c, up to
+    # jdrly/gw2-on-mac#374) apart from one of the same name in the directory above
     two = MachO.__new__(MachO)
     two.syms = [("/build/../src/dlls/win32u/", N_SO, 0, 0, 0), ("bitblt.c", N_SO, 0, 0, 0), ("_f", N_FUN, 1, 0, 0x100),
                 ("", N_FUN, 0, 0, 8), ("", N_SO, 1, 0, 0),
